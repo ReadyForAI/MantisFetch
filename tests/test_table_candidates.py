@@ -299,3 +299,51 @@ def test_write_tables_does_not_link_unrelated_adjacent_tables(tmp_path):
 
     assert entries[0]["continued_to"] is None
     assert entries[1]["continued_from"] is None
+
+
+def test_write_tables_skips_when_extract_tables_false(tmp_path):
+    from larkscout_docreader import (
+        OCRBlocksSidecar,
+        OCRPageBlocks,
+        PageContent,
+        ParsedDocument,
+        _write_tables,
+    )
+
+    parsed = ParsedDocument(
+        filename="scan.pdf",
+        file_type="pdf",
+        total_pages=1,
+        pages=[
+            PageContent(
+                page_num=1,
+                text="品名 金额\n软件 100",
+                tables=["| 品名 | 金额 |\n| --- | --- |\n| 软件 | 100 |"],
+            )
+        ],
+        sections=[],
+        ocr_page_count=1,
+        table_count=0,
+        ocr_blocks=OCRBlocksSidecar(
+            doc_id="DOC-008",
+            pages=(
+                OCRPageBlocks(
+                    page=1,
+                    width=1000,
+                    height=1000,
+                    blocks=(
+                        _block("p1-b0001", "品名", (100, 100, 180, 120)),
+                        _block("p1-b0002", "金额", (300, 100, 360, 120)),
+                        _block("p1-b0003", "软件", (100, 140, 180, 160)),
+                        _block("p1-b0004", "100", (300, 140, 360, 160)),
+                    ),
+                ),
+            ),
+        ),
+        extract_tables=False,
+    )
+
+    entries = _write_tables(tmp_path, parsed)
+
+    assert entries == []
+    assert not (tmp_path / "tables").exists()

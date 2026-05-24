@@ -14,6 +14,37 @@ def _make_png_bytes() -> bytes:
     return out.getvalue()
 
 
+def _make_docx_with_external_image_link(path: Path, target_url: str) -> None:
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:drawing><a:blip r:embed="rId1"/></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>
+"""
+    rels_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    Target="{target_url}" TargetMode="External"/>
+</Relationships>
+"""
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml"
+    ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("word/document.xml", document_xml)
+        zf.writestr("word/_rels/document.xml.rels", rels_xml)
+
+
 def _make_docx_with_image(path: Path, image_path: Path, image_count: int = 1) -> None:
     body_parts = [
         '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>学历证明</w:t></w:r></w:p>',
@@ -151,6 +182,18 @@ def test_count_word_embedded_image_references(tmp_path):
     _make_docx_with_image(docx_path, image_path, image_count=3)
 
     assert docreader._count_word_embedded_image_references(docx_path) == 3
+
+
+def test_count_word_embedded_image_references_ignores_external_links(tmp_path):
+    import larkscout_docreader as docreader
+
+    docx_path = tmp_path / "external.docx"
+    _make_docx_with_external_image_link(docx_path, "https://example.com/banner.png")
+
+    # External-mode relationships point outside the .docx package, so they
+    # cannot be OCR'd and must not inflate the threshold count.
+    assert docreader._count_word_embedded_image_references(docx_path) == 0
+    assert docreader._word_image_relationships(docx_path) == {}
 
 
 def test_parse_rejects_word_image_ocr_over_threshold(tmp_path, client):

@@ -478,7 +478,7 @@ def _detect_text_locale(text: str) -> str:
     return "zh" if cjk >= 20 or cjk > alpha else "en"
 
 
-def _parsed_document_locale(parsed: "ParsedDocument") -> str:
+def _parsed_document_locale(parsed: ParsedDocument) -> str:
     value = str(parsed.metadata.get("summary_locale") or parsed.metadata.get("language") or "").strip()
     if value.startswith(("zh", "en")):
         return value[:2]
@@ -633,6 +633,7 @@ class ParsedDocument:
     images: list[EmbeddedImage] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
     ocr_blocks: OCRBlocksSidecar | None = None
+    extract_tables: bool = True
 
 
 @dataclass(frozen=True)
@@ -2497,8 +2498,9 @@ def parse_pdf(
         enhanced = llm_ocr_results.get(page_num) or local_ocr_results.get(page_num)
         if enhanced:
             page_text = _cleanup_ocr_text(_usable_page_text(raw_text, enhanced))
-            page_text, page_tables = _extract_tables_from_ocr_text(page_text, page_num, total_pages)
-            ocr_table_count += len(page_tables)
+            if extract_tables:
+                page_text, page_tables = _extract_tables_from_ocr_text(page_text, page_num, total_pages)
+                ocr_table_count += len(page_tables)
         pages.append(
             PageContent(
                 page_num=page_num,
@@ -2573,6 +2575,7 @@ def parse_pdf(
             if local_ocr_layout_pages
             else None
         ),
+        extract_tables=extract_tables,
         metadata={
             "document_profile": profile.name if profile else None,
             "pdf_parse_mode": selected_mode,
@@ -2671,7 +2674,13 @@ def _word_image_relationships(docx_path: Path) -> dict[str, str]:
         rel_id = str(rel.attrib.get("Id") or "")
         target = str(rel.attrib.get("Target") or "")
         rel_type = str(rel.attrib.get("Type") or "")
+        target_mode = str(rel.attrib.get("TargetMode") or "")
         if not rel_id or not target:
+            continue
+        if target_mode.lower() == "external":
+            # Linked (not embedded) images live outside the .docx package;
+            # they cannot be read via zipfile and must not count toward
+            # embedded-image limits.
             continue
         if "image" not in rel_type.lower() and not target.lower().startswith("media/"):
             continue
@@ -3050,6 +3059,7 @@ def parse_word(
         sections=sections,
         table_count=table_count,
         images=images,
+        extract_tables=extract_tables,
         metadata={
             "document_profile": profile.name if profile else None,
             "word_images": {
@@ -4981,6 +4991,8 @@ def _build_structured_table_entries(
 
 
 def _write_tables(doc_dir: Path, parsed: ParsedDocument) -> list[dict[str, Any]]:
+    if not parsed.extract_tables:
+        return []
     table_entries = _build_table_entries(parsed)
     structured_entries = _build_structured_table_entries(parsed, start_index=len(table_entries) + 1)
     if not table_entries and not structured_entries:
@@ -5379,9 +5391,7 @@ def rerun_region_ocr(
         artifact_id = requested_artifact_id
     else:
         run_hash = hashlib.sha256(
-            f"{doc_id}:{page_num}:{crop['artifact_id']}:{backend_kind}:{selected_backend}:{time.time_ns()}".encode(
-                "utf-8"
-            )
+            f"{doc_id}:{page_num}:{crop['artifact_id']}:{backend_kind}:{selected_backend}:{time.time_ns()}".encode()
         ).hexdigest()[:16]
         artifact_id = f"region-ocr-p{page_num:04d}-{run_hash}"
     region_dir = doc_dir / REGION_OCR_ARTIFACT_DIR
