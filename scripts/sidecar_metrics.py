@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_ENDPOINT_FILES = {
     "manifest": "manifest.json",
     "digest": "digest.md",
