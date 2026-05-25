@@ -269,7 +269,9 @@ def test_parse_allows_word_image_ocr_when_max_images_keeps_request_under_thresho
     body = resp.json()
     assert body["image_count"] == 1
     manifest = json.loads(
-        (tmp_path / "docs" / body["doc_id"] / "manifest.json").read_text(encoding="utf-8")
+        (tmp_path / "docs" / "General" / body["doc_id"] / "manifest.json").read_text(
+            encoding="utf-8"
+        )
     )
     word_images = manifest["parse_metadata"]["word_images"]
     assert word_images["embedded_image_count"] == 3

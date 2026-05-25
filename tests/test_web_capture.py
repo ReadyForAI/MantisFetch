@@ -63,7 +63,12 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
             try:
                 resp = client.post(
                     "/web/capture",
-                    json={"url": "https://example.com", "tags": ["test"], "extract_tables": True},
+                    json={
+                        "url": "https://example.com",
+                        "content_type": "Knowledge",
+                        "tags": ["test"],
+                        "extract_tables": True,
+                    },
                 )
             finally:
                 lb._browser = orig_browser
@@ -76,7 +81,7 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
         assert data["table_count"] == 1
 
         # Files should be written to the temp docs dir
-        doc_dir = docs_dir / data["doc_id"]
+        doc_dir = docs_dir / "Knowledge" / data["doc_id"]
         assert (doc_dir / "digest.md").exists()
         assert (doc_dir / "manifest.json").exists()
         assert (doc_dir / "sections").is_dir()
@@ -89,6 +94,9 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
         assert data["doc_id"] in ids
 
         entry = next(d for d in index["documents"] if d["id"] == data["doc_id"])
+        assert data["content_type"] == "Knowledge"
+        assert entry["content_type"] == "Knowledge"
+        assert entry["storage_path"] == f"Knowledge/{data['doc_id']}"
         assert entry["source"] == "web_capture"
         assert entry["tags"] == ["test"]
         assert entry["source_url"] == "https://example.com"

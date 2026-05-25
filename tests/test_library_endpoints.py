@@ -14,9 +14,10 @@ from starlette.testclient import TestClient
 # ---------------------------------------------------------------------------
 
 
-def _setup_doc(docs_dir: Path, doc_id: str = "DOC-001") -> Path:
+def _setup_doc(docs_dir: Path, doc_id: str = "DOC-001", content_type: str | None = None) -> Path:
     """Create a minimal document directory with all tier files."""
-    doc_dir = docs_dir / doc_id
+    storage_path = f"{content_type}/{doc_id}" if content_type else doc_id
+    doc_dir = docs_dir / storage_path
     doc_dir.mkdir(parents=True)
     (doc_dir / "digest.md").write_text(f"# {doc_id} digest\n\nShort summary.", encoding="utf-8")
     (doc_dir / "brief.md").write_text(f"# {doc_id} brief\n\nDetailed brief.", encoding="utf-8")
@@ -45,6 +46,8 @@ def _setup_doc(docs_dir: Path, doc_id: str = "DOC-001") -> Path:
         "filename": "test.pdf",
         "file_type": "pdf",
         "source": "upload",
+        "content_type": content_type or "General",
+        "storage_path": storage_path,
         "metadata": {"customer": "ACME", "contract_type": "MSA"},
         "source_file": {
             "kind": "upload",
@@ -107,6 +110,8 @@ def _setup_doc(docs_dir: Path, doc_id: str = "DOC-001") -> Path:
                 "id": doc_id,
                 "filename": "test.pdf",
                 "file_type": "pdf",
+                "content_type": content_type or "General",
+                "storage_path": storage_path,
                 "source": "upload",
                 "source_url": "test.pdf",
                 "pages": 2,
@@ -114,7 +119,7 @@ def _setup_doc(docs_dir: Path, doc_id: str = "DOC-001") -> Path:
                 "ocr_pages": 0,
                 "tables": 1,
                 "digest": "Short summary.",
-                "digest_path": f"docs/{doc_id}/digest.md",
+                "digest_path": f"docs/{storage_path}/digest.md",
                 "tags": ["test", "Q3"],
                 "created_at": "2026-01-01T00:00:00Z",
                 "content_hash": "sha256:abc",
@@ -325,6 +330,28 @@ class TestLibraryManifest:
             with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-999/manifest")
         assert resp.status_code == 404
+
+    def test_categorized_doc_is_read_by_doc_id(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_dir = Path(tmp)
+            _setup_doc(docs_dir, doc_id="DOC-777", content_type="Contract")
+            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+                manifest = client.get("/doc/library/DOC-777/manifest")
+                digest = client.get("/doc/library/DOC-777/digest")
+                search = client.get("/doc/library/search?content_type=Contract")
+                text_search = client.get(
+                    "/doc/library/search_text?q=payment&scope=section&content_type=Contract"
+                )
+
+        assert manifest.status_code == 200
+        assert manifest.json()["content_type"] == "Contract"
+        assert digest.status_code == 200
+        assert "digest" in digest.json()["content"].lower()
+        assert search.status_code == 200
+        assert search.json()["results"][0]["doc_id"] == "DOC-777"
+        assert search.json()["results"][0]["content_type"] == "Contract"
+        assert text_search.status_code == 200
+        assert text_search.json()["results"][0]["doc_id"] == "DOC-777"
 
 
 class TestLibrarySidecars:

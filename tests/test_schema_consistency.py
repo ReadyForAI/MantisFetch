@@ -9,7 +9,7 @@ import pytest
 
 # Required fields that every doc-index entry MUST contain
 DOC_INDEX_REQUIRED_FIELDS = {
-    "id", "filename", "file_type", "source", "source_url",
+    "id", "filename", "file_type", "content_type", "storage_path", "source", "source_url",
     "pages", "sections", "ocr_pages", "tables",
     "digest", "digest_path", "tags", "created_at", "content_hash",
 }
@@ -153,7 +153,11 @@ class TestManifestBrowserFormat:
                 digest="digest", tags=[], content_hash="sha256:x",
                 docs_dir=docs_dir,
             )
-            manifest = json.loads((docs_dir / "WEB-010" / "manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (docs_dir / "General" / "WEB-010" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             missing = MANIFEST_REQUIRED_FIELDS - set(manifest.keys())
             assert not missing, f"Browser manifest missing fields: {missing}"
 
@@ -168,7 +172,11 @@ class TestManifestBrowserFormat:
                 digest="d", tags=[], content_hash="sha256:y",
                 docs_dir=docs_dir,
             )
-            manifest = json.loads((docs_dir / "WEB-011" / "manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (docs_dir / "General" / "WEB-011" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             prov = manifest["provenance"]
             missing = PROVENANCE_REQUIRED_FIELDS - set(prov.keys())
             assert not missing, f"Browser provenance missing fields: {missing}"
@@ -189,7 +197,11 @@ class TestManifestBrowserFormat:
                 digest="d", tags=[], content_hash="sha256:z",
                 docs_dir=docs_dir,
             )
-            manifest = json.loads((docs_dir / "WEB-012" / "manifest.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (docs_dir / "General" / "WEB-012" / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
             for sec in manifest["sections"]:
                 missing = SECTION_REQUIRED_FIELDS - set(sec.keys())
                 assert not missing, f"Browser manifest section missing fields: {missing} in {sec}"

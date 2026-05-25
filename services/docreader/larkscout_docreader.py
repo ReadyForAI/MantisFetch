@@ -4057,8 +4057,11 @@ def write_output(
     original_path: str | None = None,
     metadata: dict[str, Any] | None = None,
     source_record: dict[str, Any] | None = None,
+    content_type: str | None = None,
 ):
-    doc_dir = output_dir / doc_id
+    normalized_content_type = _normalize_content_type(content_type) if content_type else None
+    storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
+    doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir)
@@ -4078,6 +4081,8 @@ def write_output(
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
+        "content_type": normalized_content_type or "General",
+        "storage_path": storage_path,
         "sections": [
             {
                 "index": sec.index,
@@ -4168,6 +4173,8 @@ def write_output(
         "filename": parsed.filename,
         "file_type": parsed.file_type,
         "source": source,
+        "content_type": normalized_content_type or "General",
+        "storage_path": storage_path,
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
@@ -4219,6 +4226,8 @@ def write_output(
         content_hash=content_hash,
         metadata=metadata,
         source_record=source_record,
+        content_type=normalized_content_type,
+        storage_path=storage_path,
     )
 
 
@@ -4231,8 +4240,11 @@ def write_output_extract_only(
     metadata: dict[str, Any] | None = None,
     source_record: dict[str, Any] | None = None,
     summary_placeholder: str | None = None,
+    content_type: str | None = None,
 ):
-    doc_dir = output_dir / doc_id
+    normalized_content_type = _normalize_content_type(content_type) if content_type else None
+    storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
+    doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir)
@@ -4252,6 +4264,8 @@ def write_output_extract_only(
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
+        "content_type": normalized_content_type or "General",
+        "storage_path": storage_path,
         "sections": [
             {
                 "index": sec.index,
@@ -4317,6 +4331,8 @@ def write_output_extract_only(
         "filename": parsed.filename,
         "file_type": parsed.file_type,
         "source": source,
+        "content_type": normalized_content_type or "General",
+        "storage_path": storage_path,
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
@@ -4363,6 +4379,8 @@ def write_output_extract_only(
         content_hash=content_hash,
         metadata=metadata,
         source_record=source_record,
+        content_type=normalized_content_type,
+        storage_path=storage_path,
     )
     logger.info(f"Text extraction complete (no summary): {doc_dir}")
 
@@ -4375,6 +4393,7 @@ def _generate_deferred_summary(
     tags: list[str] | None,
     metadata: dict[str, Any] | None,
     source_record: dict[str, Any] | None,
+    content_type: str | None = None,
 ) -> None:
     logger.info("Deferred summary thread started: %s", doc_id)
     attempts = _current_summary_attempts(parsed) + 1
@@ -4402,6 +4421,7 @@ def _generate_deferred_summary(
             source="upload",
             metadata=metadata,
             source_record=source_record,
+            content_type=content_type,
             summary_placeholder=_summary_placeholder_text(
                 "running", locale=_parsed_document_locale(parsed)
             ),
@@ -4426,6 +4446,7 @@ def _generate_deferred_summary(
             original_path=str(parsed.filename),
             metadata=metadata,
             source_record=source_record,
+            content_type=content_type,
         )
         logger.info("Deferred summary complete: %s", doc_id)
     except Exception as exc:
@@ -4447,6 +4468,7 @@ def _generate_deferred_summary(
             source="upload",
             metadata=metadata,
             source_record=source_record,
+            content_type=content_type,
             summary_placeholder=_summary_placeholder_text(
                 "failed", error_message, locale=_parsed_document_locale(parsed)
             ),
@@ -4474,6 +4496,8 @@ def _update_doc_index(
     content_hash: str | None = None,
     metadata: dict[str, Any] | None = None,
     source_record: dict[str, Any] | None = None,
+    content_type: str | None = None,
+    storage_path: str | None = None,
 ):
     """Update doc-index.json with threading lock and atomic write."""
     with _doc_index_lock:
@@ -4491,11 +4515,20 @@ def _update_doc_index(
         if not isinstance(index.get("documents"), list):
             index["documents"] = []
         index["documents"] = [d for d in index["documents"] if d.get("id") != meta["doc_id"]]
+        normalized_content_type = _normalize_content_type(
+            content_type or meta.get("content_type") or "General"
+        )
+        rel_storage_path = storage_path or meta.get("storage_path") or _doc_storage_rel_path(
+            meta["doc_id"],
+            normalized_content_type if content_type or meta.get("storage_path") else None,
+        )
 
         entry: dict[str, Any] = {
             "id": meta["doc_id"],
             "filename": meta["filename"],
             "file_type": meta["file_type"],
+            "content_type": normalized_content_type,
+            "storage_path": rel_storage_path,
             "source": source,
             "source_url": source_url or "",
             "pages": meta["total_pages"],
@@ -4503,7 +4536,7 @@ def _update_doc_index(
             "ocr_pages": meta.get("ocr_page_count", 0),
             "tables": meta.get("table_count", 0),
             "digest": digest[:200],
-            "digest_path": f"docs/{meta['doc_id']}/digest.md",
+            "digest_path": f"docs/{rel_storage_path}/digest.md",
             "tags": tags or [],
             "created_at": meta["created_at"],
             "content_hash": content_hash or "",
@@ -4644,6 +4677,8 @@ STORE_SOURCE_FILES = os.environ.get("LARKSCOUT_STORE_SOURCE_FILES", "true").lowe
 _DOC_ID_RE = re.compile(r"^(?=.{1,80}$)(?=.*\d)[A-Za-z0-9](?:[A-Za-z0-9-]{0,78}[A-Za-z0-9])?$")
 _TABLE_ID_RE = re.compile(r"^(table-)?\d+$")
 _IMAGE_ID_RE = re.compile(r"^(IMG-)?\d{1,6}$", re.IGNORECASE)
+CONTENT_TYPE_DIRS = ("General", "Contract", "Bid", "Knowledge")
+_CONTENT_TYPE_ALIASES = {name.lower(): name for name in CONTENT_TYPE_DIRS}
 
 
 def _validate_doc_id(doc_id: str) -> None:
@@ -4680,6 +4715,99 @@ def _get_docs_dir() -> Path:
     return d
 
 
+def _normalize_content_type(value: str | None) -> str:
+    raw = (value or "General").strip()
+    normalized = _CONTENT_TYPE_ALIASES.get(raw.lower())
+    if not normalized:
+        allowed = ", ".join(CONTENT_TYPE_DIRS)
+        raise HTTPException(422, f"content_type must be one of: {allowed}")
+    return normalized
+
+
+def _doc_storage_rel_path(doc_id: str, content_type: str | None = None) -> str:
+    if content_type is None:
+        return doc_id
+    return f"{_normalize_content_type(content_type)}/{doc_id}"
+
+
+def _doc_storage_dir(docs_dir: Path, doc_id: str, content_type: str | None = None) -> Path:
+    return docs_dir / _doc_storage_rel_path(doc_id, content_type)
+
+
+def _resolve_index_storage_path(docs_dir: Path, storage_path: Any) -> Path | None:
+    if not isinstance(storage_path, str) or not storage_path.strip():
+        return None
+    raw_path = Path(storage_path)
+    if raw_path.is_absolute() or ".." in raw_path.parts:
+        return None
+    candidate = (docs_dir / raw_path).resolve()
+    try:
+        candidate.relative_to(docs_dir.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
+def _find_doc_index_entry(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:
+    for entry in _load_doc_index(docs_dir):
+        if entry.get("id") == doc_id:
+            return entry
+    return None
+
+
+def _resolve_doc_dir(docs_dir: Path, doc_id: str) -> Path:
+    _validate_doc_id(doc_id)
+    entry = _find_doc_index_entry(docs_dir, doc_id)
+    if entry:
+        indexed_path = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
+        if indexed_path and (indexed_path / "manifest.json").exists():
+            return indexed_path
+        indexed_type = entry.get("content_type")
+        if isinstance(indexed_type, str):
+            typed_path = _doc_storage_dir(docs_dir, doc_id, indexed_type)
+            if (typed_path / "manifest.json").exists():
+                return typed_path
+
+    for content_type in CONTENT_TYPE_DIRS:
+        typed_path = _doc_storage_dir(docs_dir, doc_id, content_type)
+        if (typed_path / "manifest.json").exists():
+            return typed_path
+
+    legacy_path = docs_dir / doc_id
+    if (legacy_path / "manifest.json").exists():
+        return legacy_path
+    raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+
+
+def _doc_exists_anywhere(docs_dir: Path, doc_id: str) -> bool:
+    try:
+        _resolve_doc_dir(docs_dir, doc_id)
+        return True
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return False
+        raise
+
+
+def _doc_content_type(docs_dir: Path, doc_id: str) -> str:
+    entry = _find_doc_index_entry(docs_dir, doc_id)
+    if entry and isinstance(entry.get("content_type"), str):
+        try:
+            return _normalize_content_type(entry.get("content_type"))
+        except HTTPException:
+            pass
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
+    manifest_path = doc_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest, dict) and isinstance(manifest.get("content_type"), str):
+                return _normalize_content_type(manifest.get("content_type"))
+        except Exception:
+            pass
+    return "General"
+
+
 def _doc_id_strategy(requested_strategy: str | None = None) -> str:
     strategy = (requested_strategy or os.environ.get("LARKSCOUT_DOC_ID_STRATEGY", "counter")).strip().lower()
     return strategy if strategy in {"counter", "source_filename"} else "counter"
@@ -4700,7 +4828,7 @@ def _next_filename_doc_id(docs_dir: Path, filename: str) -> str | None:
         return None
     candidate = base
     suffix = 2
-    while (docs_dir / candidate).exists():
+    while _doc_exists_anywhere(docs_dir, candidate):
         numbered = f"{base}-{suffix}"
         candidate = numbered[:80].rstrip("-")
         suffix += 1
@@ -4730,6 +4858,8 @@ def _resolve_doc_id(
 
 class ParseResponse(BaseModel):
     doc_id: str
+    content_type: str = "General"
+    storage_path: str = ""
     filename: str
     file_type: str
     total_pages: int
@@ -4766,6 +4896,8 @@ class SearchResult(BaseModel):
     doc_id: str
     filename: str
     file_type: str
+    content_type: str = "General"
+    storage_path: str | None = None
     digest: str
     tags: list[str] = []
     source: str = "upload"
@@ -5146,7 +5278,7 @@ def _load_manifest_dict(doc_dir: Path, doc_id: str) -> dict[str, Any]:
 
 def _resolve_doc_source_file(docs_dir: Path, doc_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     _validate_doc_id(doc_id)
-    doc_dir = docs_dir / doc_id
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     manifest = _load_manifest_dict(doc_dir, doc_id)
     source_file = manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
     source_ref = str(source_file.get("ref") or "")
@@ -5267,7 +5399,7 @@ def export_pdf_region_crop(
     if str(manifest.get("file_type") or "").lower() != "pdf" and source_path.suffix.lower() != ".pdf":
         raise HTTPException(422, "region crop export currently supports PDF source files")
 
-    doc_dir = docs_dir / doc_id
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     try:
         pdf = fitz.open(str(source_path))
     except Exception as exc:
@@ -5359,7 +5491,7 @@ def rerun_region_ocr(
     requested_artifact_id = _safe_artifact_id(run_id) if run_id else None
     if requested_artifact_id:
         _validate_doc_id(doc_id)
-        doc_dir = docs_dir / doc_id
+        doc_dir = _resolve_doc_dir(docs_dir, doc_id)
         text_rel = f"{REGION_OCR_ARTIFACT_DIR}/{requested_artifact_id}.txt"
         metadata_rel = f"{REGION_OCR_ARTIFACT_DIR}/{requested_artifact_id}.json"
         if (doc_dir / text_rel).exists() or (doc_dir / metadata_rel).exists():
@@ -5372,7 +5504,7 @@ def rerun_region_ocr(
         dpi=dpi,
         coordinate_system=coordinate_system,
     )
-    doc_dir = docs_dir / doc_id
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     crop_path = doc_dir / crop["output_path"]
     image_bytes = crop_path.read_bytes()
 
@@ -5516,7 +5648,7 @@ def generate_visual_debug_artifacts(
     if dpi < 36 or dpi > 600:
         raise HTTPException(422, "dpi must be between 36 and 600")
     source_path, _manifest, source_file = _resolve_doc_source_file(docs_dir, doc_id)
-    doc_dir = docs_dir / doc_id
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     ocr_pages = _load_ocr_debug_overlays(doc_dir) if include_ocr_blocks else {}
     table_pages = _load_table_debug_overlays(doc_dir) if include_tables else {}
     pages_to_render = sorted(set(ocr_pages) | set(table_pages))
@@ -5679,7 +5811,10 @@ def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
 
 
 def _doc_entry_from_manifest(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:
-    doc_dir = docs_dir / doc_id
+    try:
+        doc_dir = _resolve_doc_dir(docs_dir, doc_id)
+    except HTTPException:
+        return None
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
         return None
@@ -5702,6 +5837,8 @@ def _doc_entry_from_manifest(docs_dir: Path, doc_id: str) -> dict[str, Any] | No
 
     source_file = manifest.get("source_file") or meta.get("source_file") or {}
     provenance = manifest.get("provenance") or {}
+    content_type = _normalize_content_type(manifest.get("content_type") or meta.get("content_type") or "General")
+    storage_path = str(manifest.get("storage_path") or meta.get("storage_path") or doc_dir.relative_to(docs_dir))
     sections = manifest.get("sections") if isinstance(manifest.get("sections"), list) else []
     images = manifest.get("images") if isinstance(manifest.get("images"), list) else []
     parse_metadata = manifest.get("parse_metadata") if isinstance(manifest.get("parse_metadata"), dict) else {}
@@ -5718,6 +5855,8 @@ def _doc_entry_from_manifest(docs_dir: Path, doc_id: str) -> dict[str, Any] | No
         "id": doc_id,
         "filename": manifest.get("filename") or meta.get("filename") or "",
         "file_type": manifest.get("file_type") or meta.get("file_type") or "",
+        "content_type": content_type,
+        "storage_path": storage_path,
         "source": manifest.get("source") or provenance.get("source") or "upload",
         "source_url": provenance.get("source_url") or "",
         "pages": meta.get("total_pages", 0),
@@ -5726,7 +5865,7 @@ def _doc_entry_from_manifest(docs_dir: Path, doc_id: str) -> dict[str, Any] | No
         "tables": meta.get("table_count", 0),
         "images": len(images) if images else meta.get("image_count", 0),
         "digest": digest,
-        "digest_path": f"docs/{doc_id}/digest.md",
+        "digest_path": f"docs/{storage_path}/digest.md",
         "tags": meta.get("tags", []),
         "created_at": provenance.get("created_at") or meta.get("created_at"),
         "content_hash": provenance.get("content_hash") or "",
@@ -5771,7 +5910,7 @@ def _load_doc_tags(docs_dir: Path, doc_id: str) -> list[str]:
 
 
 def _load_parsed_document_from_storage(docs_dir: Path, doc_id: str) -> tuple[ParsedDocument, dict[str, Any], dict[str, Any]]:
-    doc_dir = docs_dir / doc_id
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
@@ -5842,12 +5981,20 @@ def _filter_documents(
     documents: list[dict[str, Any]],
     *,
     file_type: str | None = None,
+    content_type: str | None = None,
     tags: str | None = None,
     metadata_filters: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     filtered = documents
     if file_type:
         filtered = [d for d in filtered if d.get("file_type") == file_type]
+    if content_type:
+        normalized_content_type = _normalize_content_type(content_type)
+        filtered = [
+            d
+            for d in filtered
+            if _normalize_content_type(d.get("content_type") or "General") == normalized_content_type
+        ]
     if tags:
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         filtered = [d for d in filtered if any(t in (d.get("tags") or []) for t in tag_list)]
@@ -5877,7 +6024,7 @@ def _resolve_manifest_section_path(doc_dir: Path, rel_path: str) -> Path | None:
 
 def _load_section_records(docs_dir: Path, doc_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     _validate_doc_id(doc_id)
-    doc_dir = docs_dir / doc_id
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
@@ -6111,6 +6258,7 @@ async def health():
 async def api_parse_doc(
     file: UploadFile = File(...),
     doc_id: str | None = Form(None),
+    content_type: str = Form("General"),
     generate_summary: bool = Form(True),
     summary_mode: str | None = Form(None),
     document_profile: str | None = Form(None),
@@ -6138,6 +6286,10 @@ async def api_parse_doc(
         docs_dir = _get_docs_dir()
         t0 = time.time()
         parsed_metadata = _parse_metadata_form(metadata)
+        selected_content_type = _normalize_content_type(
+            content_type or str(parsed_metadata.get("content_type") or "General")
+        )
+        parsed_metadata.setdefault("content_type", selected_content_type)
         requested_parse_mode = (
             str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
             or os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "").strip()
@@ -6217,7 +6369,8 @@ async def api_parse_doc(
                 )
             # Avoid touching counters or storage for requests rejected by size validation.
             d_id = _resolve_doc_id(docs_dir, filename, doc_id, id_strategy)
-            tmp_dir = docs_dir / d_id / ".tmp"
+            doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
+            tmp_dir = doc_storage_dir / ".tmp"
             tmp_dir.mkdir(parents=True, exist_ok=True)
             tmp_path = tmp_dir / filename
             tmp_path.write_bytes(content)
@@ -6261,7 +6414,7 @@ async def api_parse_doc(
                         extract_tables=extract_tables,
                         max_tables_per_page=max_tables_per_page,
                         concurrency=concurrency,
-                        cache_dir=docs_dir / d_id,
+                        cache_dir=doc_storage_dir,
                         field_ocr_profile=field_ocr_profile,
                         field_ocr_config=requested_field_ocr_config,
                         parse_mode=requested_parse_mode,
@@ -6337,7 +6490,7 @@ async def api_parse_doc(
         # Summarize + write
         digest = _summary_placeholder_text("pending", locale=parsed_locale)
         source_record = (
-            _persist_source_file(docs_dir / d_id, filename, content) if STORE_SOURCE_FILES else {}
+            _persist_source_file(doc_storage_dir, filename, content) if STORE_SOURCE_FILES else {}
         )
         try:
             if summary_mode == "sync":
@@ -6360,6 +6513,7 @@ async def api_parse_doc(
                         original_path=str(filename),
                         metadata=parsed_metadata,
                         source_record=source_record,
+                        content_type=selected_content_type,
                     ),
                 )
             else:
@@ -6375,6 +6529,7 @@ async def api_parse_doc(
                         source="upload",
                         metadata=parsed_metadata,
                         source_record=source_record,
+                        content_type=selected_content_type,
                     ),
                 )
                 if summary_mode == "defer":
@@ -6388,6 +6543,7 @@ async def api_parse_doc(
                             parsed_tags,
                             parsed_metadata,
                             source_record,
+                            selected_content_type,
                         ),
                         daemon=True,
                     )
@@ -6407,9 +6563,11 @@ async def api_parse_doc(
             image_count=len(parsed.images),
             ocr_page_count=parsed.ocr_page_count,
             digest=digest[:300],
-            manifest_path=f"docs/{d_id}/manifest.json",
+            manifest_path=f"docs/{_doc_storage_rel_path(d_id, selected_content_type)}/manifest.json",
             processing_time_sec=elapsed,
             source_ref=source_record.get("ref"),
+            content_type=selected_content_type,
+            storage_path=_doc_storage_rel_path(d_id, selected_content_type),
         )
 
 
@@ -6422,6 +6580,7 @@ async def library_search(
     q: str | None = None,
     tags: str | None = None,
     file_type: str | None = None,
+    content_type: str | None = None,
     limit: int = 20,
 ):
     """Search document library."""
@@ -6430,6 +6589,7 @@ async def library_search(
     documents = _filter_documents(
         _load_doc_index(docs_dir),
         file_type=file_type,
+        content_type=content_type,
         tags=tags,
         metadata_filters=metadata_filters,
     )
@@ -6468,6 +6628,8 @@ async def library_search(
             doc_id=d.get("id", ""),
             filename=d.get("filename", ""),
             file_type=d.get("file_type", ""),
+            content_type=d.get("content_type", "General"),
+            storage_path=d.get("storage_path"),
             digest=d.get("digest", ""),
             tags=d.get("tags", []),
             source=d.get("source", "upload"),
@@ -6492,6 +6654,7 @@ async def library_search_text(
     q: str,
     tags: str | None = None,
     file_type: str | None = None,
+    content_type: str | None = None,
     doc_id: str | None = None,
     limit: int = 20,
     scope: str = "all",
@@ -6510,6 +6673,7 @@ async def library_search_text(
     documents = _filter_documents(
         _load_doc_index(docs_dir),
         file_type=file_type,
+        content_type=content_type,
         tags=tags,
         metadata_filters=metadata_filters,
     )
@@ -6521,6 +6685,7 @@ async def library_search_text(
                 documents = _filter_documents(
                     [fallback_doc],
                     file_type=file_type,
+                    content_type=content_type,
                     tags=tags,
                     metadata_filters=metadata_filters,
                 )
@@ -6530,10 +6695,11 @@ async def library_search_text(
         current_doc_id = d.get("id", "")
         if not isinstance(current_doc_id, str) or not _DOC_ID_RE.match(current_doc_id):
             continue
-        doc_dir = docs_dir / current_doc_id
-        manifest_path = doc_dir / "manifest.json"
-        if not manifest_path.exists():
+        try:
+            doc_dir = _resolve_doc_dir(docs_dir, current_doc_id)
+        except HTTPException:
             continue
+        manifest_path = doc_dir / "manifest.json"
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
@@ -6549,6 +6715,8 @@ async def library_search_text(
                             doc_id=current_doc_id,
                             filename=d.get("filename", ""),
                             file_type=d.get("file_type", ""),
+                            content_type=d.get("content_type", "General"),
+                            storage_path=d.get("storage_path"),
                             digest=d.get("digest", ""),
                             tags=d.get("tags", []),
                             source=d.get("source", "upload"),
@@ -6590,6 +6758,8 @@ async def library_search_text(
                         doc_id=current_doc_id,
                         filename=d.get("filename", ""),
                         file_type=d.get("file_type", ""),
+                        content_type=d.get("content_type", "General"),
+                        storage_path=d.get("storage_path"),
                         digest=d.get("digest", ""),
                         tags=d.get("tags", []),
                         source=d.get("source", "upload"),
@@ -6620,7 +6790,7 @@ async def library_search_text(
 async def get_manifest(doc_id: str):
     """Get document manifest."""
     _validate_doc_id(doc_id)
-    p = _get_docs_dir() / doc_id / "manifest.json"
+    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "manifest.json"
     if not p.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     return json.loads(p.read_text(encoding="utf-8"))
@@ -6630,7 +6800,7 @@ async def get_manifest(doc_id: str):
 async def discover_sidecars(doc_id: str):
     """Discover optional sidecars without returning large geometry payloads."""
     _validate_doc_id(doc_id)
-    doc_dir = _get_docs_dir() / doc_id
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
@@ -6685,7 +6855,7 @@ async def discover_sidecars(doc_id: str):
 async def list_layout_pages(doc_id: str):
     """List OCR layout pages and block counts without returning block geometry."""
     _validate_doc_id(doc_id)
-    doc_dir = _get_docs_dir() / doc_id
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     if not (doc_dir / "manifest.json").exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     sidecar = _load_ocr_sidecar_payload(doc_dir, doc_id)
@@ -6703,7 +6873,7 @@ async def get_layout_page(doc_id: str, page_num: int):
     _validate_doc_id(doc_id)
     if page_num < 1:
         raise HTTPException(422, "page_num must be a 1-based positive integer")
-    doc_dir = _get_docs_dir() / doc_id
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     if not (doc_dir / "manifest.json").exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     sidecar = _load_ocr_sidecar_payload(doc_dir, doc_id)
@@ -6743,6 +6913,8 @@ async def search_sections(doc_id: str, request: SectionSearchRequest):
                 doc_id=doc_id,
                 filename=str(manifest.get("filename") or ""),
                 file_type=str(manifest.get("file_type") or ""),
+                content_type=str(manifest.get("content_type") or "General"),
+                storage_path=manifest.get("storage_path") if isinstance(manifest.get("storage_path"), str) else None,
                 digest="",
                 tags=[],
                 source=str(manifest.get("source") or "upload"),
@@ -6782,7 +6954,7 @@ async def chunk_document(doc_id: str, request: ChunkRequest):
 @app.get("/library/{doc_id}/summary")
 async def get_summary_status(doc_id: str):
     _validate_doc_id(doc_id)
-    manifest_path = _get_docs_dir() / doc_id / "manifest.json"
+    manifest_path = _resolve_doc_dir(_get_docs_dir(), doc_id) / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -6801,6 +6973,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
     docs_dir = _get_docs_dir()
     parsed, metadata, source_record = _load_parsed_document_from_storage(docs_dir, doc_id)
     tags = _load_doc_tags(docs_dir, doc_id)
+    content_type = _doc_content_type(docs_dir, doc_id)
 
     summary_meta = parsed.metadata.get("summary") if isinstance(parsed.metadata, dict) else {}
     current_status = summary_meta.get("status") if isinstance(summary_meta, dict) else None
@@ -6819,6 +6992,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
         source="upload",
         metadata=metadata,
         source_record=source_record,
+        content_type=content_type,
         summary_placeholder=_summary_placeholder_text(
             "pending", locale=_parsed_document_locale(parsed)
         ),
@@ -6833,6 +7007,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
             tags,
             metadata,
             source_record,
+            content_type,
         ),
         daemon=True,
     )
@@ -6854,7 +7029,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
 async def get_digest(doc_id: str):
     """Get document digest (lowest token cost)."""
     _validate_doc_id(doc_id)
-    p = _get_docs_dir() / doc_id / "digest.md"
+    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "digest.md"
     if not p.exists():
         raise HTTPException(404, t("digest_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
@@ -6864,7 +7039,7 @@ async def get_digest(doc_id: str):
 async def get_brief(doc_id: str):
     """Get document brief (medium token cost)."""
     _validate_doc_id(doc_id)
-    p = _get_docs_dir() / doc_id / "brief.md"
+    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "brief.md"
     if not p.exists():
         raise HTTPException(404, t("brief_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
@@ -6874,7 +7049,7 @@ async def get_brief(doc_id: str):
 async def get_full(doc_id: str):
     """Get full document text (high token cost, use sparingly)."""
     _validate_doc_id(doc_id)
-    p = _get_docs_dir() / doc_id / "full.md"
+    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "full.md"
     if not p.exists():
         raise HTTPException(404, t("full_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
@@ -6884,7 +7059,7 @@ async def get_full(doc_id: str):
 async def get_section(doc_id: str, sid: str):
     """Read a single section by sid."""
     _validate_doc_id(doc_id)
-    sections_dir = _get_docs_dir() / doc_id / "sections"
+    sections_dir = _resolve_doc_dir(_get_docs_dir(), doc_id) / "sections"
     if not sections_dir.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
 
@@ -6901,7 +7076,7 @@ async def get_table(doc_id: str, table_id: str):
     """Read a single table."""
     _validate_doc_id(doc_id)
     _validate_table_id(table_id)
-    tables_dir = _get_docs_dir() / doc_id / "tables"
+    tables_dir = _resolve_doc_dir(_get_docs_dir(), doc_id) / "tables"
     if not tables_dir.exists():
         raise HTTPException(404, t("tables_dir_not_found", doc_id=doc_id))
 
@@ -6918,7 +7093,7 @@ async def get_table_json(doc_id: str, table_id: str):
     """Read structured JSON for one table when available."""
     _validate_doc_id(doc_id)
     _validate_table_id(table_id)
-    doc_dir = _get_docs_dir() / doc_id
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     if not (doc_dir / "manifest.json").exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     tid = table_id if table_id.startswith("table-") else f"table-{table_id}"
@@ -6941,7 +7116,7 @@ async def get_table_json(doc_id: str, table_id: str):
 async def list_images(doc_id: str):
     """List embedded images extracted from a document."""
     _validate_doc_id(doc_id)
-    doc_dir = _get_docs_dir() / doc_id
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
@@ -6959,7 +7134,7 @@ async def get_image_record(doc_id: str, image_id: str):
     """Read one embedded image metadata record and OCR text when available."""
     _validate_doc_id(doc_id)
     normalized_id = _normalize_image_id(image_id)
-    doc_dir = _get_docs_dir() / doc_id
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     images_path = doc_dir / "images.json"
     if not images_path.exists():
         raise HTTPException(404, f"images not found for {doc_id}")
@@ -6986,7 +7161,7 @@ async def get_image_record(doc_id: str, image_id: str):
 async def list_sections(doc_id: str):
     """List all sections from manifest."""
     _validate_doc_id(doc_id)
-    manifest_path = _get_docs_dir() / doc_id / "manifest.json"
+    manifest_path = _resolve_doc_dir(_get_docs_dir(), doc_id) / "manifest.json"
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))

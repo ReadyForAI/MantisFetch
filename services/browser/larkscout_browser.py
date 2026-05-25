@@ -55,6 +55,8 @@ _DEFAULT_DOCS_DIR = Path(
         os.path.expanduser("~/.larkscout/docs"),
     )
 )
+CONTENT_TYPE_DIRS = ("General", "Contract", "Bid", "Knowledge")
+_CONTENT_TYPE_ALIASES = {name.lower(): name for name in CONTENT_TYPE_DIRS}
 
 # ---- URL validation (anti-SSRF) ----
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -385,6 +387,7 @@ class CaptureRequest(BaseModel):
     """Request body for POST /capture (one-shot web capture)."""
 
     url: str
+    content_type: str = "General"
     tags: list[str] = []
     extract_tables: bool = True
     lang: str = DEFAULT_LANG
@@ -395,6 +398,8 @@ class CaptureResponse(BaseModel):
     """Response from POST /capture."""
 
     doc_id: str
+    content_type: str = "General"
+    storage_path: str = ""
     digest: str
     section_count: int
     table_count: int
@@ -1966,6 +1971,25 @@ def _get_docs_dir() -> Path:
     return d
 
 
+def _normalize_content_type(value: str | None) -> str:
+    raw = (value or "General").strip()
+    normalized = _CONTENT_TYPE_ALIASES.get(raw.lower())
+    if not normalized:
+        allowed = ", ".join(CONTENT_TYPE_DIRS)
+        raise HTTPException(422, f"content_type must be one of: {allowed}")
+    return normalized
+
+
+def _doc_storage_rel_path(doc_id: str, content_type: str | None = None) -> str:
+    if content_type is None:
+        return doc_id
+    return f"{_normalize_content_type(content_type)}/{doc_id}"
+
+
+def _doc_storage_dir(docs_dir: Path, doc_id: str, content_type: str | None = None) -> Path:
+    return docs_dir / _doc_storage_rel_path(doc_id, content_type)
+
+
 _web_counter_lock = threading.Lock()
 _web_index_lock = threading.Lock()
 
@@ -2054,9 +2078,12 @@ def _persist_web_capture(
     tags: list[str],
     content_hash: str,
     docs_dir: Path,
+    content_type: str = "General",
 ) -> None:
     """Write a web capture to the document library and update doc-index.json."""
-    doc_dir = docs_dir / doc_id
+    normalized_content_type = _normalize_content_type(content_type)
+    storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
+    doc_dir = docs_dir / storage_path
     sections_dir = doc_dir / "sections"
     tables_dir = doc_dir / "tables"
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -2095,6 +2122,8 @@ def _persist_web_capture(
         "filename": title or url,
         "file_type": "web_capture",
         "source": "web_capture",
+        "content_type": normalized_content_type,
+        "storage_path": storage_path,
         "paths": {
             "digest": "digest.md",
             "sections_dir": "sections/",
@@ -2132,6 +2161,8 @@ def _persist_web_capture(
             "id": doc_id,
             "filename": title or url,
             "file_type": "web_capture",
+            "content_type": normalized_content_type,
+            "storage_path": storage_path,
             "source": "web_capture",
             "source_url": url,
             "pages": 1,
@@ -2139,7 +2170,7 @@ def _persist_web_capture(
             "ocr_pages": 0,
             "tables": len(table_sections),
             "digest": digest[:200],
-            "digest_path": f"docs/{doc_id}/digest.md",
+            "digest_path": f"docs/{storage_path}/digest.md",
             "tags": tags,
             "created_at": now_str,
             "content_hash": content_hash,
@@ -2603,6 +2634,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             digest = _build_web_digest(title, sections)
             docs_dir = _get_docs_dir()
             doc_id = _next_web_doc_id(docs_dir)
+            content_type = _normalize_content_type(req.content_type)
             _persist_web_capture(
                 doc_id=doc_id,
                 url=url,
@@ -2612,10 +2644,13 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 tags=req.tags,
                 content_hash=content_hash,
                 docs_dir=docs_dir,
+                content_type=content_type,
             )
 
             return CaptureResponse(
                 doc_id=doc_id,
+                content_type=content_type,
+                storage_path=_doc_storage_rel_path(doc_id, content_type),
                 digest=digest,
                 section_count=len(sections),
                 table_count=len(table_sections),
