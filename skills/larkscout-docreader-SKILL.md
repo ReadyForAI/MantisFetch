@@ -470,7 +470,7 @@ docs/
       └─ ...
 ```
 
-New ingested content is stored under `General/`, `Contract/`, `Bid/`, or `Knowledge/`. Direct reads still use `doc_id`; the service resolves the categorized `storage_path` from `doc-index.json` or `manifest.json`.
+New ingested content is stored under `General/`, `Contract/`, `Bid/`, or `Knowledge/`. Direct reads still use `doc_id`; the service resolves the directory by checking `storage_path` (then `content_type`) in `doc-index.json`, scanning the category subdirectories, and finally falling back to the legacy flat `${LARKSCOUT_DOCS_DIR}/<doc_id>` layout.
 
 **doc-index.json v2 Key Fields:**
 

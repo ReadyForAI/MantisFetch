@@ -470,7 +470,7 @@ docs/
       └─ ...
 ```
 
-新入库内容会写入 `General/`、`Contract/`、`Bid/` 或 `Knowledge/`。直接读取仍使用 `doc_id`，服务会从 `doc-index.json` 或 `manifest.json` 解析分类后的 `storage_path`。
+新入库内容会写入 `General/`、`Contract/`、`Bid/` 或 `Knowledge/`。直接读取仍使用 `doc_id`，服务依次查找 `doc-index.json` 里的 `storage_path`（其次 `content_type`），扫描各分类子目录，最后回退到旧的平铺布局 `${LARKSCOUT_DOCS_DIR}/<doc_id>`。
 
 **doc-index.json v2 关键字段：**
 

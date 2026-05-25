@@ -50,6 +50,8 @@ ${LARKSCOUT_DOCS_DIR}/<doc_id>
 content_type=General|Contract|Bid|Knowledge
 ```
 
+Values are case-insensitive on input (`"bid"`, `"BID"`, and `"Bid"` are all accepted), but always persisted as the title-case form shown above. Unknown values return HTTP 422.
+
 `POST /web/capture` accepts JSON field:
 
 ```json

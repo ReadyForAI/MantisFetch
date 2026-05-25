@@ -31,8 +31,24 @@ __version__ = "0.1.0"
 _DEFAULT_BASE_URL = "http://localhost:9898"
 _DEFAULT_TIMEOUT = 120.0  # seconds; large uploads / OCR can be slow
 
+# Library categories accepted by /doc/parse and /web/capture. The server
+# normalizes case-insensitively, but the SDK fails fast with a clear error
+# so callers don't have to debug an opaque HTTP 422.
+CONTENT_TYPES: tuple[str, ...] = ("General", "Contract", "Bid", "Knowledge")
+_CONTENT_TYPE_LOOKUP = {v.lower(): v for v in CONTENT_TYPES}
+
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _validate_content_type(value: str) -> str:
+    """Return the canonical content_type value, or raise ValueError."""
+    canonical = _CONTENT_TYPE_LOOKUP.get(value.lower()) if isinstance(value, str) else None
+    if canonical is None:
+        raise ValueError(
+            f"content_type must be one of {CONTENT_TYPES} (case-insensitive); got {value!r}"
+        )
+    return canonical
 
 
 def _base_url(url: str) -> str:
@@ -141,6 +157,7 @@ class LarkScoutClient:
         Returns:
             dict with ``doc_id``, ``digest``, ``section_count``, ``table_count``.
         """
+        content_type = _validate_content_type(content_type)
         return self._post_json(
             "/web/capture",
             {
@@ -192,6 +209,7 @@ class LarkScoutClient:
         Returns:
             dict with ``doc_id``, ``digest``, ``section_count``, ``table_count``, etc.
         """
+        content_type = _validate_content_type(content_type)
         path = Path(file_path)
         merged_metadata = dict(metadata or {})
         for key, value in {
@@ -254,6 +272,8 @@ class LarkScoutClient:
         Returns:
             dict with ``results`` list and ``total`` count.
         """
+        if content_type is not None:
+            content_type = _validate_content_type(content_type)
         return self._get(
             "/doc/library/search",
             q=query,
@@ -275,6 +295,8 @@ class LarkScoutClient:
         limit: int = 20,
     ) -> dict[str, Any]:
         """Search full text and/or section text across the document library."""
+        if content_type is not None:
+            content_type = _validate_content_type(content_type)
         return self._get(
             "/doc/library/search_text",
             q=query,
@@ -468,6 +490,7 @@ class AsyncLarkScoutClient:
         extract_tables: bool = True,
     ) -> dict[str, Any]:
         """Capture a web page and persist it to the document library."""
+        content_type = _validate_content_type(content_type)
         return await self._post_json(
             "/web/capture",
             {
@@ -498,6 +521,7 @@ class AsyncLarkScoutClient:
         force_ocr: bool = False,
     ) -> dict[str, Any]:
         """Upload and parse a document (PDF, DOCX, XLSX, or CSV)."""
+        content_type = _validate_content_type(content_type)
         path = Path(file_path)
         merged_metadata = dict(metadata or {})
         for key, value in {
@@ -549,6 +573,8 @@ class AsyncLarkScoutClient:
         limit: int = 20,
     ) -> dict[str, Any]:
         """Search the document library."""
+        if content_type is not None:
+            content_type = _validate_content_type(content_type)
         return await self._get(
             "/doc/library/search",
             q=query,
@@ -570,6 +596,8 @@ class AsyncLarkScoutClient:
         limit: int = 20,
     ) -> dict[str, Any]:
         """Search full text and/or section text across the document library."""
+        if content_type is not None:
+            content_type = _validate_content_type(content_type)
         return await self._get(
             "/doc/library/search_text",
             q=query,

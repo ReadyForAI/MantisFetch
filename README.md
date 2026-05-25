@@ -203,7 +203,7 @@ DocReader notes:
 
 - `POST /doc/parse` accepts an optional `metadata` form field containing a JSON object; shallow scalar values are indexed for later filtering.
 - `POST /doc/parse` also accepts an optional `doc_id` form field. Valid values may contain letters, digits, and internal hyphens, for example `DOC-001`, `NBS250321`, or `doc001`.
-- `POST /doc/parse` and `POST /web/capture` accept `content_type`, one of `General`, `Contract`, `Bid`, or `Knowledge`; the default is `General`.
+- `POST /doc/parse` and `POST /web/capture` accept `content_type`, one of `General`, `Contract`, `Bid`, or `Knowledge` (case-insensitive on input; persisted in title case); the default is `General`.
 - New ingested documents are stored under `${LARKSCOUT_DOCS_DIR}/<content_type>/<doc_id>`, while legacy flat `${LARKSCOUT_DOCS_DIR}/<doc_id>` documents remain readable.
 - `GET /doc/library/search` also accepts query params prefixed with `metadata.` for equality-style filtering, for example `metadata.customer=ACME`.
 - `GET /doc/library/search` and `GET /doc/library/search_text` accept `content_type` for category-filtered browsing.
@@ -427,7 +427,7 @@ DocReader 补充说明：
 
 - `POST /doc/parse` 支持可选 `metadata` 表单字段，值为 JSON object；其中浅层标量字段会进入索引，供后续过滤。
 - `POST /doc/parse` 也支持可选 `doc_id` 表单字段；合法值可包含字母、数字和中间连字符，例如 `DOC-001`、`NBS250321`、`doc001`。
-- `POST /doc/parse` 和 `POST /web/capture` 支持 `content_type`，可选值为 `General`、`Contract`、`Bid`、`Knowledge`；默认 `General`。
+- `POST /doc/parse` 和 `POST /web/capture` 支持 `content_type`，可选值为 `General`、`Contract`、`Bid`、`Knowledge`（输入大小写不敏感，存储统一为首字母大写）；默认 `General`。
 - 新入库文档会保存到 `${LARKSCOUT_DOCS_DIR}/<content_type>/<doc_id>`，旧版平铺的 `${LARKSCOUT_DOCS_DIR}/<doc_id>` 文档仍可读取。
 - `GET /doc/library/search` 支持 `metadata.*` 形式的查询参数做等值过滤，例如 `metadata.customer=ACME`。
 - `GET /doc/library/search` 和 `GET /doc/library/search_text` 支持 `content_type`，用于按分类浏览。

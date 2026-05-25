@@ -87,6 +87,20 @@ class TestSyncClient:
         assert body["content_type"] == "Knowledge"
         assert body["tags"] == ["test"]
 
+    def test_capture_normalizes_lowercase_content_type(self, sync_client):
+        client, mock_http, mock_resp = sync_client
+        mock_resp.json.return_value = {"doc_id": "WEB-002"}
+        client.capture("https://example.com", content_type="bid")
+        body = mock_http.post.call_args.kwargs["json"]
+        assert body["content_type"] == "Bid"
+
+    def test_capture_rejects_unknown_content_type(self, sync_client):
+        client, _mock_http, _mock_resp = sync_client
+        import pytest
+
+        with pytest.raises(ValueError, match="content_type must be one of"):
+            client.capture("https://example.com", content_type="Cntract")
+
     def test_search(self, sync_client):
         client, mock_http, mock_resp = sync_client
         mock_resp.json.return_value = {"results": [], "total": 0}
