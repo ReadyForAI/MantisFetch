@@ -151,9 +151,9 @@ Request parameters:
 | `force_ocr`           | bool   | `false`    | Force LLM OCR on all pages. This is higher cost and should only be used when the caller explicitly needs visual re-recognition for the whole document |
 | `ocr_pages`           | string | null       | Upgrade specific page ranges to LLM OCR, e.g. `"10-30"`; unspecified pages still follow the server's automatic plan |
 | `extract_tables`      | bool   | `true`     | Whether to extract tables                                                               |
-| `extract_images`      | bool   | `false`    | Whether to extract embedded Word images into `images.json` / `images/`                  |
+| `extract_images`      | bool   | `false`    | Whether to extract embedded Word images into `images.json` / `images/`; can be used for lightweight image inventory first |
 | `ocr_images`          | bool   | `false`    | Whether to OCR extracted embedded Word images                                           |
-| `image_ocr_backend`   | string | `auto`     | Image OCR backend: `auto` / `local` / `llm`; `auto` tries local OCR first and falls back to LLM OCR only for failed images |
+| `image_ocr_backend`   | string | `auto`     | Image OCR backend: `auto` / `local` / `llm`; for large bid files prefer explicit `local` to avoid default LLM fallback |
 | `max_images`          | int    | `200`      | Maximum embedded images to process per document                                         |
 | `max_ocr_images`      | int    | `80`       | Maximum embedded Word images allowed for OCR when `ocr_images=true`; requests above this threshold return 422 |
 | `max_tables_per_page` | int    | `3`        | Maximum tables to extract per page                                                      |
@@ -173,24 +173,35 @@ curl -X POST http://localhost:9898/doc/parse \
 
 Callers do not need the Python SDK; they can call LarkScout directly with `curl`. LarkScout provides lower-level parsing, indexing, and source retention only. Business scenarios, business metadata fields, naming rules, and follow-up operations are owned by the upper-level caller.
 
-Generic ingestion example for embedded Word image recognition:
+Recommended ingestion for embedded Word images is to create a lightweight image inventory first, without OCR for every image. `images.json` includes image files, anchors, dimensions, hashes, context keywords, and candidate hints so downstream tools can select candidate evidence by business requirements:
 
 ```bash
 curl -X POST http://localhost:9898/doc/parse \
   -F "file=@/path/to/document.docx" \
   -F "summary_mode=defer" \
-  -F "id_strategy=source_filename" \
   -F "extract_tables=true" \
   -F "extract_images=true" \
-  -F "ocr_images=true" \
-  -F "image_ocr_backend=auto" \
-  -F "max_ocr_images=80" \
+  -F "ocr_images=false" \
+  -F "max_images=1000" \
   -F 'metadata={"display_name":"document.docx","source_system":"agent_upload"}'
 ```
 
-When the requested OCR image count exceeds `max_ocr_images`, the service refuses image OCR. Callers should retry with `ocr_images=false` to ingest text and the image index first, or set a lower `max_images` value to process only the first images.
+If a caller really needs OCR during ingestion, explicitly limit the image count and prefer local OCR:
 
-This only outputs image source, nearby heading, section anchor, image files, and OCR text. The upper-level caller owns all business interpretation and requirement checks.
+```bash
+curl -X POST http://localhost:9898/doc/parse \
+  -F "file=@/path/to/document.docx" \
+  -F "summary_mode=defer" \
+  -F "extract_images=true" \
+  -F "ocr_images=true" \
+  -F "image_ocr_backend=local" \
+  -F "max_images=50" \
+  -F "max_ocr_images=50"
+```
+
+When the requested OCR image count exceeds `max_ocr_images`, the service refuses image OCR. Large bid-file callers should use `ocr_images=false` to ingest text and the image inventory first, then let downstream tools select candidate images for targeted OCR or vision review.
+
+This only outputs image source, nearby heading, section anchor, image files, inventory metadata, and optional OCR text. The upper-level caller owns all business interpretation and requirement checks.
 
 Generic ingestion example with metadata:
 
@@ -198,7 +209,6 @@ Generic ingestion example with metadata:
 curl -X POST http://localhost:9898/doc/parse \
   -F "file=@/path/to/document.pdf" \
   -F "summary_mode=defer" \
-  -F "id_strategy=source_filename" \
   -F "extract_tables=true" \
   -F 'metadata={"display_name":"document.pdf","source_system":"manual_upload"}'
 ```

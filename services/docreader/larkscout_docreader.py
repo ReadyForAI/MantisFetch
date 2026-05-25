@@ -4,12 +4,15 @@
 # dependencies = ["markitdown[pdf,docx,pptx,xlsx,xls]", "pymupdf", "google-genai", "Pillow", "fastapi", "uvicorn", "python-multipart", "paddleocr", "paddlepaddle"]
 # ///
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
 import io
 import json
 import logging
+import math
 import os
 import posixpath
 import re
@@ -68,6 +71,12 @@ SUPPORTED_FORMATS = [
 SUPPORTED_EXTENSIONS = {f".{fmt}" for fmt in SUPPORTED_FORMATS}
 DOCUMENT_PROFILE_CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs" / "document_profiles"
 FIELD_OCR_CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs" / "field_profiles"
+OCR_BLOCKS_SIDECAR_VERSION = 1
+OCR_BLOCKS_SIDECAR_PATH = "ocr_blocks.json"
+OCR_BLOCKS_COORDINATE_SYSTEM = "image_pixels"
+CROP_ARTIFACT_DIR = "derived/crops"
+REGION_OCR_ARTIFACT_DIR = "derived/region_ocr"
+VISUAL_DEBUG_ARTIFACT_DIR = "derived/debug"
 
 # Lazy-initialized MarkItDown converter
 _md_converter = None
@@ -141,6 +150,327 @@ def _count_markdown_tables(text: str) -> int:
     return len(re.findall(r"^\|[\s\-:|]+\|$", text, re.MULTILINE))
 
 
+def _markdown_table_dimensions(table_md: str) -> dict[str, Any]:
+    rows: list[list[str]] = []
+    separator_indexes: set[int] = set()
+    for line in table_md.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or not stripped.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        row_index = len(rows)
+        rows.append(cells)
+        if re.fullmatch(r"\|[\s\-:|]+\|", stripped):
+            separator_indexes.add(row_index)
+
+    content_rows = [row for idx, row in enumerate(rows) if idx not in separator_indexes]
+    header_rows = 1 if rows and 1 in separator_indexes else 0
+    return {
+        "row_count": len(content_rows),
+        "column_count": max((len(row) for row in content_rows), default=0),
+        "header_rows": header_rows,
+        "has_header": bool(header_rows),
+    }
+
+
+def _median(values: list[float], default: float = 0.0) -> float:
+    if not values:
+        return default
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _cluster_ocr_blocks_into_rows(
+    blocks: list[OCRTextBlock],
+    y_tolerance: float,
+) -> list[list[OCRTextBlock]]:
+    rows: list[list[OCRTextBlock]] = []
+    row_centers: list[float] = []
+    for block in sorted(blocks, key=lambda b: ((b.bbox[1] + b.bbox[3]) / 2, b.bbox[0])):
+        center_y = (block.bbox[1] + block.bbox[3]) / 2
+        matched_index: int | None = None
+        for idx, row_center in enumerate(row_centers):
+            if abs(center_y - row_center) <= y_tolerance:
+                matched_index = idx
+                break
+        if matched_index is None:
+            rows.append([block])
+            row_centers.append(center_y)
+            continue
+        rows[matched_index].append(block)
+        row_centers[matched_index] = (
+            row_centers[matched_index] * (len(rows[matched_index]) - 1) + center_y
+        ) / len(rows[matched_index])
+    return [sorted(row, key=lambda b: b.bbox[0]) for row in rows]
+
+
+def _count_x_clusters(blocks: list[OCRTextBlock], x_tolerance: float) -> int:
+    clusters: list[float] = []
+    for block in sorted(blocks, key=lambda b: b.bbox[0]):
+        x0 = block.bbox[0]
+        for idx, cluster_x in enumerate(clusters):
+            if abs(x0 - cluster_x) <= x_tolerance:
+                clusters[idx] = (cluster_x + x0) / 2
+                break
+        else:
+            clusters.append(x0)
+    return len(clusters)
+
+
+def _detect_table_candidates_from_ocr_blocks(
+    sidecar: OCRBlocksSidecar,
+    *,
+    min_rows: int = 2,
+    min_columns: int = 2,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for page in sidecar.pages:
+        blocks = [
+            block
+            for block in page.blocks
+            if block.text.strip() and (block.bbox[2] > block.bbox[0]) and (block.bbox[3] > block.bbox[1])
+        ]
+        if len(blocks) < min_rows * min_columns:
+            continue
+        heights = [block.bbox[3] - block.bbox[1] for block in blocks]
+        widths = [block.bbox[2] - block.bbox[0] for block in blocks]
+        rows = _cluster_ocr_blocks_into_rows(blocks, y_tolerance=max(8.0, _median(heights, 12.0) * 0.75))
+        valid_rows = [row for row in rows if len(row) >= min_columns]
+        if len(valid_rows) < min_rows:
+            continue
+        candidate_blocks = [block for row in valid_rows for block in row]
+        column_count = _count_x_clusters(
+            candidate_blocks,
+            x_tolerance=max(12.0, _median(widths, 40.0) * 0.35),
+        )
+        if column_count < min_columns:
+            continue
+        xs0 = [block.bbox[0] for block in candidate_blocks]
+        ys0 = [block.bbox[1] for block in candidate_blocks]
+        xs1 = [block.bbox[2] for block in candidate_blocks]
+        ys1 = [block.bbox[3] for block in candidate_blocks]
+        avg_confidence = sum(block.confidence for block in candidate_blocks) / len(candidate_blocks)
+        candidates.append(
+            {
+                "candidate_id": f"p{page.page}-tc{len(candidates) + 1:04d}",
+                "page": page.page,
+                "bbox": [min(xs0), min(ys0), max(xs1), max(ys1)],
+                "row_count": len(valid_rows),
+                "column_count": column_count,
+                "confidence": round(avg_confidence, 4),
+                "source": "ocr_geometry",
+                "ocr_block_refs": [block.block_id for block in candidate_blocks],
+            }
+        )
+    return candidates
+
+
+def _bbox_union(bboxes: list[tuple[float, float, float, float]]) -> list[float]:
+    return [
+        min(b[0] for b in bboxes),
+        min(b[1] for b in bboxes),
+        max(b[2] for b in bboxes),
+        max(b[3] for b in bboxes),
+    ]
+
+
+def _column_centers_for_blocks(blocks: list[OCRTextBlock], x_tolerance: float) -> list[float]:
+    centers: list[float] = []
+    for block in sorted(blocks, key=lambda b: b.bbox[0]):
+        x0 = block.bbox[0]
+        for idx, center in enumerate(centers):
+            if abs(x0 - center) <= x_tolerance:
+                centers[idx] = (center + x0) / 2
+                break
+        else:
+            centers.append(x0)
+    return centers
+
+
+def _assign_column(block: OCRTextBlock, centers: list[float]) -> int:
+    if not centers:
+        return 1
+    distances = [abs(block.bbox[0] - center) for center in centers]
+    return distances.index(min(distances)) + 1
+
+
+def _reconstruct_table_from_candidate(
+    sidecar: OCRBlocksSidecar,
+    candidate: dict[str, Any],
+    table_id: str,
+) -> dict[str, Any]:
+    page_num = int(candidate["page"])
+    page = next((p for p in sidecar.pages if p.page == page_num), None)
+    if page is None:
+        raise ValueError(f"candidate page not found in OCR blocks: {page_num}")
+    refs = set(candidate.get("ocr_block_refs") or [])
+    blocks = [block for block in page.blocks if block.block_id in refs]
+    if not blocks:
+        raise ValueError(f"candidate has no matching OCR blocks: {candidate.get('candidate_id')}")
+
+    heights = [block.bbox[3] - block.bbox[1] for block in blocks]
+    widths = [block.bbox[2] - block.bbox[0] for block in blocks]
+    rows = _cluster_ocr_blocks_into_rows(
+        blocks,
+        y_tolerance=max(8.0, _median(heights, 12.0) * 0.75),
+    )
+    centers = _column_centers_for_blocks(blocks, x_tolerance=max(12.0, _median(widths, 40.0) * 0.35))
+    structured_rows: list[dict[str, Any]] = []
+    for row_index, row_blocks in enumerate(rows, 1):
+        grouped: dict[int, list[OCRTextBlock]] = {}
+        for block in row_blocks:
+            grouped.setdefault(_assign_column(block, centers), []).append(block)
+        cells: list[dict[str, Any]] = []
+        for column in sorted(grouped):
+            cell_blocks = sorted(grouped[column], key=lambda b: (b.bbox[1], b.bbox[0]))
+            text = "\n".join(block.text for block in cell_blocks).strip()
+            confidence = sum(block.confidence for block in cell_blocks) / len(cell_blocks)
+            cells.append(
+                {
+                    "row": row_index,
+                    "column": column,
+                    "text": text,
+                    "bbox": _bbox_union([block.bbox for block in cell_blocks]),
+                    "rowspan": 1,
+                    "colspan": 1,
+                    "confidence": round(confidence, 4),
+                    "ocr_block_refs": [block.block_id for block in cell_blocks],
+                }
+            )
+        structured_rows.append({"row_index": row_index, "cells": cells})
+
+    return {
+        "table_id": table_id,
+        "page": page_num,
+        "page_width": page.width,
+        "page_height": page.height,
+        "bbox": candidate["bbox"],
+        "source": "ocr_geometry",
+        "row_count": len(structured_rows),
+        "column_count": len(centers),
+        "continued_from": None,
+        "continued_to": None,
+        "candidate_id": candidate.get("candidate_id"),
+        "rows": structured_rows,
+    }
+
+
+def _markdown_from_structured_table(table: dict[str, Any]) -> str:
+    column_count = int(table.get("column_count") or 0)
+    rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+    if column_count <= 0 or not rows:
+        return ""
+    markdown_rows: list[list[str]] = []
+    for row in rows:
+        values = [""] * column_count
+        for cell in row.get("cells") or []:
+            column = int(cell.get("column") or 0)
+            if 1 <= column <= column_count:
+                values[column - 1] = str(cell.get("text") or "").replace("\n", " ")
+        markdown_rows.append(values)
+    header = markdown_rows[0]
+    separator = ["---"] * column_count
+    body = markdown_rows[1:]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(separator) + " |",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in body)
+    return "\n".join(lines)
+
+
+def _normalize_cell_text_for_match(text: Any) -> str:
+    return "".join(str(text or "").lower().split())
+
+
+def _first_row_texts(table: dict[str, Any]) -> list[str]:
+    rows = table.get("rows") if isinstance(table.get("rows"), list) else []
+    if not rows:
+        return []
+    column_count = int(table.get("column_count") or 0)
+    values = [""] * column_count
+    for cell in rows[0].get("cells") or []:
+        column = int(cell.get("column") or 0)
+        if 1 <= column <= column_count:
+            values[column - 1] = _normalize_cell_text_for_match(cell.get("text"))
+    return values
+
+
+def _same_table_header(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_texts = _first_row_texts(left)
+    right_texts = _first_row_texts(right)
+    if len(left_texts) < 2 or len(left_texts) != len(right_texts):
+        return False
+    comparable = [(a, b) for a, b in zip(left_texts, right_texts) if a and b]
+    if len(comparable) < 2:
+        return False
+    matches = sum(1 for a, b in comparable if a == b)
+    return matches >= 2 and matches / len(comparable) >= 0.67
+
+
+def _bbox_horizontal_overlap_ratio(left: list[float], right: list[float]) -> float:
+    left_width = max(0.0, left[2] - left[0])
+    right_width = max(0.0, right[2] - right[0])
+    if left_width <= 0 or right_width <= 0:
+        return 0.0
+    overlap = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    return overlap / min(left_width, right_width)
+
+
+def _near_page_bottom(table: dict[str, Any]) -> bool:
+    bbox = table.get("bbox") or []
+    page_height = float(table.get("page_height") or 0)
+    return len(bbox) == 4 and page_height > 0 and float(bbox[3]) >= page_height * 0.72
+
+
+def _near_page_top(table: dict[str, Any]) -> bool:
+    bbox = table.get("bbox") or []
+    page_height = float(table.get("page_height") or 0)
+    return len(bbox) == 4 and page_height > 0 and float(bbox[1]) <= page_height * 0.28
+
+
+def _should_link_continued_tables(
+    left_entry: dict[str, Any],
+    left_table: dict[str, Any],
+    right_entry: dict[str, Any],
+    right_table: dict[str, Any],
+) -> bool:
+    if int(right_entry.get("page_start") or 0) != int(left_entry.get("page_end") or 0) + 1:
+        return False
+    if int(left_entry.get("column_count") or 0) < 2:
+        return False
+    if int(left_entry.get("column_count") or 0) != int(right_entry.get("column_count") or 0):
+        return False
+    left_bbox = left_entry.get("bbox")
+    right_bbox = right_entry.get("bbox")
+    if not (isinstance(left_bbox, list) and isinstance(right_bbox, list) and len(left_bbox) == 4 and len(right_bbox) == 4):
+        return False
+    min_width = max(1.0, min(float(left_bbox[2] - left_bbox[0]), float(right_bbox[2] - right_bbox[0])))
+    edge_tolerance = max(24.0, min_width * 0.15)
+    if abs(float(left_bbox[0]) - float(right_bbox[0])) > edge_tolerance:
+        return False
+    if abs(float(left_bbox[2]) - float(right_bbox[2])) > edge_tolerance:
+        return False
+    if _bbox_horizontal_overlap_ratio(left_bbox, right_bbox) < 0.75:
+        return False
+    return _same_table_header(left_table, right_table) or (_near_page_bottom(left_table) and _near_page_top(right_table))
+
+
+def _apply_table_continuation_links(
+    entries: list[tuple[dict[str, Any], dict[str, Any], str]],
+) -> None:
+    ordered = sorted(entries, key=lambda item: (int(item[0].get("page_start") or 0), int(item[0].get("index") or 0)))
+    for (left_entry, left_table, _left_md), (right_entry, right_table, _right_md) in zip(ordered, ordered[1:]):
+        if _should_link_continued_tables(left_entry, left_table, right_entry, right_table):
+            left_entry["continued_to"] = right_entry["table_id"]
+            right_entry["continued_from"] = left_entry["table_id"]
+            left_table["continued_to"] = right_entry["table_id"]
+            right_table["continued_from"] = left_entry["table_id"]
+
+
 def _detect_text_locale(text: str) -> str:
     sample = text[:20000]
     cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
@@ -148,7 +478,7 @@ def _detect_text_locale(text: str) -> str:
     return "zh" if cjk >= 20 or cjk > alpha else "en"
 
 
-def _parsed_document_locale(parsed: "ParsedDocument") -> str:
+def _parsed_document_locale(parsed: ParsedDocument) -> str:
     value = str(parsed.metadata.get("summary_locale") or parsed.metadata.get("language") or "").strip()
     if value.startswith(("zh", "en")):
         return value[:2]
@@ -176,6 +506,66 @@ class PageContent:
     tables_in_text: bool = False
 
 
+@dataclass(frozen=True)
+class OCRTextBlock:
+    """Normalized OCR text block geometry for layout sidecars."""
+
+    block_id: str
+    text: str
+    bbox: tuple[float, float, float, float]
+    confidence: float = 0.0
+    source: str = "local_ocr"
+    line_index: int = 0
+    order: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "block_id": self.block_id,
+            "text": self.text,
+            "bbox": _normalize_layout_bbox(self.bbox),
+            "confidence": float(self.confidence),
+            "source": self.source,
+            "line_index": int(self.line_index),
+            "order": int(self.order),
+        }
+
+
+@dataclass(frozen=True)
+class OCRPageBlocks:
+    """OCR geometry for one rendered document page."""
+
+    page: int
+    width: int
+    height: int
+    blocks: tuple[OCRTextBlock, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "page": int(self.page),
+            "width": int(self.width),
+            "height": int(self.height),
+            "blocks": [block.to_dict() for block in self.blocks],
+        }
+
+
+@dataclass(frozen=True)
+class OCRBlocksSidecar:
+    """Versioned OCR geometry sidecar contract."""
+
+    doc_id: str
+    pages: tuple[OCRPageBlocks, ...] = ()
+    version: int = OCR_BLOCKS_SIDECAR_VERSION
+    coordinate_system: str = OCR_BLOCKS_COORDINATE_SYSTEM
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": int(self.version),
+            "doc_id": self.doc_id,
+            "coordinate_system": self.coordinate_system,
+            "pages": [page.to_dict() for page in self.pages],
+        }
+
+
 @dataclass
 class Section:
     """Document section."""
@@ -200,15 +590,26 @@ class EmbeddedImage:
     relationship_id: str
     paragraph_index: int
     paragraph_text: str = ""
+    context_text: str = ""
     near_heading: str = ""
     anchor_sid: str = ""
     section_title: str = ""
     original_ext: str = ""
     original_type: str = ""
     original_bytes: bytes = b""
+    original_size_bytes: int = 0
+    original_sha256: str = ""
     rendered_ext: str = ""
     rendered_type: str = ""
     rendered_bytes: bytes = b""
+    rendered_size_bytes: int = 0
+    rendered_sha256: str = ""
+    width: int = 0
+    height: int = 0
+    aspect_ratio: float = 0.0
+    average_hash: str = ""
+    context_keywords: list[str] = field(default_factory=list)
+    inventory_hints: list[str] = field(default_factory=list)
     render_status: str = "not_rendered"
     render_error: str = ""
     ocr_enabled: bool = False
@@ -231,6 +632,8 @@ class ParsedDocument:
     table_count: int = 0
     images: list[EmbeddedImage] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    ocr_blocks: OCRBlocksSidecar | None = None
+    extract_tables: bool = True
 
 
 @dataclass(frozen=True)
@@ -704,10 +1107,51 @@ def _get_local_ocr_worker() -> subprocess.Popen[str]:
         _local_ocr_worker_initializing.clear()
 
 
-def local_ocr(image_bytes: bytes, page_num: int, backend: str) -> str:
+def _ocr_page_blocks_from_worker_response(
+    page_num: int,
+    response: dict[str, Any],
+    source: str,
+) -> OCRPageBlocks | None:
+    raw_blocks = response.get("blocks")
+    if not isinstance(raw_blocks, list):
+        return None
+    blocks: list[OCRTextBlock] = []
+    for index, raw in enumerate(raw_blocks):
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            bbox = tuple(_normalize_layout_bbox(raw.get("bbox") or [0, 0, 0, 0]))
+        except (TypeError, ValueError):
+            bbox = (0.0, 0.0, 0.0, 0.0)
+        order = int(raw.get("order") if raw.get("order") is not None else index)
+        line_index = int(raw.get("line_index") if raw.get("line_index") is not None else order)
+        blocks.append(
+            OCRTextBlock(
+                block_id=f"p{page_num}-b{len(blocks) + 1:04d}",
+                text=text,
+                bbox=bbox,  # type: ignore[arg-type]
+                confidence=float(raw.get("confidence") or 0.0),
+                source=source,
+                line_index=line_index,
+                order=order,
+            )
+        )
+    width = int(response.get("width") or 0)
+    height = int(response.get("height") or 0)
+    return OCRPageBlocks(page=page_num, width=width, height=height, blocks=tuple(blocks))
+
+
+def local_ocr_with_layout(
+    image_bytes: bytes,
+    page_num: int,
+    backend: str,
+) -> tuple[str, OCRPageBlocks | None]:
     name = (backend or "").strip().lower()
     if name in {"", "none"}:
-        return ""
+        return "", None
     if name != "paddleocr":
         raise RuntimeError(f"unsupported local OCR backend: {backend}")
     with _local_ocr_worker_lock:
@@ -731,14 +1175,24 @@ def local_ocr(image_bytes: bytes, page_num: int, backend: str) -> str:
                     backend,
                     response.get("error") or response,
                 )
-                return t("ocr_failed", page=page_num)
+                return t("ocr_failed", page=page_num), None
             text = str(response.get("text") or "").strip()
-            return text or t("ocr_failed", page=page_num)
+            page_blocks = _ocr_page_blocks_from_worker_response(
+                page_num,
+                response,
+                source=f"local-{name}",
+            )
+            return text or t("ocr_failed", page=page_num), page_blocks
         except Exception as exc:
             _stop_local_ocr_worker()
             _mark_local_ocr_worker_unhealthy(str(exc))
             logger.warning("Local OCR unavailable for page %d via %s: %s", page_num, backend, exc)
-            return t("ocr_failed", page=page_num)
+            return t("ocr_failed", page=page_num), None
+
+
+def local_ocr(image_bytes: bytes, page_num: int, backend: str) -> str:
+    text, _page_blocks = local_ocr_with_layout(image_bytes, page_num, backend)
+    return text
 
 
 def _remove_footer_page_number(lines: list[str], page_num: int, total_pages: int) -> list[str]:
@@ -1896,6 +2350,7 @@ def parse_pdf(
     llm_ocr_set = set(ocr_plan["llm_ocr_pages"])
     local_ocr_results: dict[int, str] = {}
     llm_ocr_results: dict[int, str] = {}
+    local_ocr_layout_pages: dict[int, OCRPageBlocks] = {}
     local_tasks: list[tuple[int, bytes]] = []
     llm_tasks: list[tuple[int, bytes]] = []
     render_meta: dict[str, Any] = {
@@ -1991,13 +2446,16 @@ def parse_pdf(
 
         def _do_local_ocr(args):
             pn, img_b = args
-            return pn, img_b, local_ocr(img_b, pn, ocr_plan["local_backend"])
+            text, page_blocks = local_ocr_with_layout(img_b, pn, ocr_plan["local_backend"])
+            return pn, img_b, text, page_blocks
 
         with ThreadPoolExecutor(max_workers=LOCAL_OCR_CONCURRENCY) as pool:
             futures = {pool.submit(_do_local_ocr, task): task for task in local_tasks}
             for fut in as_completed(futures):
-                pn, img_b, result = fut.result()
+                pn, img_b, result, page_blocks = fut.result()
                 local_ocr_results[pn] = result
+                if page_blocks is not None and not _is_ocr_failed_text(result):
+                    local_ocr_layout_pages[pn] = page_blocks
                 logger.info(f"Page {pn}/{total_pages}: local OCR done")
                 if cache_dir and profile and profile.cache_policy.page_ocr:
                     if _is_ocr_failed_text(result):
@@ -2040,8 +2498,9 @@ def parse_pdf(
         enhanced = llm_ocr_results.get(page_num) or local_ocr_results.get(page_num)
         if enhanced:
             page_text = _cleanup_ocr_text(_usable_page_text(raw_text, enhanced))
-            page_text, page_tables = _extract_tables_from_ocr_text(page_text, page_num, total_pages)
-            ocr_table_count += len(page_tables)
+            if extract_tables:
+                page_text, page_tables = _extract_tables_from_ocr_text(page_text, page_num, total_pages)
+                ocr_table_count += len(page_tables)
         pages.append(
             PageContent(
                 page_num=page_num,
@@ -2108,6 +2567,15 @@ def parse_pdf(
         sections=sections,
         ocr_page_count=ocr_count,
         table_count=table_count,
+        ocr_blocks=(
+            OCRBlocksSidecar(
+                doc_id="",
+                pages=tuple(local_ocr_layout_pages[pn] for pn in sorted(local_ocr_layout_pages)),
+            )
+            if local_ocr_layout_pages
+            else None
+        ),
+        extract_tables=extract_tables,
         metadata={
             "document_profile": profile.name if profile else None,
             "pdf_parse_mode": selected_mode,
@@ -2145,6 +2613,22 @@ _IMAGE_MIME_BY_EXT = {
     ".emf": "image/x-emf",
     ".wmf": "image/x-wmf",
 }
+
+_IMAGE_CONTEXT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("business_license", ("营业执照", "统一社会信用代码", "business license")),
+    ("id_card", ("身份证", "居民身份证", "identity card", "id card")),
+    ("education_certificate", ("学历", "毕业证", "毕业证书", "学信网", "电子注册备案表")),
+    ("degree_certificate", ("学位证", "学位证书")),
+    (
+        "personnel_certificate",
+        ("项目经理证书", "人员证书", "人员资质", "PMP", "信息系统项目管理师", "系统集成项目管理工程师", "软考"),
+    ),
+    ("certificate", ("证书", "资质", "认证")),
+    ("contract_copy", ("合同复印件", "合同案例", "类似案例", "业绩证明", "协议复印件")),
+    ("financial_statement", ("财务报表", "审计报告", "资产负债表", "利润表", "现金流量表")),
+    ("product_screenshot", ("产品截图", "系统截图", "功能截图", "界面截图", "截图")),
+    ("seal_or_signature", ("签字", "签章", "盖章", "公章", "印章")),
+)
 
 
 def _word_rel_target_to_package_path(target: str) -> str:
@@ -2190,7 +2674,13 @@ def _word_image_relationships(docx_path: Path) -> dict[str, str]:
         rel_id = str(rel.attrib.get("Id") or "")
         target = str(rel.attrib.get("Target") or "")
         rel_type = str(rel.attrib.get("Type") or "")
+        target_mode = str(rel.attrib.get("TargetMode") or "")
         if not rel_id or not target:
+            continue
+        if target_mode.lower() == "external":
+            # Linked (not embedded) images live outside the .docx package;
+            # they cannot be read via zipfile and must not count toward
+            # embedded-image limits.
             continue
         if "image" not in rel_type.lower() and not target.lower().startswith("media/"):
             continue
@@ -2209,6 +2699,20 @@ def _word_paragraph_image_rel_ids(paragraph: ET.Element) -> list[str]:
         if rel_id and rel_id not in rel_ids:
             rel_ids.append(rel_id)
     return rel_ids
+
+
+def _word_image_context_text(
+    paragraph_texts: list[str],
+    paragraph_index: int,
+    *,
+    before: int = 4,
+    after: int = 3,
+    max_chars: int = 1200,
+) -> str:
+    start = max(0, paragraph_index - before)
+    end = min(len(paragraph_texts), paragraph_index + after + 1)
+    parts = [text for text in paragraph_texts[start:end] if text]
+    return "\n".join(parts)[:max_chars]
 
 
 def _count_word_embedded_image_references(filepath: Path) -> int:
@@ -2281,6 +2785,99 @@ def _render_embedded_image(image_bytes: bytes, original_ext: str) -> tuple[bytes
     raise RuntimeError(f"unsupported embedded image format: {ext or 'unknown'}")
 
 
+def _image_dimensions(image_bytes: bytes) -> tuple[int, int]:
+    if not image_bytes:
+        return 0, 0
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            return int(img.width), int(img.height)
+    except Exception:
+        return 0, 0
+
+
+def _image_average_hash(image_bytes: bytes, hash_size: int = 8) -> str:
+    if not image_bytes:
+        return ""
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img = img.convert("L").resize((hash_size, hash_size))
+            pixels = list(img.tobytes())
+    except Exception:
+        return ""
+    if not pixels:
+        return ""
+    avg = sum(pixels) / len(pixels)
+    bits = "".join("1" if px >= avg else "0" for px in pixels)
+    return f"{int(bits, 2):0{hash_size * hash_size // 4}x}"
+
+
+def _extract_image_context_keywords(*texts: str) -> list[str]:
+    haystack = "\n".join(text for text in texts if text).lower()
+    if not haystack:
+        return []
+    keywords: list[str] = []
+    for key, aliases in _IMAGE_CONTEXT_KEYWORDS:
+        if any(alias.lower() in haystack for alias in aliases):
+            keywords.append(key)
+    return keywords
+
+
+def _inventory_hints_for_image(image: EmbeddedImage) -> list[str]:
+    hints: list[str] = []
+    area = image.width * image.height
+    ratio = image.aspect_ratio
+    keyword_set = set(image.context_keywords)
+
+    if image.render_status == "failed":
+        hints.append("render_failed")
+    if image.render_status == "ok" and area > 0:
+        if area < 20_000:
+            hints.append("small_image")
+        if image.width >= 900 and image.height >= 500 and 1.2 <= ratio <= 2.4:
+            hints.append("screenshot_like")
+        if image.height >= 900 and 0.55 <= ratio <= 1.15:
+            hints.append("document_scan_like")
+
+    for key in sorted(keyword_set):
+        hints.append(f"context:{key}")
+    if {"education_certificate", "degree_certificate"} & keyword_set:
+        hints.append("personnel_material_candidate")
+    if {"business_license", "id_card", "personnel_certificate", "certificate"} & keyword_set:
+        hints.append("certificate_or_identity_candidate")
+    if "contract_copy" in keyword_set:
+        hints.append("case_contract_candidate")
+    if "financial_statement" in keyword_set:
+        hints.append("financial_material_candidate")
+    if "product_screenshot" in keyword_set:
+        hints.append("product_screenshot_candidate")
+    return list(dict.fromkeys(hints))
+
+
+def _populate_embedded_image_inventory(image: EmbeddedImage) -> None:
+    image.original_size_bytes = len(image.original_bytes)
+    image.original_sha256 = (
+        hashlib.sha256(image.original_bytes).hexdigest() if image.original_bytes else ""
+    )
+    image.rendered_size_bytes = len(image.rendered_bytes)
+    image.rendered_sha256 = (
+        hashlib.sha256(image.rendered_bytes).hexdigest() if image.rendered_bytes else ""
+    )
+    image.width, image.height = _image_dimensions(image.rendered_bytes or image.original_bytes)
+    image.aspect_ratio = round(image.width / image.height, 4) if image.height else 0.0
+    image.average_hash = _image_average_hash(image.rendered_bytes or image.original_bytes)
+    image.context_keywords = _extract_image_context_keywords(
+        image.near_heading,
+        image.paragraph_text,
+        image.context_text,
+        image.section_title,
+    )
+    image.inventory_hints = _inventory_hints_for_image(image)
+
+
 def _ocr_embedded_image(image: EmbeddedImage, backend: str) -> tuple[str, str, str, str]:
     selected = (backend or "auto").strip().lower()
     if selected not in {"auto", "local", "llm"}:
@@ -2344,11 +2941,12 @@ def _extract_word_embedded_images(
             rels = _word_image_relationships(filepath)
             root = ET.fromstring(document_xml)
             paragraphs = root.findall(".//w:p", WORD_XML_NS)
+            paragraph_texts = [_word_paragraph_text(paragraph) for paragraph in paragraphs]
             images: list[EmbeddedImage] = []
             current_heading = ""
 
             for paragraph_index, paragraph in enumerate(paragraphs, 1):
-                paragraph_text = _word_paragraph_text(paragraph)
+                paragraph_text = paragraph_texts[paragraph_index - 1]
                 heading_level = _word_heading_level(paragraph_text, _word_paragraph_style(paragraph))
                 if paragraph_text and heading_level > 0:
                     current_heading = _strip_heading_markup(paragraph_text)
@@ -2372,6 +2970,9 @@ def _extract_word_embedded_images(
                         relationship_id=rel_id,
                         paragraph_index=paragraph_index,
                         paragraph_text=paragraph_text,
+                        context_text=_word_image_context_text(
+                            paragraph_texts, paragraph_index - 1
+                        ),
                         near_heading=current_heading,
                         original_ext=original_ext,
                         original_type=_IMAGE_MIME_BY_EXT.get(
@@ -2408,6 +3009,8 @@ def _extract_word_embedded_images(
         return []
 
     _anchor_word_images_to_sections(images, sections)
+    for image in images:
+        _populate_embedded_image_inventory(image)
     return images
 
 
@@ -2431,6 +3034,7 @@ def parse_word(
         sec.sid = _section_sid(sec.title, sec.text)
 
     table_count = _count_markdown_tables(markdown_text) if extract_tables else 0
+    embedded_image_count = _count_word_embedded_image_references(filepath) if extract_images else 0
     images = (
         _extract_word_embedded_images(
             filepath,
@@ -2455,13 +3059,17 @@ def parse_word(
         sections=sections,
         table_count=table_count,
         images=images,
+        extract_tables=extract_tables,
         metadata={
             "document_profile": profile.name if profile else None,
             "word_images": {
                 "extract_enabled": bool(extract_images),
                 "ocr_enabled": bool(ocr_images),
                 "ocr_backend": image_ocr_backend if ocr_images else "",
+                "embedded_image_count": embedded_image_count,
+                "max_images": max(0, int(max_images or 0)),
                 "extracted": len(images),
+                "truncated": bool(extract_images and embedded_image_count > len(images)),
                 "render_ok": sum(1 for image in images if image.render_status == "ok"),
                 "render_failed": sum(1 for image in images if image.render_status == "failed"),
                 "ocr_ok": sum(1 for image in images if image.ocr_status == "ok"),
@@ -3432,7 +4040,7 @@ def _reset_generated_output_dirs(doc_dir: Path) -> None:
         path = doc_dir / child
         if path.exists():
             shutil.rmtree(path)
-    for child in ("sections.json", "tables.json", "images.json"):
+    for child in ("sections.json", "tables.json", "images.json", OCR_BLOCKS_SIDECAR_PATH):
         path = doc_dir / child
         if path.exists():
             path.unlink()
@@ -3536,6 +4144,17 @@ def write_output(
     if image_entries:
         _write_json(doc_dir / "images.json", image_entries)
         logger.info(f"images/ ({len(image_entries)} files)")
+    layout_entry = _build_layout_manifest_entry(available=False)
+    if parsed.ocr_blocks is not None:
+        layout_entry = _write_ocr_blocks_sidecar(
+            doc_dir,
+            OCRBlocksSidecar(
+                doc_id=doc_id,
+                pages=parsed.ocr_blocks.pages,
+                version=parsed.ocr_blocks.version,
+                coordinate_system=parsed.ocr_blocks.coordinate_system,
+            ),
+        )
 
     # v3: content_hash
     full_text = "\n".join(sec.text for sec in parsed.sections)
@@ -3562,6 +4181,7 @@ def write_output(
             "tables": "tables.json",
             "images_dir": "images/",
             "images": "images.json",
+            "ocr_blocks": layout_entry["ocr_blocks_path"],
         },
         "sections": [
             _build_section_entry(
@@ -3572,6 +4192,7 @@ def write_output(
         ],
         "tables": table_entries,
         "images": image_entries,
+        "layout": layout_entry,
         "provenance": {
             "source": source,
             "source_url": original_path or str(parsed.filename),
@@ -3664,6 +4285,17 @@ def write_output_extract_only(
     image_entries = _write_images(doc_dir, parsed)
     if image_entries:
         _write_json(doc_dir / "images.json", image_entries)
+    layout_entry = _build_layout_manifest_entry(available=False)
+    if parsed.ocr_blocks is not None:
+        layout_entry = _write_ocr_blocks_sidecar(
+            doc_dir,
+            OCRBlocksSidecar(
+                doc_id=doc_id,
+                pages=parsed.ocr_blocks.pages,
+                version=parsed.ocr_blocks.version,
+                coordinate_system=parsed.ocr_blocks.coordinate_system,
+            ),
+        )
 
     placeholder = summary_placeholder or _summary_placeholder_text("pending", locale=output_locale)
     _write_text(
@@ -3698,6 +4330,7 @@ def write_output_extract_only(
             "tables": "tables.json",
             "images_dir": "images/",
             "images": "images.json",
+            "ocr_blocks": layout_entry["ocr_blocks_path"],
         },
         "sections": [
             _build_section_entry(sec, summary_preview="")
@@ -3705,6 +4338,7 @@ def write_output_extract_only(
         ],
         "tables": table_entries,
         "images": image_entries,
+        "layout": layout_entry,
         "provenance": {
             "source": source,
             "source_url": str(parsed.filename),
@@ -3913,6 +4547,44 @@ def _write_json(path: Path, data: dict):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def _normalize_layout_bbox(bbox: tuple[float, float, float, float] | list[float]) -> list[float]:
+    """Normalize a bbox to [x0, y0, x1, y1] floats and reject malformed geometry."""
+    if len(bbox) != 4:
+        raise ValueError("layout bbox must contain exactly four coordinates")
+    normalized = [float(v) for v in bbox]
+    x0, y0, x1, y1 = normalized
+    if x1 < x0 or y1 < y0:
+        raise ValueError("layout bbox must be ordered as [x0, y0, x1, y1]")
+    return normalized
+
+
+def _build_layout_manifest_entry(
+    *,
+    available: bool,
+    ocr_blocks_path: str = OCR_BLOCKS_SIDECAR_PATH,
+    coordinate_system: str = OCR_BLOCKS_COORDINATE_SYSTEM,
+    version: int = OCR_BLOCKS_SIDECAR_VERSION,
+) -> dict[str, Any]:
+    """Build low-token manifest metadata for layout sidecars."""
+    return {
+        "available": bool(available),
+        "ocr_blocks_path": ocr_blocks_path if available else "",
+        "version": int(version),
+        "coordinate_system": coordinate_system,
+    }
+
+
+def _write_ocr_blocks_sidecar(doc_dir: Path, sidecar: OCRBlocksSidecar) -> dict[str, Any]:
+    """Write the OCR geometry sidecar and return manifest metadata for discovery."""
+    _write_json(doc_dir / OCR_BLOCKS_SIDECAR_PATH, sidecar.to_dict())
+    return _build_layout_manifest_entry(
+        available=True,
+        ocr_blocks_path=OCR_BLOCKS_SIDECAR_PATH,
+        coordinate_system=sidecar.coordinate_system,
+        version=sidecar.version,
+    )
 
 
 def _write_bytes(path: Path, content: bytes):
@@ -4253,6 +4925,7 @@ def _build_table_entries(parsed: ParsedDocument) -> list[dict[str, Any]]:
         1,
     ):
         text_hash = hashlib.sha256(table_md.encode("utf-8", errors="ignore")).hexdigest()
+        dimensions = _markdown_table_dimensions(table_md)
         entries.append(
             {
                 "table_id": f"table-{i:02d}",
@@ -4260,6 +4933,13 @@ def _build_table_entries(parsed: ParsedDocument) -> list[dict[str, Any]]:
                 "page": page_num,
                 "page_start": page_num,
                 "page_end": page_num,
+                "row_count": dimensions["row_count"],
+                "column_count": dimensions["column_count"],
+                "header_rows": dimensions["header_rows"],
+                "has_header": dimensions["has_header"],
+                "source": "ocr",
+                "continued_from": None,
+                "continued_to": None,
                 "char_count": len(table_md),
                 "token_estimate": _estimate_tokens(table_md),
                 "text_hash": f"sha256:{text_hash}",
@@ -4270,9 +4950,52 @@ def _build_table_entries(parsed: ParsedDocument) -> list[dict[str, Any]]:
     return entries
 
 
+def _build_structured_table_entries(
+    parsed: ParsedDocument,
+    start_index: int,
+) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
+    if parsed.ocr_blocks is None:
+        return []
+    entries: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    candidates = _detect_table_candidates_from_ocr_blocks(parsed.ocr_blocks)
+    for offset, candidate in enumerate(candidates, start_index):
+        table_id = f"table-{offset:02d}"
+        table_json = _reconstruct_table_from_candidate(parsed.ocr_blocks, candidate, table_id)
+        table_md = _markdown_from_structured_table(table_json)
+        text_hash = hashlib.sha256(table_md.encode("utf-8", errors="ignore")).hexdigest()
+        entry = {
+            "table_id": table_id,
+            "index": offset,
+            "page": table_json["page"],
+            "page_start": table_json["page"],
+            "page_end": table_json["page"],
+            "row_count": table_json["row_count"],
+            "column_count": table_json["column_count"],
+            "header_rows": 1 if table_json["row_count"] else 0,
+            "has_header": bool(table_json["row_count"]),
+            "source": "layout",
+            "continued_from": None,
+            "continued_to": None,
+            "char_count": len(table_md),
+            "token_estimate": _estimate_tokens(table_md),
+            "text_hash": f"sha256:{text_hash}",
+            "type": "markdown",
+            "file": f"tables/{table_id}.md",
+            "json_file": f"tables/{table_id}.json",
+            "bbox": table_json["bbox"],
+            "ocr_block_refs": candidate.get("ocr_block_refs") or [],
+        }
+        entries.append((entry, table_json, table_md))
+    _apply_table_continuation_links(entries)
+    return entries
+
+
 def _write_tables(doc_dir: Path, parsed: ParsedDocument) -> list[dict[str, Any]]:
+    if not parsed.extract_tables:
+        return []
     table_entries = _build_table_entries(parsed)
-    if not table_entries:
+    structured_entries = _build_structured_table_entries(parsed, start_index=len(table_entries) + 1)
+    if not table_entries and not structured_entries:
         return []
     tables_dir = doc_dir / "tables"
     tables_dir.mkdir(exist_ok=True)
@@ -4291,6 +5014,13 @@ def _write_tables(doc_dir: Path, parsed: ParsedDocument) -> list[dict[str, Any]]
             tables_dir / f"{entry['table_id']}.md",
             f"# Table {table_index} (page {page_num})\n\n{table_md}\n",
         )
+    for entry, table_json, table_md in structured_entries:
+        _write_text(
+            tables_dir / f"{entry['table_id']}.md",
+            f"# Table {entry['index']} (page {entry['page']})\n\n{table_md}\n",
+        )
+        _write_json(tables_dir / f"{entry['table_id']}.json", table_json)
+        table_entries.append(entry)
     return table_entries
 
 
@@ -4311,6 +5041,7 @@ def _embedded_image_entry(image: EmbeddedImage) -> dict[str, Any]:
             "anchor_sid": image.anchor_sid,
             "near_heading": image.near_heading,
             "near_text": image.paragraph_text,
+            "context_text": image.context_text,
             "section_title": image.section_title,
         },
         "media": {
@@ -4320,6 +5051,18 @@ def _embedded_image_entry(image: EmbeddedImage) -> dict[str, Any]:
             "rendered_path": f"images/{rendered_name}" if image.rendered_bytes else "",
             "render_status": image.render_status,
             "render_error": image.render_error,
+        },
+        "inventory": {
+            "width": image.width,
+            "height": image.height,
+            "aspect_ratio": image.aspect_ratio,
+            "original_size_bytes": image.original_size_bytes,
+            "rendered_size_bytes": image.rendered_size_bytes,
+            "original_sha256": image.original_sha256,
+            "rendered_sha256": image.rendered_sha256,
+            "average_hash": image.average_hash,
+            "context_keywords": list(image.context_keywords),
+            "hints": list(image.inventory_hints),
         },
         "ocr": {
             "enabled": image.ocr_enabled,
@@ -4374,6 +5117,553 @@ def _persist_source_file(doc_dir: Path, filename: str, content: bytes) -> dict[s
         "sha256": hashlib.sha256(content).hexdigest(),
         "size_bytes": len(content),
     }
+
+
+def _normalize_crop_bbox(bbox: list[float] | tuple[float, float, float, float]) -> list[float]:
+    if len(bbox) != 4:
+        raise HTTPException(422, "crop bbox must contain exactly four coordinates")
+    normalized = [float(v) for v in bbox]
+    if not all(math.isfinite(v) for v in normalized):
+        raise HTTPException(422, "crop bbox coordinates must be finite numbers")
+    x0, y0, x1, y1 = normalized
+    if x1 <= x0 or y1 <= y0:
+        raise HTTPException(422, "crop bbox must have positive area ordered as [x0, y0, x1, y1]")
+    return normalized
+
+
+def _load_manifest_dict(doc_dir: Path, doc_id: str) -> dict[str, Any]:
+    manifest_path = doc_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(500, f"manifest unreadable for {doc_id}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise HTTPException(500, f"manifest unreadable for {doc_id}")
+    return manifest
+
+
+def _resolve_doc_source_file(docs_dir: Path, doc_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    _validate_doc_id(doc_id)
+    doc_dir = docs_dir / doc_id
+    manifest = _load_manifest_dict(doc_dir, doc_id)
+    source_file = manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
+    source_ref = str(source_file.get("ref") or "")
+    if not source_ref:
+        raise HTTPException(409, f"source file is not available for {doc_id}")
+    raw_ref = Path(source_ref)
+    if raw_ref.is_absolute() or ".." in raw_ref.parts or not raw_ref.parts or raw_ref.parts[0] != "source":
+        raise HTTPException(500, f"invalid source file ref for {doc_id}: {source_ref}")
+    source_path = (doc_dir / raw_ref).resolve()
+    try:
+        source_path.relative_to(doc_dir.resolve())
+    except ValueError as exc:
+        raise HTTPException(500, f"invalid source file ref for {doc_id}: {source_ref}") from exc
+    if not source_path.exists() or not source_path.is_file():
+        raise HTTPException(404, f"source file missing for {doc_id}: {source_ref}")
+    return source_path, manifest, source_file
+
+
+def _ocr_page_dimensions(doc_dir: Path, page_num: int) -> tuple[float, float] | None:
+    sidecar_path = doc_dir / OCR_BLOCKS_SIDECAR_PATH
+    if not sidecar_path.exists():
+        return None
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    pages = sidecar.get("pages") if isinstance(sidecar, dict) else []
+    if not isinstance(pages, list):
+        return None
+    for page in pages:
+        if isinstance(page, dict) and int(page.get("page") or 0) == page_num:
+            width = float(page.get("width") or 0)
+            height = float(page.get("height") or 0)
+            if width > 0 and height > 0:
+                return width, height
+    return None
+
+
+def _ensure_bbox_inside_bounds(bbox: list[float], width: float, height: float, coordinate_system: str) -> None:
+    x0, y0, x1, y1 = bbox
+    if x0 < 0 or y0 < 0 or x1 > width or y1 > height:
+        raise HTTPException(
+            422,
+            f"crop bbox outside {coordinate_system} bounds: width={width:g}, height={height:g}",
+        )
+
+
+def _crop_clip_rect(
+    doc_dir: Path,
+    page_obj: Any,
+    page_num: int,
+    bbox: list[float],
+    coordinate_system: str,
+) -> tuple[Any, list[float], dict[str, Any]]:
+    import fitz
+
+    rect = page_obj.rect
+    if coordinate_system == "page_points":
+        _ensure_bbox_inside_bounds(bbox, float(rect.width), float(rect.height), coordinate_system)
+        clip = fitz.Rect(
+            rect.x0 + bbox[0],
+            rect.y0 + bbox[1],
+            rect.x0 + bbox[2],
+            rect.y0 + bbox[3],
+        )
+        return clip, [float(clip.x0), float(clip.y0), float(clip.x1), float(clip.y1)], {
+            "width": float(rect.width),
+            "height": float(rect.height),
+            "unit": "points",
+        }
+    if coordinate_system != OCR_BLOCKS_COORDINATE_SYSTEM:
+        raise HTTPException(422, f"unsupported crop coordinate_system: {coordinate_system}")
+    dimensions = _ocr_page_dimensions(doc_dir, page_num)
+    if dimensions is None:
+        raise HTTPException(409, f"ocr block dimensions unavailable for {doc_dir.name} page {page_num}")
+    image_width, image_height = dimensions
+    _ensure_bbox_inside_bounds(bbox, image_width, image_height, coordinate_system)
+    x_scale = float(rect.width) / image_width
+    y_scale = float(rect.height) / image_height
+    clip = fitz.Rect(
+        rect.x0 + bbox[0] * x_scale,
+        rect.y0 + bbox[1] * y_scale,
+        rect.x0 + bbox[2] * x_scale,
+        rect.y0 + bbox[3] * y_scale,
+    )
+    return clip, [float(clip.x0), float(clip.y0), float(clip.x1), float(clip.y1)], {
+        "width": image_width,
+        "height": image_height,
+        "unit": "pixels",
+    }
+
+
+def export_pdf_region_crop(
+    docs_dir: Path,
+    doc_id: str,
+    page: int,
+    bbox: list[float] | tuple[float, float, float, float],
+    *,
+    dpi: int = 144,
+    coordinate_system: str = OCR_BLOCKS_COORDINATE_SYSTEM,
+) -> dict[str, Any]:
+    import fitz
+
+    try:
+        page_num = int(page)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "page must be a 1-based positive integer") from exc
+    if page_num < 1:
+        raise HTTPException(422, "page must be a 1-based positive integer")
+    try:
+        dpi = int(dpi)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "dpi must be between 36 and 600") from exc
+    if dpi < 36 or dpi > 600:
+        raise HTTPException(422, "dpi must be between 36 and 600")
+    normalized_bbox = _normalize_crop_bbox(bbox)
+    source_path, manifest, source_file = _resolve_doc_source_file(docs_dir, doc_id)
+    if str(manifest.get("file_type") or "").lower() != "pdf" and source_path.suffix.lower() != ".pdf":
+        raise HTTPException(422, "region crop export currently supports PDF source files")
+
+    doc_dir = docs_dir / doc_id
+    try:
+        pdf = fitz.open(str(source_path))
+    except Exception as exc:
+        raise HTTPException(500, f"source PDF could not be opened for {doc_id}: {exc}") from exc
+    try:
+        if page_num > len(pdf):
+            raise HTTPException(422, f"page out of range for {doc_id}: {page_num} > {len(pdf)}")
+        page_obj = pdf[page_num - 1]
+        clip, clip_rect, source_bounds = _crop_clip_rect(
+            doc_dir,
+            page_obj,
+            page_num,
+            normalized_bbox,
+            coordinate_system,
+        )
+        scale = dpi / 72.0
+        pix = page_obj.get_pixmap(matrix=fitz.Matrix(scale, scale), clip=clip, alpha=False)
+        png_bytes = pix.tobytes("png")
+    finally:
+        pdf.close()
+
+    crop_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "doc_id": doc_id,
+                "page": page_num,
+                "bbox": normalized_bbox,
+                "dpi": dpi,
+                "coordinate_system": coordinate_system,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    artifact_id = f"crop-p{page_num:04d}-{crop_hash}"
+    crops_dir = doc_dir / CROP_ARTIFACT_DIR
+    crops_dir.mkdir(parents=True, exist_ok=True)
+    output_rel = f"{CROP_ARTIFACT_DIR}/{artifact_id}.png"
+    metadata_rel = f"{CROP_ARTIFACT_DIR}/{artifact_id}.json"
+    metadata = {
+        "artifact_id": artifact_id,
+        "doc_id": doc_id,
+        "page": page_num,
+        "bbox": normalized_bbox,
+        "coordinate_system": coordinate_system,
+        "source_bounds": source_bounds,
+        "clip_rect": clip_rect,
+        "dpi": dpi,
+        "scale": scale,
+        "output_path": output_rel,
+        "metadata_path": metadata_rel,
+        "mime_type": "image/png",
+        "size_bytes": len(png_bytes),
+        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+        "source_ref": source_file.get("ref", ""),
+        "derived": True,
+        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _write_bytes(doc_dir / output_rel, png_bytes)
+    _write_json(doc_dir / metadata_rel, metadata)
+    return metadata
+
+
+def _normalize_region_ocr_backend(backend: str) -> tuple[str, str]:
+    name = (backend or "").strip().lower()
+    if name in {"", "paddleocr", "local", "local-paddleocr"}:
+        return "local", "paddleocr"
+    if name in {"llm", "gemini"}:
+        return "llm", "gemini"
+    raise HTTPException(422, "region OCR backend must be one of: paddleocr, local, llm, gemini")
+
+
+def _safe_artifact_id(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-._")
+    return safe[:80] or "artifact"
+
+
+def rerun_region_ocr(
+    docs_dir: Path,
+    doc_id: str,
+    page: int,
+    bbox: list[float] | tuple[float, float, float, float],
+    *,
+    backend: str = "paddleocr",
+    dpi: int = 144,
+    coordinate_system: str = OCR_BLOCKS_COORDINATE_SYSTEM,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    backend_kind, selected_backend = _normalize_region_ocr_backend(backend)
+    requested_artifact_id = _safe_artifact_id(run_id) if run_id else None
+    if requested_artifact_id:
+        _validate_doc_id(doc_id)
+        doc_dir = docs_dir / doc_id
+        text_rel = f"{REGION_OCR_ARTIFACT_DIR}/{requested_artifact_id}.txt"
+        metadata_rel = f"{REGION_OCR_ARTIFACT_DIR}/{requested_artifact_id}.json"
+        if (doc_dir / text_rel).exists() or (doc_dir / metadata_rel).exists():
+            raise HTTPException(409, f"region OCR artifact already exists: {requested_artifact_id}")
+    crop = export_pdf_region_crop(
+        docs_dir,
+        doc_id,
+        page,
+        bbox,
+        dpi=dpi,
+        coordinate_system=coordinate_system,
+    )
+    doc_dir = docs_dir / doc_id
+    crop_path = doc_dir / crop["output_path"]
+    image_bytes = crop_path.read_bytes()
+
+    page_num = int(crop["page"])
+    page_blocks: OCRPageBlocks | None = None
+    if backend_kind == "local":
+        text, page_blocks = local_ocr_with_layout(image_bytes, page_num, selected_backend)
+    else:
+        text = gemini_ocr(image_bytes, page_num).strip()
+
+    block_dicts = [block.to_dict() for block in page_blocks.blocks] if page_blocks else []
+    confidences = [float(block.get("confidence") or 0.0) for block in block_dicts]
+    confidence = round(sum(confidences) / len(confidences), 4) if confidences else None
+
+    if requested_artifact_id:
+        artifact_id = requested_artifact_id
+    else:
+        run_hash = hashlib.sha256(
+            f"{doc_id}:{page_num}:{crop['artifact_id']}:{backend_kind}:{selected_backend}:{time.time_ns()}".encode()
+        ).hexdigest()[:16]
+        artifact_id = f"region-ocr-p{page_num:04d}-{run_hash}"
+    region_dir = doc_dir / REGION_OCR_ARTIFACT_DIR
+    region_dir.mkdir(parents=True, exist_ok=True)
+    text_rel = f"{REGION_OCR_ARTIFACT_DIR}/{artifact_id}.txt"
+    metadata_rel = f"{REGION_OCR_ARTIFACT_DIR}/{artifact_id}.json"
+    if (doc_dir / text_rel).exists() or (doc_dir / metadata_rel).exists():
+        raise HTTPException(409, f"region OCR artifact already exists: {artifact_id}")
+
+    metadata = {
+        "artifact_id": artifact_id,
+        "doc_id": doc_id,
+        "page": page_num,
+        "bbox": crop["bbox"],
+        "coordinate_system": crop["coordinate_system"],
+        "text": text,
+        "confidence": confidence,
+        "blocks": block_dicts,
+        "backend": {
+            "requested": backend,
+            "kind": backend_kind,
+            "selected": selected_backend,
+            "dpi": dpi,
+        },
+        "crop": {
+            "artifact_id": crop["artifact_id"],
+            "output_path": crop["output_path"],
+            "metadata_path": crop["metadata_path"],
+            "sha256": crop["sha256"],
+        },
+        "source_ref": crop.get("source_ref", ""),
+        "text_path": text_rel,
+        "metadata_path": metadata_rel,
+        "derived": True,
+        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _write_text(doc_dir / text_rel, text + ("\n" if text and not text.endswith("\n") else ""))
+    _write_json(doc_dir / metadata_rel, metadata)
+    return metadata
+
+
+def _load_ocr_debug_overlays(doc_dir: Path) -> dict[int, dict[str, Any]]:
+    sidecar_path = doc_dir / OCR_BLOCKS_SIDECAR_PATH
+    if not sidecar_path.exists():
+        return {}
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    overlays: dict[int, dict[str, Any]] = {}
+    for page in sidecar.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        page_num = int(page.get("page") or 0)
+        width = float(page.get("width") or 0)
+        height = float(page.get("height") or 0)
+        if page_num < 1 or width <= 0 or height <= 0:
+            continue
+        overlays[page_num] = {
+            "width": width,
+            "height": height,
+            "blocks": [block for block in (page.get("blocks") or []) if isinstance(block, dict)],
+        }
+    return overlays
+
+
+def _load_table_debug_overlays(doc_dir: Path) -> dict[int, list[dict[str, Any]]]:
+    tables_path = doc_dir / "tables.json"
+    if not tables_path.exists():
+        return {}
+    try:
+        tables = json.loads(tables_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(tables, list):
+        return {}
+    overlays: dict[int, list[dict[str, Any]]] = {}
+    for table in tables:
+        if not isinstance(table, dict) or not isinstance(table.get("bbox"), list):
+            continue
+        page_num = int(table.get("page") or table.get("page_start") or 0)
+        if page_num < 1:
+            continue
+        overlays.setdefault(page_num, []).append(table)
+    return overlays
+
+
+def _debug_bbox_to_pixels(
+    bbox: list[float],
+    *,
+    source_width: float,
+    source_height: float,
+    target_width: int,
+    target_height: int,
+) -> list[float] | None:
+    try:
+        x0, y0, x1, y1 = _normalize_layout_bbox(bbox)
+    except (TypeError, ValueError):
+        return None
+    if source_width <= 0 or source_height <= 0:
+        return None
+    return [
+        max(0.0, min(float(target_width), x0 * target_width / source_width)),
+        max(0.0, min(float(target_height), y0 * target_height / source_height)),
+        max(0.0, min(float(target_width), x1 * target_width / source_width)),
+        max(0.0, min(float(target_height), y1 * target_height / source_height)),
+    ]
+
+
+def generate_visual_debug_artifacts(
+    docs_dir: Path,
+    doc_id: str,
+    *,
+    dpi: int = 144,
+    include_ocr_blocks: bool = True,
+    include_tables: bool = True,
+) -> dict[str, Any]:
+    import fitz
+    from PIL import Image, ImageDraw
+
+    dpi = int(dpi)
+    if dpi < 36 or dpi > 600:
+        raise HTTPException(422, "dpi must be between 36 and 600")
+    source_path, _manifest, source_file = _resolve_doc_source_file(docs_dir, doc_id)
+    doc_dir = docs_dir / doc_id
+    ocr_pages = _load_ocr_debug_overlays(doc_dir) if include_ocr_blocks else {}
+    table_pages = _load_table_debug_overlays(doc_dir) if include_tables else {}
+    pages_to_render = sorted(set(ocr_pages) | set(table_pages))
+
+    debug_dir = doc_dir / VISUAL_DEBUG_ARTIFACT_DIR
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    page_entries: list[dict[str, Any]] = []
+    scale = dpi / 72.0
+    try:
+        pdf = fitz.open(str(source_path))
+    except Exception as exc:
+        raise HTTPException(500, f"source PDF could not be opened for {doc_id}: {exc}") from exc
+    try:
+        for page_num in pages_to_render:
+            if page_num > len(pdf):
+                continue
+            page_obj = pdf[page_num - 1]
+            pix = page_obj.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+            image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            draw = ImageDraw.Draw(image, "RGBA")
+            line_width = max(2, int(scale * 2))
+            ocr_page = ocr_pages.get(page_num) or {}
+            ocr_count = 0
+            for block in ocr_page.get("blocks") or []:
+                rect = _debug_bbox_to_pixels(
+                    block.get("bbox") or [],
+                    source_width=float(ocr_page.get("width") or 0),
+                    source_height=float(ocr_page.get("height") or 0),
+                    target_width=image.width,
+                    target_height=image.height,
+                )
+                if rect is None:
+                    continue
+                draw.rectangle(rect, outline=(0, 102, 255, 230), width=line_width)
+                ocr_count += 1
+            table_count = 0
+            for table in table_pages.get(page_num) or []:
+                rect = _debug_bbox_to_pixels(
+                    table.get("bbox") or [],
+                    source_width=float(ocr_page.get("width") or image.width),
+                    source_height=float(ocr_page.get("height") or image.height),
+                    target_width=image.width,
+                    target_height=image.height,
+                )
+                if rect is None:
+                    continue
+                draw.rectangle(rect, fill=(255, 128, 0, 35), outline=(255, 96, 0, 255), width=line_width + 1)
+                draw.text((rect[0] + 4, max(0, rect[1] - 14)), str(table.get("table_id") or "table"), fill=(255, 96, 0, 255))
+                table_count += 1
+            output_rel = f"{VISUAL_DEBUG_ARTIFACT_DIR}/page-{page_num:04d}.png"
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            _write_bytes(doc_dir / output_rel, buffer.getvalue())
+            page_entries.append(
+                {
+                    "page": page_num,
+                    "output_path": output_rel,
+                    "dpi": dpi,
+                    "ocr_block_count": ocr_count,
+                    "table_region_count": table_count,
+                }
+            )
+    finally:
+        pdf.close()
+
+    metadata_rel = f"{VISUAL_DEBUG_ARTIFACT_DIR}/manifest.json"
+    metadata = {
+        "doc_id": doc_id,
+        "metadata_path": metadata_rel,
+        "artifact_dir": f"{VISUAL_DEBUG_ARTIFACT_DIR}/",
+        "source_ref": source_file.get("ref", ""),
+        "derived": True,
+        "opt_in": True,
+        "coordinate_system": OCR_BLOCKS_COORDINATE_SYSTEM,
+        "legend": {
+            "ocr_blocks": "blue rectangles",
+            "tables": "orange translucent rectangles",
+        },
+        "options": {
+            "dpi": dpi,
+            "include_ocr_blocks": include_ocr_blocks,
+            "include_tables": include_tables,
+        },
+        "pages": page_entries,
+        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _write_json(doc_dir / metadata_rel, metadata)
+    return metadata
+
+
+def _load_ocr_sidecar_payload(doc_dir: Path, doc_id: str) -> dict[str, Any]:
+    sidecar_path = doc_dir / OCR_BLOCKS_SIDECAR_PATH
+    if not sidecar_path.exists():
+        raise HTTPException(404, f"layout sidecar not found for {doc_id}")
+    try:
+        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(500, f"layout sidecar unreadable for {doc_id}: {exc}") from exc
+    if not isinstance(sidecar, dict):
+        raise HTTPException(500, f"layout sidecar unreadable for {doc_id}")
+    return sidecar
+
+
+def _sidecar_page_summaries(sidecar: dict[str, Any]) -> list[dict[str, Any]]:
+    pages = sidecar.get("pages") if isinstance(sidecar.get("pages"), list) else []
+    summaries: list[dict[str, Any]] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        blocks = page.get("blocks") if isinstance(page.get("blocks"), list) else []
+        summaries.append(
+            {
+                "page": int(page.get("page") or 0),
+                "width": int(page.get("width") or 0),
+                "height": int(page.get("height") or 0),
+                "block_count": len(blocks),
+            }
+        )
+    return summaries
+
+
+def _load_tables_sidecar(doc_dir: Path) -> list[dict[str, Any]]:
+    tables_path = doc_dir / "tables.json"
+    if not tables_path.exists():
+        return []
+    try:
+        tables = json.loads(tables_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(500, f"tables sidecar unreadable: {exc}") from exc
+    if not isinstance(tables, list):
+        raise HTTPException(500, "tables sidecar unreadable")
+    return [table for table in tables if isinstance(table, dict)]
+
+
+def _resolve_table_json_path(doc_dir: Path, rel_path: str) -> Path | None:
+    if not isinstance(rel_path, str):
+        return None
+    raw_path = Path(rel_path)
+    if raw_path.is_absolute() or raw_path.suffix != ".json" or ".." in raw_path.parts:
+        return None
+    tables_dir = (doc_dir / "tables").resolve()
+    path = (doc_dir / raw_path).resolve()
+    try:
+        path.relative_to(tables_dir)
+    except ValueError:
+        return None
+    return path
 
 
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
@@ -4980,12 +6270,20 @@ async def api_parse_doc(
                 )
             elif suffix in (".doc", ".docx"):
                 word_path = _convert_legacy_office(tmp_path, "docx") if suffix == ".doc" else tmp_path
-                if extract_images and ocr_images:
+                if extract_images:
                     embedded_image_count = _count_word_embedded_image_references(word_path)
                     requested_ocr_image_count = min(embedded_image_count, max_images)
                     parsed_metadata.setdefault("embedded_image_count", embedded_image_count)
-                    parsed_metadata.setdefault("requested_ocr_image_count", requested_ocr_image_count)
-                    if requested_ocr_image_count > max_ocr_images:
+                    parsed_metadata.setdefault("requested_image_count", requested_ocr_image_count)
+                    parsed_metadata.setdefault(
+                        "image_inventory_truncated",
+                        bool(embedded_image_count > requested_ocr_image_count),
+                    )
+                    if ocr_images:
+                        parsed_metadata.setdefault(
+                            "requested_ocr_image_count", requested_ocr_image_count
+                        )
+                    if ocr_images and requested_ocr_image_count > max_ocr_images:
                         raise HTTPException(
                             422,
                             (
@@ -5328,6 +6626,98 @@ async def get_manifest(doc_id: str):
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+@app.get("/library/{doc_id}/sidecars")
+async def discover_sidecars(doc_id: str):
+    """Discover optional sidecars without returning large geometry payloads."""
+    _validate_doc_id(doc_id)
+    doc_dir = _get_docs_dir() / doc_id
+    manifest_path = doc_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    layout = manifest.get("layout") if isinstance(manifest.get("layout"), dict) else {}
+    sidecar_path = doc_dir / OCR_BLOCKS_SIDECAR_PATH
+    layout_summary = {
+        "available": sidecar_path.exists(),
+        "path": OCR_BLOCKS_SIDECAR_PATH if sidecar_path.exists() else "",
+        "coordinate_system": layout.get("coordinate_system") or OCR_BLOCKS_COORDINATE_SYSTEM,
+        "version": int(layout.get("version") or OCR_BLOCKS_SIDECAR_VERSION),
+        "pages_endpoint": f"/library/{doc_id}/layout/pages" if sidecar_path.exists() else "",
+        "page_endpoint_template": f"/library/{doc_id}/layout/page/{{page}}" if sidecar_path.exists() else "",
+    }
+    if sidecar_path.exists():
+        sidecar = _load_ocr_sidecar_payload(doc_dir, doc_id)
+        page_summaries = _sidecar_page_summaries(sidecar)
+        layout_summary["page_count"] = len(page_summaries)
+        layout_summary["block_count"] = sum(page["block_count"] for page in page_summaries)
+    else:
+        layout_summary["page_count"] = 0
+        layout_summary["block_count"] = 0
+
+    tables = _load_tables_sidecar(doc_dir)
+    table_summaries = [
+        {
+            "table_id": str(table.get("table_id") or ""),
+            "page": table.get("page"),
+            "row_count": table.get("row_count"),
+            "column_count": table.get("column_count"),
+            "source": table.get("source"),
+            "file": table.get("file"),
+            "json_file": table.get("json_file") or "",
+            "bbox_available": bool(table.get("bbox")),
+        }
+        for table in tables
+    ]
+    return {
+        "doc_id": doc_id,
+        "layout": layout_summary,
+        "tables": {
+            "available": bool(tables),
+            "path": "tables.json" if tables else "",
+            "count": len(tables),
+            "items": table_summaries,
+            "json_endpoint_template": f"/library/{doc_id}/table/{{table_id}}/json",
+        },
+    }
+
+
+@app.get("/library/{doc_id}/layout/pages")
+async def list_layout_pages(doc_id: str):
+    """List OCR layout pages and block counts without returning block geometry."""
+    _validate_doc_id(doc_id)
+    doc_dir = _get_docs_dir() / doc_id
+    if not (doc_dir / "manifest.json").exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+    sidecar = _load_ocr_sidecar_payload(doc_dir, doc_id)
+    return {
+        "doc_id": doc_id,
+        "coordinate_system": sidecar.get("coordinate_system") or OCR_BLOCKS_COORDINATE_SYSTEM,
+        "version": int(sidecar.get("version") or OCR_BLOCKS_SIDECAR_VERSION),
+        "pages": _sidecar_page_summaries(sidecar),
+    }
+
+
+@app.get("/library/{doc_id}/layout/page/{page_num}")
+async def get_layout_page(doc_id: str, page_num: int):
+    """Read OCR geometry for one page only."""
+    _validate_doc_id(doc_id)
+    if page_num < 1:
+        raise HTTPException(422, "page_num must be a 1-based positive integer")
+    doc_dir = _get_docs_dir() / doc_id
+    if not (doc_dir / "manifest.json").exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+    sidecar = _load_ocr_sidecar_payload(doc_dir, doc_id)
+    for page in sidecar.get("pages") or []:
+        if isinstance(page, dict) and int(page.get("page") or 0) == page_num:
+            return {
+                "doc_id": doc_id,
+                "coordinate_system": sidecar.get("coordinate_system") or OCR_BLOCKS_COORDINATE_SYSTEM,
+                "version": int(sidecar.get("version") or OCR_BLOCKS_SIDECAR_VERSION),
+                "page": page,
+            }
+    raise HTTPException(404, f"layout page not found: {page_num}")
+
+
 @app.post("/library/{doc_id}/search_sections", response_model=SearchResponse)
 async def search_sections(doc_id: str, request: SectionSearchRequest):
     """Search within one document's section files and return sid/page provenance."""
@@ -5521,6 +6911,30 @@ async def get_table(doc_id: str, table_id: str):
     if not p.exists():
         raise HTTPException(404, t("table_not_found", table_id=table_id))
     return {"doc_id": doc_id, "table_id": table_id, "content": p.read_text(encoding="utf-8")}
+
+
+@app.get("/library/{doc_id}/table/{table_id}/json")
+async def get_table_json(doc_id: str, table_id: str):
+    """Read structured JSON for one table when available."""
+    _validate_doc_id(doc_id)
+    _validate_table_id(table_id)
+    doc_dir = _get_docs_dir() / doc_id
+    if not (doc_dir / "manifest.json").exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+    tid = table_id if table_id.startswith("table-") else f"table-{table_id}"
+    for table in _load_tables_sidecar(doc_dir):
+        if table.get("table_id") != tid:
+            continue
+        json_file = str(table.get("json_file") or "")
+        path = _resolve_table_json_path(doc_dir, json_file)
+        if path is None or not path.exists():
+            raise HTTPException(404, f"table JSON not found: {table_id}")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(500, f"table JSON unreadable for {table_id}: {exc}") from exc
+        return {"doc_id": doc_id, "table_id": tid, "table": payload}
+    raise HTTPException(404, f"table JSON not found: {table_id}")
 
 
 @app.get("/library/{doc_id}/images")

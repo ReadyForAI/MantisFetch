@@ -33,28 +33,114 @@ def _write(message: dict[str, Any]) -> None:
     _protocol_out.flush()
 
 
-def _flatten_paddle_ocr_result(result: Any) -> str:
-    lines: list[str] = []
+def _bbox_from_geometry(value: Any) -> list[float]:
+    if value is None:
+        return [0.0, 0.0, 0.0, 0.0]
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)) and len(value) == 4 and all(
+        isinstance(v, (int, float)) for v in value
+    ):
+        x0, y0, x1, y1 = [float(v) for v in value]
+        return [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+
+    points: list[tuple[float, float]] = []
+
+    def collect(obj: Any) -> None:
+        if hasattr(obj, "tolist"):
+            obj = obj.tolist()
+        if (
+            isinstance(obj, (list, tuple))
+            and len(obj) >= 2
+            and isinstance(obj[0], (int, float))
+            and isinstance(obj[1], (int, float))
+        ):
+            points.append((float(obj[0]), float(obj[1])))
+            return
+        if isinstance(obj, (list, tuple)):
+            for child in obj:
+                collect(child)
+
+    collect(value)
+    if not points:
+        return [0.0, 0.0, 0.0, 0.0]
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _as_sequence(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _first_sequence(block: dict[str, Any], keys: tuple[str, ...]) -> list[Any]:
+    for key in keys:
+        values = _as_sequence(block.get(key))
+        if values:
+            return values
+    return []
+
+
+def _extract_paddle_ocr_blocks(result: Any) -> list[dict[str, Any]]:
+    extracted: list[dict[str, Any]] = []
     blocks = result if isinstance(result, list) else [result]
     for block in blocks:
         if isinstance(block, dict):
-            texts = block.get("rec_texts") or []
-            for text in texts:
+            texts = _as_sequence(block.get("rec_texts"))
+            scores = _first_sequence(block, ("rec_scores", "scores"))
+            boxes = _first_sequence(block, ("rec_boxes", "rec_polys", "dt_polys", "boxes"))
+            for index, text in enumerate(texts):
                 value = str(text).strip()
                 if value:
-                    lines.append(value)
+                    score = scores[index] if index < len(scores) else 0.0
+                    box = boxes[index] if index < len(boxes) else None
+                    extracted.append(
+                        {
+                            "text": value,
+                            "bbox": _bbox_from_geometry(box),
+                            "confidence": float(score or 0.0),
+                            "line_index": len(extracted),
+                            "order": len(extracted),
+                        }
+                    )
             continue
         if isinstance(block, list):
             for item in block:
                 if not isinstance(item, (list, tuple)) or len(item) < 2:
                     continue
+                box = item[0] if item else None
                 payload = item[1]
                 if isinstance(payload, (list, tuple)) and payload:
                     text = str(payload[0]).strip()
+                    score = float(payload[1] or 0.0) if len(payload) > 1 else 0.0
                 else:
                     text = str(payload).strip()
+                    score = 0.0
                 if text:
-                    lines.append(text)
+                    extracted.append(
+                        {
+                            "text": text,
+                            "bbox": _bbox_from_geometry(box),
+                            "confidence": score,
+                            "line_index": len(extracted),
+                            "order": len(extracted),
+                        }
+                    )
+    return extracted
+
+
+def _flatten_paddle_ocr_result(result: Any) -> str:
+    lines: list[str] = []
+    for block in _extract_paddle_ocr_blocks(result):
+        value = str(block.get("text") or "").strip()
+        if value:
+            lines.append(value)
     return "\n".join(lines).strip()
 
 
@@ -137,8 +223,18 @@ def main() -> int:
             image_bytes = base64.b64decode(str(request.get("image_b64") or ""), validate=True)
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             result = _predict(engine, api_version, np.asarray(image))
+            blocks = _extract_paddle_ocr_blocks(result)
             text = _flatten_paddle_ocr_result(result)
-            _write({"ok": True, "page_num": page_num, "text": text})
+            _write(
+                {
+                    "ok": True,
+                    "page_num": page_num,
+                    "text": text,
+                    "width": image.width,
+                    "height": image.height,
+                    "blocks": blocks,
+                }
+            )
         except BaseException as exc:
             _write(
                 {

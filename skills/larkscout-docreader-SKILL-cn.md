@@ -151,9 +151,9 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
 | `force_ocr`           | bool   | `false`    | 强制使用 LLM OCR 处理全部页面；成本较高，只在明确需要视觉模型重识别整份文档时使用 |
 | `ocr_pages`           | string | null       | 指定页范围升级为 LLM OCR，例如 `"10-30"`；未指定页仍按服务端自动策略处理 |
 | `extract_tables`      | bool   | `true`     | 是否提取表格 |
-| `extract_images`      | bool   | `false`    | 是否抽取 Word 内嵌图片并输出 `images.json` / `images/` |
+| `extract_images`      | bool   | `false`    | 是否抽取 Word 内嵌图片并输出 `images.json` / `images/`；可先只做轻量图片清单 |
 | `ocr_images`          | bool   | `false`    | 是否对已抽取的 Word 内嵌图片做 OCR |
-| `image_ocr_backend`   | string | `auto`     | 图片 OCR 后端：`auto` / `local` / `llm`；`auto` 为本地优先，失败后局部 LLM OCR |
+| `image_ocr_backend`   | string | `auto`     | 图片 OCR 后端：`auto` / `local` / `llm`；大标书推荐显式使用 `local`，避免默认触发 LLM fallback |
 | `max_images`          | int    | `200`      | 单文档最多处理的内嵌图片数量 |
 | `max_ocr_images`      | int    | `80`       | 开启 `ocr_images=true` 时允许 OCR 的最大 Word 内嵌图片数量；实际 OCR 数量超过该值会返回 422 |
 | `max_tables_per_page` | int    | `3`        | 每页最多提取的表格数量 |
@@ -173,24 +173,35 @@ curl -X POST http://localhost:9898/doc/parse \
 
 调用方不需要依赖 Python SDK；可以直接用 `curl` 调 LarkScout 入库。LarkScout 只负责底层解析、索引和来源保留；具体业务场景、业务字段、命名规则和后续操作由上层调用方自行定义。
 
-Word 内嵌图片识别的通用入库示例：
+Word 内嵌图片的推荐入库方式是先抽轻量图片清单，不默认 OCR 全部图片。`images.json` 会包含图片文件、锚点、尺寸、hash、上下文关键词和候选 hints，供下游工具按业务要求筛选候选图片：
 
 ```bash
 curl -X POST http://localhost:9898/doc/parse \
   -F "file=@/path/to/document.docx" \
   -F "summary_mode=defer" \
-  -F "id_strategy=source_filename" \
   -F "extract_tables=true" \
   -F "extract_images=true" \
-  -F "ocr_images=true" \
-  -F "image_ocr_backend=auto" \
-  -F "max_ocr_images=80" \
+  -F "ocr_images=false" \
+  -F "max_images=1000" \
   -F 'metadata={"display_name":"document.docx","source_system":"agent_upload"}'
 ```
 
-如果本次请求实际会 OCR 的图片数量超过 `max_ocr_images`，服务会拒绝执行图片 OCR。调用方应改为 `ocr_images=false` 先入库正文和图片索引，或设置较低的 `max_images` 只处理前若干张图片。
+如确实需要在入库时 OCR 少量图片，应显式限制数量并优先用本地 OCR：
 
-该能力只输出图片来源、附近标题、section 锚点、图片文件和 OCR 文本；图片代表什么材料、是否满足业务要求，由上层工具自行判断。
+```bash
+curl -X POST http://localhost:9898/doc/parse \
+  -F "file=@/path/to/document.docx" \
+  -F "summary_mode=defer" \
+  -F "extract_images=true" \
+  -F "ocr_images=true" \
+  -F "image_ocr_backend=local" \
+  -F "max_images=50" \
+  -F "max_ocr_images=50"
+```
+
+如果本次请求实际会 OCR 的图片数量超过 `max_ocr_images`，服务会拒绝执行图片 OCR。大标书调用方应使用 `ocr_images=false` 先入库正文和图片清单，再由下游工具按招标要求筛选候选图片后做定向 OCR/视觉审查。
+
+该能力只输出图片来源、附近标题、section 锚点、图片文件、inventory 元数据和可选 OCR 文本；图片代表什么材料、是否满足业务要求，由上层工具自行判断。
 
 带 metadata 的通用入库示例：
 
@@ -198,7 +209,6 @@ curl -X POST http://localhost:9898/doc/parse \
 curl -X POST http://localhost:9898/doc/parse \
   -F "file=@/path/to/document.pdf" \
   -F "summary_mode=defer" \
-  -F "id_strategy=source_filename" \
   -F "extract_tables=true" \
   -F 'metadata={"display_name":"document.pdf","source_system":"manual_upload"}'
 ```

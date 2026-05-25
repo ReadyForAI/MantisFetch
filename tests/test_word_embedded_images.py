@@ -14,6 +14,37 @@ def _make_png_bytes() -> bytes:
     return out.getvalue()
 
 
+def _make_docx_with_external_image_link(path: Path, target_url: str) -> None:
+    document_xml = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:drawing><a:blip r:embed="rId1"/></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>
+"""
+    rels_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1"
+    Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+    Target="{target_url}" TargetMode="External"/>
+</Relationships>
+"""
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml"
+    ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("word/document.xml", document_xml)
+        zf.writestr("word/_rels/document.xml.rels", rels_xml)
+
+
 def _make_docx_with_image(path: Path, image_path: Path, image_count: int = 1) -> None:
     body_parts = [
         '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>学历证明</w:t></w:r></w:p>',
@@ -95,10 +126,18 @@ def test_extract_word_embedded_images_keeps_generic_anchor(tmp_path, monkeypatch
     image = images[0]
     assert image.image_id == "IMG-001"
     assert image.near_heading == "学历证明"
+    assert "以下图片为证明材料" in image.context_text
     assert image.anchor_sid == "s-proof"
     assert image.section_title == "学历证明"
     assert image.original_type == "image/png"
     assert image.render_status == "ok"
+    assert image.width == 80
+    assert image.height == 32
+    assert image.original_size_bytes == image_path.stat().st_size
+    assert len(image.original_sha256) == 64
+    assert len(image.average_hash) == 16
+    assert image.context_keywords == ["education_certificate"]
+    assert "personnel_material_candidate" in image.inventory_hints
     assert image.ocr_status == "ok"
     assert image.ocr_text == "普通高等学校毕业证书"
     assert sections[0].image_refs == ["IMG-001"]
@@ -143,6 +182,18 @@ def test_count_word_embedded_image_references(tmp_path):
     _make_docx_with_image(docx_path, image_path, image_count=3)
 
     assert docreader._count_word_embedded_image_references(docx_path) == 3
+
+
+def test_count_word_embedded_image_references_ignores_external_links(tmp_path):
+    import larkscout_docreader as docreader
+
+    docx_path = tmp_path / "external.docx"
+    _make_docx_with_external_image_link(docx_path, "https://example.com/banner.png")
+
+    # External-mode relationships point outside the .docx package, so they
+    # cannot be OCR'd and must not inflate the threshold count.
+    assert docreader._count_word_embedded_image_references(docx_path) == 0
+    assert docreader._word_image_relationships(docx_path) == {}
 
 
 def test_parse_rejects_word_image_ocr_over_threshold(tmp_path, client):
@@ -217,6 +268,24 @@ def test_parse_allows_word_image_ocr_when_max_images_keeps_request_under_thresho
     assert resp.status_code == 200
     body = resp.json()
     assert body["image_count"] == 1
+    manifest = json.loads(
+        (tmp_path / "docs" / body["doc_id"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    word_images = manifest["parse_metadata"]["word_images"]
+    assert word_images["embedded_image_count"] == 3
+    assert word_images["max_images"] == 1
+    assert word_images["extracted"] == 1
+    assert word_images["truncated"] is True
+    assert manifest["metadata"]["embedded_image_count"] == 3
+    assert manifest["metadata"]["requested_image_count"] == 1
+    assert manifest["metadata"]["requested_ocr_image_count"] == 1
+    assert manifest["metadata"]["image_inventory_truncated"] is True
+    assert manifest["images"][0]["inventory"]["width"] == 80
+    assert manifest["images"][0]["inventory"]["height"] == 32
+    assert manifest["images"][0]["inventory"]["context_keywords"] == [
+        "education_certificate"
+    ]
+    assert "以下图片为证明材料" in manifest["images"][0]["anchor"]["context_text"]
 
 
 def test_write_output_extract_only_writes_image_artifacts(tmp_path):
@@ -251,15 +320,26 @@ def test_write_output_extract_only_writes_image_artifacts(tmp_path):
                 media_path="word/media/image1.png",
                 relationship_id="rId9",
                 paragraph_index=3,
+                context_text="证明材料上下文",
                 near_heading="证明材料",
                 anchor_sid="s-proof",
                 section_title="证明材料",
                 original_ext=".png",
                 original_type="image/png",
                 original_bytes=png_bytes,
+                original_size_bytes=len(png_bytes),
+                original_sha256="abc123",
                 rendered_ext=".png",
                 rendered_type="image/png",
                 rendered_bytes=png_bytes,
+                rendered_size_bytes=len(png_bytes),
+                rendered_sha256="def456",
+                width=80,
+                height=32,
+                aspect_ratio=2.5,
+                average_hash="ffffffffffffffff",
+                context_keywords=["education_certificate"],
+                inventory_hints=["personnel_material_candidate"],
                 render_status="ok",
                 ocr_enabled=True,
                 ocr_backend="local-paddleocr",
@@ -284,6 +364,10 @@ def test_write_output_extract_only_writes_image_artifacts(tmp_path):
     assert manifest["sections"][0]["image_refs"] == ["IMG-001"]
     assert manifest["images"][0]["image_id"] == "IMG-001"
     assert images[0]["ocr"]["text"] == "证书 OCR 文本"
+    assert images[0]["inventory"]["width"] == 80
+    assert images[0]["anchor"]["context_text"] == "证明材料上下文"
+    assert images[0]["inventory"]["context_keywords"] == ["education_certificate"]
+    assert images[0]["inventory"]["hints"] == ["personnel_material_candidate"]
     assert (doc_dir / "images" / "IMG-001.original.png").exists()
     assert (doc_dir / "images" / "IMG-001.png").exists()
     assert (doc_dir / "images" / "IMG-001.ocr.txt").read_text(encoding="utf-8").strip() == "证书 OCR 文本"

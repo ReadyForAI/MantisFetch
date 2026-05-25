@@ -327,6 +327,86 @@ class TestLibraryManifest:
         assert resp.status_code == 404
 
 
+class TestLibrarySidecars:
+    def test_sidecar_discovery_is_low_token_and_explicit(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_dir = _setup_doc(Path(tmp))
+            sidecar = {
+                "version": 1,
+                "doc_id": "DOC-001",
+                "coordinate_system": "image_pixels",
+                "pages": [
+                    {
+                        "page": 1,
+                        "width": 400,
+                        "height": 200,
+                        "blocks": [
+                            {
+                                "block_id": "p1-b0001",
+                                "text": "甲方",
+                                "bbox": [80, 40, 160, 80],
+                                "confidence": 0.9,
+                            }
+                        ],
+                    }
+                ],
+            }
+            (doc_dir / "ocr_blocks.json").write_text(json.dumps(sidecar), encoding="utf-8")
+            tables = [
+                {
+                    "table_id": "table-01",
+                    "page": 1,
+                    "row_count": 2,
+                    "column_count": 2,
+                    "source": "layout",
+                    "file": "tables/table-01.md",
+                    "json_file": "tables/table-01.json",
+                    "bbox": [80, 40, 240, 140],
+                }
+            ]
+            (doc_dir / "tables.json").write_text(json.dumps(tables), encoding="utf-8")
+            (doc_dir / "tables" / "table-01.json").write_text(
+                json.dumps({"table_id": "table-01", "rows": []}), encoding="utf-8"
+            )
+
+            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+                discovery = client.get("/doc/library/DOC-001/sidecars")
+                pages = client.get("/doc/library/DOC-001/layout/pages")
+                page = client.get("/doc/library/DOC-001/layout/page/1")
+                table_json = client.get("/doc/library/DOC-001/table/01/json")
+                table_md = client.get("/doc/library/DOC-001/table/01")
+                manifest = client.get("/doc/library/DOC-001/manifest")
+
+        assert discovery.status_code == 200
+        body = discovery.json()
+        assert body["layout"]["available"] is True
+        assert body["layout"]["page_count"] == 1
+        assert body["layout"]["block_count"] == 1
+        discovery_payload = json.dumps(body, ensure_ascii=False)
+        assert "p1-b0001" not in discovery_payload
+        assert "甲方" not in discovery_payload
+        assert body["tables"]["items"][0]["json_file"] == "tables/table-01.json"
+
+        assert pages.status_code == 200
+        assert pages.json()["pages"] == [{"page": 1, "width": 400, "height": 200, "block_count": 1}]
+        assert page.status_code == 200
+        assert page.json()["page"]["blocks"][0]["text"] == "甲方"
+        assert table_json.status_code == 200
+        assert table_json.json()["table"]["table_id"] == "table-01"
+        assert table_md.status_code == 200
+        assert "| A | B |" in table_md.json()["content"]
+        assert manifest.status_code == 200
+        assert "sidecars" not in manifest.json()
+
+    def test_table_json_requires_structured_sidecar(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))
+            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/table/01/json")
+
+        assert resp.status_code == 404
+
+
 class TestLibrarySearchText:
     def test_search_text_returns_section_match_and_page_hint(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
