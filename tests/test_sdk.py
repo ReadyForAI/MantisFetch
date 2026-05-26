@@ -121,7 +121,7 @@ class TestSyncClient:
         result = client.parse(
             sample,
             summary_mode="defer",
-            profile="tender_cn",
+            profile="bid_cn",
             content_type="Bid",
             metadata={"app": "bid-manage"},
             project_id="P-001",
@@ -134,7 +134,7 @@ class TestSyncClient:
         data = mock_http.post.call_args.kwargs["data"]
         assert data["content_type"] == "Bid"
         assert data["summary_mode"] == "defer"
-        assert data["document_profile"] == "tender_cn"
+        assert data["document_profile"] == "bid_cn"
         assert data["id_strategy"] == "source_filename"
         assert "bid-manage" in data["metadata"]
         assert "tender_file" in data["metadata"]

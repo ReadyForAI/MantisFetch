@@ -200,7 +200,7 @@ For tender documents and Word bid files that should become official review input
 curl -sS --fail-with-body -X POST http://127.0.0.1:9898/doc/parse \
   -F "file=@/path/to/bid.docx" \
   -F "content_type=Bid" \
-  -F "document_profile=tender_cn" \
+  -F "document_profile=bid_cn" \
   -F "summary_mode=defer" \
   -F "extract_tables=true" \
   -F "extract_images=true" \

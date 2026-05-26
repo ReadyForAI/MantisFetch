@@ -24,7 +24,7 @@ def test_split_sections_keeps_preface_before_toc_body() -> None:
 这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。这里是招标依据正文。
 """.strip()
 
-    profile = _load_document_profile("tender_cn", None)
+    profile = _load_document_profile("bid_cn", None)
     assert profile is not None
 
     sections = _split_sections(

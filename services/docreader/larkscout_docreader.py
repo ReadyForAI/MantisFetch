@@ -71,6 +71,8 @@ SUPPORTED_FORMATS = [
 SUPPORTED_EXTENSIONS = {f".{fmt}" for fmt in SUPPORTED_FORMATS}
 DOCUMENT_PROFILE_CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs" / "document_profiles"
 FIELD_OCR_CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs" / "field_profiles"
+# Backward-compat: tender_cn was renamed to bid_cn to match the Bid storage directory.
+_DOCUMENT_PROFILE_ALIASES = {"tender_cn": "bid_cn"}
 OCR_BLOCKS_SIDECAR_VERSION = 1
 OCR_BLOCKS_SIDECAR_PATH = "ocr_blocks.json"
 OCR_BLOCKS_COORDINATE_SYSTEM = "image_pixels"
@@ -1532,6 +1534,8 @@ def _load_document_profile(profile_name: str | None, config_path: str | None) ->
     custom = (config_path or "").strip()
     if not selected and not custom:
         return None
+
+    selected = _DOCUMENT_PROFILE_ALIASES.get(selected, selected)
 
     if custom:
         path = Path(custom).expanduser()
@@ -6301,6 +6305,12 @@ async def api_parse_doc(
             or os.environ.get("LARKSCOUT_FIELD_OCR_PROFILE", "").strip()
             or None
         )
+        if field_ocr_profile:
+            canonical_profile = _DOCUMENT_PROFILE_ALIASES.get(field_ocr_profile, field_ocr_profile)
+            if canonical_profile != field_ocr_profile:
+                field_ocr_profile = canonical_profile
+                if parsed_metadata.get("document_profile"):
+                    parsed_metadata["document_profile"] = canonical_profile
         requested_field_ocr_config = (
             str(field_ocr_config or parsed_metadata.get("field_ocr_config") or "").strip()
             or os.environ.get("LARKSCOUT_FIELD_OCR_CONFIG", "").strip()

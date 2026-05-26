@@ -1,5 +1,5 @@
 {
-  "profile": "tender_cn",
+  "profile": "bid_cn",
   "section_policy": {
     "toc_max_level": 2,
     "suppress_arabic_clause_headings_when_formal_chinese": true,
