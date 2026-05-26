@@ -2,9 +2,16 @@ FROM python:3.11-slim-trixie
 
 WORKDIR /app
 
+# Use Aliyun mirror — deb.debian.org throttles Docker Desktop NAT traffic to
+# ~1 MB/s and triggers 503s on the LibreOffice packages; USTC blocks the
+# Docker NAT IP with 403.
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+
 # Install OS-level deps required by Playwright, PyMuPDF, and legacy Office conversion.
 # Several packages use the Debian 13 t64 (time_t-64) naming.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Split into three layers to keep dpkg's peak memory low enough for constrained
+# Docker Desktop builders (single-shot install of LibreOffice + CJK fonts OOMs at 12 GB).
+RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
         curl \
         wget \
         gnupg \
@@ -30,8 +37,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libasound2t64 \
         libpango-1.0-0 \
         libpangocairo-1.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
         libreoffice-writer \
         libreoffice-impress \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
