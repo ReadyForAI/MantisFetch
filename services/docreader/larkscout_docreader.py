@@ -189,6 +189,31 @@ def _count_markdown_tables(text: str) -> int:
     return len(re.findall(r"^\|[\s\-:|]+\|$", text, re.MULTILINE))
 
 
+_TABLE_CELL_SEP_RE = re.compile(r"^[\s]*:?-+:?[\s]*$")
+_TABLE_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+_TABLE_ROW_RE = re.compile(r"^\|.*\|$")
+
+
+def _is_markdown_table_separator(stripped: str) -> bool:
+    """Cell-aware separator check: every cell must look like `:?-+:?`.
+
+    Rejects whole-row matches like `|  | - |  |` where only one cell has a
+    dash. Also rejects all-empty-cell rows.
+    """
+    if not stripped.startswith("|") or not stripped.endswith("|"):
+        return False
+    cells = stripped[1:-1].split("|")
+    if not cells:
+        return False
+    has_dash = False
+    for cell in cells:
+        if not _TABLE_CELL_SEP_RE.match(cell):
+            return False
+        if "-" in cell:
+            has_dash = True
+    return has_dash
+
+
 def _extract_markdown_table_blocks(text: str) -> list[str]:
     """Extract contiguous Markdown table blocks anchored on a separator row.
 
@@ -198,49 +223,54 @@ def _extract_markdown_table_blocks(text: str) -> list[str]:
     formats (docx/pptx/html/etc.) so the table-sidecar writer has structured
     input.
 
-    Lines inside fenced code blocks (``` or ~~~) are skipped so example tables
-    embedded in code samples don't produce spurious entries. Back-to-back
-    tables with no blank-line gap are split on the second separator row so the
-    count matches the legacy regex-based `_count_markdown_tables`.
+    Lines inside fenced code blocks (``` or ~~~) and 4-space (or tab) indented
+    code blocks are skipped so example tables embedded in code samples don't
+    produce spurious entries. Fence markers must match the active opener type:
+    a `~~~` inside an open ``` block doesn't close it. Back-to-back tables
+    with no blank-line gap are split on the second separator row.
     """
     lines = text.splitlines()
-    # Separator must contain at least one '-' to distinguish it from an
-    # all-empty-cell row like `|  |  |` (which the legacy [\s\-:|]+ allowed).
-    sep_re = re.compile(r"^\|[\s:|]*-[\s\-:|]*\|$")
-    row_re = re.compile(r"^\|.*\|$")
-    fence_re = re.compile(r"^(```|~~~)")
-
-    in_fence = False
+    fence_marker: str | None = None
     eligible: list[bool] = []
     for line in lines:
-        stripped = line.strip()
-        if fence_re.match(stripped):
-            in_fence = not in_fence
+        # CommonMark: code blocks of 4+ leading spaces or a tab are not
+        # parsed as tables. Test the raw line — strip() would erase the cue.
+        if not fence_marker and (line.startswith("    ") or line.startswith("\t")):
             eligible.append(False)
             continue
-        eligible.append(not in_fence)
+        stripped = line.strip()
+        fence_match = _TABLE_FENCE_RE.match(stripped)
+        if fence_match:
+            marker = fence_match.group(1)[:3]  # collapse longer runs to ``` / ~~~
+            if fence_marker is None:
+                fence_marker = marker
+            elif marker == fence_marker:
+                fence_marker = None
+            eligible.append(False)
+            continue
+        eligible.append(fence_marker is None)
 
     blocks: list[str] = []
     used: set[int] = set()
     for i, line in enumerate(lines):
-        if i in used or not eligible[i] or not sep_re.match(line.strip()):
+        if i in used or not eligible[i] or not _is_markdown_table_separator(line.strip()):
             continue
         start = i
         while (
             start > 0
             and eligible[start - 1]
-            and row_re.match(lines[start - 1].strip())
+            and _TABLE_ROW_RE.match(lines[start - 1].strip())
             and (start - 1) not in used
         ):
             start -= 1
         end = i
-        while end + 1 < len(lines) and eligible[end + 1] and row_re.match(lines[end + 1].strip()):
+        while end + 1 < len(lines) and eligible[end + 1] and _TABLE_ROW_RE.match(lines[end + 1].strip()):
             # Don't consume the next table's header row: if the line after
             # `end+1` is a separator, then `end+1` belongs to the next table.
             if (
                 end + 2 < len(lines)
                 and eligible[end + 2]
-                and sep_re.match(lines[end + 2].strip())
+                and _is_markdown_table_separator(lines[end + 2].strip())
             ):
                 break
             end += 1
