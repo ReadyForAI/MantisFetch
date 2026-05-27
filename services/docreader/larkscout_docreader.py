@@ -244,6 +244,11 @@ def _extract_markdown_table_blocks(text: str) -> list[str]:
             ):
                 break
             end += 1
+        # Require at least a header + separator + one data row. A bare
+        # separator with nothing around it isn't a real table.
+        if end - start < 2:
+            used.add(i)
+            continue
         used.update(range(start, end + 1))
         blocks.append("\n".join(lines[start : end + 1]))
     return blocks
