@@ -189,6 +189,34 @@ def _count_markdown_tables(text: str) -> int:
     return len(re.findall(r"^\|[\s\-:|]+\|$", text, re.MULTILINE))
 
 
+def _extract_markdown_table_blocks(text: str) -> list[str]:
+    """Extract contiguous Markdown table blocks anchored on a separator row.
+
+    A block is the run of consecutive lines whose stripped form starts and ends
+    with `|`, surrounding a `| --- |` separator. Returns the joined block text
+    for each table. Used to populate PageContent.tables for MarkItDown-derived
+    formats (docx/pptx/html/etc.) so the table-sidecar writer has structured
+    input.
+    """
+    lines = text.splitlines()
+    sep_re = re.compile(r"^\|[\s\-:|]+\|$")
+    row_re = re.compile(r"^\|.*\|$")
+    blocks: list[str] = []
+    used: set[int] = set()
+    for i, line in enumerate(lines):
+        if i in used or not sep_re.match(line.strip()):
+            continue
+        start = i
+        while start > 0 and row_re.match(lines[start - 1].strip()) and (start - 1) not in used:
+            start -= 1
+        end = i
+        while end + 1 < len(lines) and row_re.match(lines[end + 1].strip()):
+            end += 1
+        used.update(range(start, end + 1))
+        blocks.append("\n".join(lines[start : end + 1]))
+    return blocks
+
+
 def _markdown_table_dimensions(table_md: str) -> dict[str, Any]:
     rows: list[list[str]] = []
     separator_indexes: set[int] = set()
@@ -3065,16 +3093,18 @@ def parse_word(
     max_images: int = 200,
 ) -> ParsedDocument:
     logger.info(f"Parsing Word: {filepath.name}")
+    source_size_bytes = filepath.stat().st_size
     markdown_text = _convert_to_markdown(filepath)
     logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
 
     est_pages = max(1, len(markdown_text) // 3000)
-    pages = [PageContent(page_num=1, text=markdown_text)]
+    table_blocks = _extract_markdown_table_blocks(markdown_text) if extract_tables else []
+    pages = [PageContent(page_num=1, text=markdown_text, tables=table_blocks)]
     sections = _split_sections(pages, section_policy=profile.section_policy if profile else None)
     for sec in sections:
         sec.sid = _section_sid(sec.title, sec.text)
 
-    table_count = _count_markdown_tables(markdown_text) if extract_tables else 0
+    table_count = len(table_blocks) if extract_tables else 0
     embedded_image_count = _count_word_embedded_image_references(filepath) if extract_images else 0
     images = (
         _extract_word_embedded_images(
@@ -3103,6 +3133,7 @@ def parse_word(
         extract_tables=extract_tables,
         metadata={
             "document_profile": profile.name if profile else None,
+            "source_file": {"size_bytes": source_size_bytes},
             "word_images": {
                 "extract_enabled": bool(extract_images),
                 "ocr_enabled": bool(ocr_images),
@@ -4216,6 +4247,11 @@ def write_output(
         "source": source,
         "content_type": normalized_content_type or "General",
         "storage_path": storage_path,
+        "total_pages": parsed.total_pages,
+        "section_count": len(parsed.sections),
+        "table_count": parsed.table_count,
+        "image_count": len(parsed.images),
+        "ocr_page_count": parsed.ocr_page_count,
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
@@ -4374,6 +4410,11 @@ def write_output_extract_only(
         "source": source,
         "content_type": normalized_content_type or "General",
         "storage_path": storage_path,
+        "total_pages": parsed.total_pages,
+        "section_count": len(parsed.sections),
+        "table_count": parsed.table_count,
+        "image_count": len(parsed.images),
+        "ocr_page_count": parsed.ocr_page_count,
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
