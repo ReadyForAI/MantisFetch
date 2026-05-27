@@ -839,3 +839,37 @@ class TestParseReplaceProtection:
         after = {p.name for p in Path(tempfile.gettempdir()).glob("larkscout-upload-*")}
         leaked = after - before
         assert leaked == set(), f"scratch files leaked after 413: {leaked}"
+
+    @pytest.mark.parametrize(
+        "field,value,expected_message",
+        [
+            ({"metadata": "{not valid json"}, None, "metadata"),
+            ({"content_type": "BogusCategory"}, None, "content_type"),
+            ({"image_ocr_backend": "nope"}, None, "image_ocr_backend"),
+        ],
+        ids=["bad_metadata_json", "bad_content_type", "bad_image_ocr_backend"],
+    )
+    def test_validation_failures_do_not_advance_counter(
+        self, client: TestClient, field, value, expected_message
+    ):
+        """422 from form validation must not advance .counter — issue #58.
+
+        With the default counter id_strategy, any path that calls
+        _resolve_doc_id before validating cheap form fields will burn a
+        DOC-NNN slot for requests that never succeed, slowly leaving gaps
+        in the doc id sequence.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_dir = Path(tmp)
+            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+                resp = client.post(
+                    "/doc/parse",
+                    files={"file": ("ok.pdf", b"%PDF-1.4 minimal", "application/pdf")},
+                    data=field,
+                )
+                assert resp.status_code == 422, resp.text
+                assert expected_message in resp.json()["detail"].lower()
+                counter_path = docs_dir / ".counter"
+                assert not counter_path.exists(), (
+                    f".counter advanced on 422; gap left at {counter_path.read_text()}"
+                )

@@ -6461,6 +6461,17 @@ async def api_parse_doc(
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(422, t("unsupported_format", fmt=suffix))
 
+    # Run cheap form validations before _resolve_doc_id so a 422 doesn't
+    # advance the counter (or otherwise reserve an id) for a request that
+    # was never going to succeed. Also fails fast before streaming the body.
+    parsed_metadata = _parse_metadata_form(metadata)
+    requested_content_type = _normalize_content_type(
+        content_type or str(parsed_metadata.get("content_type") or "General")
+    )
+    selected_image_ocr_backend = (image_ocr_backend or "auto").strip().lower()
+    if selected_image_ocr_backend not in {"auto", "local", "llm"}:
+        raise HTTPException(422, "image_ocr_backend must be one of: auto, local, llm")
+
     # Reject explicit-doc_id conflicts before streaming the body — the resolver
     # returns the input verbatim for explicit ids, so the existence check
     # doesn't need d_id. Catching this here means a conflicting upload can't
@@ -6559,27 +6570,21 @@ async def api_parse_doc(
                 if exists_now and not will_replace:
                     will_replace = True
                     dedup_status = "replaced"
-            parsed_metadata = _parse_metadata_form(metadata)
             if will_replace:
                 # Preserve the existing doc's content_type so replace=true can't
                 # leave orphans in a different category directory. The caller's
                 # content_type is silently overridden because they already
                 # asked to replace this specific doc.
                 existing_content_type = _doc_content_type(docs_dir, doc_id)
-                requested_ct_normalized = _normalize_content_type(
-                    content_type or str(parsed_metadata.get("content_type") or "General")
-                )
-                if requested_ct_normalized != existing_content_type:
+                if requested_content_type != existing_content_type:
                     logger.info(
                         "replace=true: overriding requested content_type '%s' with existing '%s' for doc_id %s",
-                        requested_ct_normalized, existing_content_type, doc_id,
+                        requested_content_type, existing_content_type, doc_id,
                     )
                 selected_content_type = existing_content_type
                 parsed_metadata["content_type"] = selected_content_type
             else:
-                selected_content_type = _normalize_content_type(
-                    content_type or str(parsed_metadata.get("content_type") or "General")
-                )
+                selected_content_type = requested_content_type
                 parsed_metadata.setdefault("content_type", selected_content_type)
             requested_parse_mode = (
                 str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
@@ -6622,9 +6627,6 @@ async def api_parse_doc(
             }.items():
                 if value:
                     parsed_metadata.setdefault(key, value)
-            selected_image_ocr_backend = (image_ocr_backend or "auto").strip().lower()
-            if selected_image_ocr_backend not in {"auto", "local", "llm"}:
-                raise HTTPException(422, "image_ocr_backend must be one of: auto, local, llm")
             max_images = max(0, min(int(max_images), 1000))
             max_ocr_images = max(0, min(int(max_ocr_images), 1000))
             manual_blank_pages_spec = (
