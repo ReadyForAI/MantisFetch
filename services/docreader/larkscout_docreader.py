@@ -6573,16 +6573,21 @@ async def api_parse_doc(
         # to .docx for the count would cost 1-5s of LibreOffice startup, so
         # their (rare) counter gap is accepted.
         if suffix == ".docx" and extract_images and ocr_images and scratch_path is not None:
+            # Mirror the 0..1000 clamp the in-lock path applies, so requests
+            # with max_images=2000 don't get a 422 here that the lock would
+            # let through after clamping (max_images -> 1000).
+            early_max_images = max(0, min(int(max_images), 1000))
+            early_max_ocr_images = max(0, min(int(max_ocr_images), 1000))
             early_embedded = _count_word_embedded_image_references(scratch_path)
-            early_requested = min(early_embedded, max_images)
-            if early_requested > max_ocr_images:
+            early_requested = min(early_embedded, early_max_images)
+            if early_requested > early_max_ocr_images:
                 raise HTTPException(
                     422,
                     (
                         "word embedded image OCR refused: "
                         f"{early_requested} requested images exceeds "
-                        f"max_ocr_images={max_ocr_images} "
-                        f"(embedded_image_count={early_embedded}, max_images={max_images}). "
+                        f"max_ocr_images={early_max_ocr_images} "
+                        f"(embedded_image_count={early_embedded}, max_images={early_max_images}). "
                         "Retry with ocr_images=false, a higher max_ocr_images value, "
                         "or a lower max_images value."
                     ),

@@ -944,3 +944,51 @@ class TestParseReplaceProtection:
                 assert not counter_path.exists(), (
                     f".counter advanced on 422; gap left at {counter_path.read_text()}"
                 )
+
+    def test_early_ocr_check_clamps_max_images_like_lock(self, client: TestClient):
+        """Pre-resolve OCR check must mirror the in-lock 0..1000 clamp on
+        max_images/max_ocr_images. Without it, a request like
+        max_images=2000+embedded>1000 would 422 here even though the lock
+        path would accept it after clamping. Flagged by Codex review."""
+        import io
+        import zipfile
+
+        from PIL import Image
+
+        png = io.BytesIO()
+        Image.new("RGB", (8, 8), "white").save(png, format="PNG")
+        png_bytes = png.getvalue()
+        buf = io.BytesIO()
+        # Just 3 real images — we mock the count to simulate >1000.
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(
+                "[Content_Types].xml",
+                '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            )
+            zf.writestr("word/media/image1.png", png_bytes)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_dir = Path(tmp)
+            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir), patch(
+                "larkscout_docreader._count_word_embedded_image_references", return_value=1001
+            ):
+                resp = client.post(
+                    "/doc/parse",
+                    files={"file": ("big.docx", buf.getvalue(), "application/octet-stream")},
+                    data={
+                        "extract_images": "true",
+                        "ocr_images": "true",
+                        "max_images": "2000",
+                        "max_ocr_images": "1000",
+                    },
+                )
+                # With clamping: max_images -> 1000, requested = min(1001, 1000) = 1000,
+                # max_ocr_images -> 1000, 1000 > 1000 is False → no 422 from this check.
+                # Without clamping (bug): requested = min(1001, 2000) = 1001 > 1000 → 422.
+                # We assert the bug is fixed by checking the response is NOT 422 from
+                # this specific path; downstream parse errors are OK and out of scope.
+                if resp.status_code == 422:
+                    assert "image OCR refused" not in resp.json().get("detail", ""), (
+                        "Early OCR check 422'd before clamping max_images — "
+                        f"Codex P2 regression. Body: {resp.text}"
+                    )
