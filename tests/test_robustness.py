@@ -319,6 +319,63 @@ class TestPDFParse:
         assert "概述" in attachments.text
         assert "技术规范书卷首段落" in attachments.text
 
+    def test_polluted_heading_with_sentence_period_is_demoted(self):
+        """Regression for #74: ``## `` lines whose text ends in 句号 (or are long
+        and end in 冒号/分号) are paragraph body misstyled as a heading in the
+        source docx. They must not become section boundaries; their content
+        stays in the parent section body.
+        """
+        from larkscout_docreader import PageContent, _split_sections
+
+        body = "段落正文" * 30
+        text = "\n".join(
+            [
+                "## 第四部分 合同主要条款",
+                body,
+                # Heading 2 misapplied: 97-char clause ending in 句号
+                "## 一、乙方应遵守《商业银行应用程序接口安全管理规范》《个人金融信息保护技术规范》和其他相关监管要求，不对甲方信息安全环境和其他系统造成负面影响。",
+                body,
+                # Heading 2 misapplied: 44-char clause ending in 冒号
+                "## 十二、乙方应对在甲方现场和非现场的乙方人员每半年至少进行1次网络安全教育，包括但不限于：",
+                body,
+                # Legitimate heading: short, no terminator
+                "## 二、保密义务",
+                body,
+            ]
+        )
+        sections = _split_sections([PageContent(page_num=1, text=text)])
+
+        titles = [s.title for s in sections]
+        assert titles == ["第四部分 合同主要条款", "二、保密义务"]
+        contracts = sections[0]
+        assert "乙方应遵守《商业银行应用程序接口安全管理规范》" in contracts.text
+        assert "乙方应对在甲方现场和非现场的乙方人员" in contracts.text
+
+    def test_polluted_heading_filter_spares_short_enumeration_headings(self):
+        """A short ``## 6.2 ... 内容:`` style heading (<=30 chars) is legitimate
+        even though it ends in 冒号, and must not be demoted.
+        """
+        from larkscout_docreader import PageContent, _split_sections
+
+        body = "段落正文" * 30
+        text = "\n".join(
+            [
+                "## 6.1 项目概况",
+                body,
+                "## 6.2乙方向甲方初步交付的研发成果包括但不限于以下内容：",
+                body,
+                "## 6.3 验收",
+                body,
+            ]
+        )
+        sections = _split_sections([PageContent(page_num=1, text=text)])
+
+        assert [s.title for s in sections] == [
+            "6.1 项目概况",
+            "6.2乙方向甲方初步交付的研发成果包括但不限于以下内容：",
+            "6.3 验收",
+        ]
+
     def test_markdown_heading_h3_only_doc_still_cuts_sections(self):
         """When a doc uses only H3 markers (no H1/H2), H3 becomes the section level."""
         from larkscout_docreader import PageContent, _split_sections

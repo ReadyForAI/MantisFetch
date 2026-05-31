@@ -3851,6 +3851,24 @@ def _detect_markdown_section_level(pages: list[PageContent]) -> int | None:
     return min_level
 
 
+def _looks_like_polluted_heading_text(text: str) -> bool:
+    """Detect lines wrongly classified as headings (either via an ``## `` marker
+    applied by the source docx, or via legacy heuristics) that are actually
+    paragraph body. A real Chinese business / bid-doc heading essentially never
+    ends in 句号; other clause terminators (冒号/分号) are only suspicious past
+    a length threshold to avoid downgrading legitimate "6.2 ... 内容:"
+    enumeration headings.
+    """
+    stripped = _strip_heading_markup(text)
+    if not stripped:
+        return False
+    if stripped.endswith("。"):
+        return True
+    if len(stripped) > 30 and stripped.endswith(("：", ":", "；", ";")):
+        return True
+    return False
+
+
 def _split_sections(
     pages: list[PageContent], section_policy: SectionPolicy | None = None
 ) -> list[Section]:
@@ -3901,10 +3919,15 @@ def _split_sections(
                 continue
             md_level = _markdown_heading_level(line)
             if md_section_level is not None and md_level > 0:
-                heading_level = md_level if md_level == md_section_level else 0
+                if md_level == md_section_level and not _looks_like_polluted_heading_text(line):
+                    heading_level = md_level
+                else:
+                    heading_level = 0
             else:
                 heading_level = _is_heading(line, ocr_mode=ocr_mode)
                 if suppress_arabic_clause_headings and _is_arabic_numbered_heading_candidate(line):
+                    heading_level = 0
+                if heading_level > 0 and _looks_like_polluted_heading_text(line):
                     heading_level = 0
             heading_title = _strip_heading_markup(line)
             if heading_level > 0 and not current_lines and current_title == default_section_title:
