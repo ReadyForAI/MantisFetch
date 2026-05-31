@@ -6677,7 +6677,7 @@ async def api_parse_doc(
                 "skip_ocr_pages": skip_ocr_pages,
                 "extract_images": str(bool(extract_images)).lower() if extract_images else "",
                 "ocr_images": str(bool(ocr_images)).lower() if ocr_images else "",
-                "image_ocr_backend": image_ocr_backend if extract_images else "",
+                "image_ocr_backend": image_ocr_backend if ocr_images else "",
                 "max_images": str(max_images) if extract_images else "",
                 "max_ocr_images": str(max_ocr_images) if ocr_images else "",
             }.items():

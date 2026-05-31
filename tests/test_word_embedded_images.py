@@ -290,6 +290,52 @@ def test_parse_allows_word_image_ocr_when_max_images_keeps_request_under_thresho
     assert "以下图片为证明材料" in manifest["images"][0]["anchor"]["context_text"]
 
 
+def test_parse_extract_only_does_not_advertise_image_ocr_backend_in_metadata(
+    tmp_path, client, monkeypatch
+):
+    import larkscout_docreader as docreader
+
+    image_path = tmp_path / "proof.png"
+    image_path.write_bytes(_make_png_bytes())
+    docx_path = tmp_path / "bid.docx"
+    _make_docx_with_image(docx_path, image_path, image_count=2)
+    monkeypatch.setattr(
+        docreader,
+        "_convert_to_markdown",
+        lambda _path: "# 学历证明\n\n以下图片为证明材料。",
+    )
+
+    with patch("larkscout_docreader._get_docs_dir", return_value=tmp_path / "docs"):
+        with docx_path.open("rb") as fh:
+            resp = client.post(
+                "/doc/parse",
+                files={
+                    "file": (
+                        "bid.docx",
+                        fh,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                },
+                data={
+                    "summary_mode": "off",
+                    "extract_images": "true",
+                    "ocr_images": "false",
+                    "image_ocr_backend": "auto",
+                },
+            )
+
+    assert resp.status_code == 200
+    manifest = json.loads(
+        (tmp_path / "docs" / "General" / resp.json()["doc_id"] / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    word_images = manifest["parse_metadata"]["word_images"]
+    assert word_images["ocr_enabled"] is False
+    assert word_images["ocr_backend"] == ""
+    assert "image_ocr_backend" not in manifest["metadata"]
+
+
 def test_write_output_extract_only_writes_image_artifacts(tmp_path):
     from larkscout_docreader import (
         EmbeddedImage,
