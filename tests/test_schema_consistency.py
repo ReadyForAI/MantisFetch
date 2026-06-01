@@ -16,7 +16,7 @@ DOC_INDEX_REQUIRED_FIELDS = {
 
 # Required fields that every manifest MUST contain
 MANIFEST_REQUIRED_FIELDS = {
-    "doc_id", "filename", "file_type", "source", "paths", "sections", "provenance",
+    "doc_id", "filename", "file_type", "source", "tags", "paths", "sections", "provenance",
 }
 
 PROVENANCE_REQUIRED_FIELDS = {
@@ -232,6 +232,7 @@ class TestManifestDocreaderFormat:
             manifest = json.loads((docs_dir / "DOC-010" / "manifest.json").read_text(encoding="utf-8"))
             missing = MANIFEST_REQUIRED_FIELDS - set(manifest.keys())
             assert not missing, f"Docreader full manifest missing: {missing}"
+            assert manifest["tags"] == ["t"]
 
             prov = manifest["provenance"]
             missing_prov = PROVENANCE_REQUIRED_FIELDS - set(prov.keys())
@@ -245,10 +246,11 @@ class TestManifestDocreaderFormat:
         parsed = self._make_parsed()
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            write_output_extract_only("DOC-011", parsed, docs_dir, tags=[], source="upload")
+            write_output_extract_only("DOC-011", parsed, docs_dir, tags=["招标文件"], source="upload")
             manifest = json.loads((docs_dir / "DOC-011" / "manifest.json").read_text(encoding="utf-8"))
             missing = MANIFEST_REQUIRED_FIELDS - set(manifest.keys())
             assert not missing, f"Extract-only manifest missing: {missing}"
+            assert manifest["tags"] == ["招标文件"]
 
             prov = manifest["provenance"]
             missing_prov = PROVENANCE_REQUIRED_FIELDS - set(prov.keys())

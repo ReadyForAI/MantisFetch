@@ -2124,6 +2124,7 @@ def _persist_web_capture(
         "source": "web_capture",
         "content_type": normalized_content_type,
         "storage_path": storage_path,
+        "tags": list(tags) if tags else [],
         "paths": {
             "digest": "digest.md",
             "sections_dir": "sections/",
