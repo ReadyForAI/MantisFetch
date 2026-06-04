@@ -2,5 +2,8 @@
 # PaddleOCR 3.x + PP-OCRv5 currently crashes in linuxkit/aarch64 Docker during
 # model initialization, so ARM uses the mature 2.x stack until verified stable.
 numpy>=1.26.0,<2.0.0
+# albumentations>=2 and albucore>=0.1 pull numpy 2.x, which breaks the 2.x stack above.
+albumentations<2
+albucore<0.1
 paddlepaddle==2.6.2
 paddleocr==2.10.0
