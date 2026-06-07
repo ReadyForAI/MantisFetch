@@ -70,7 +70,7 @@ _upload_sem = asyncio.Semaphore(_MAX_CONCURRENT_UPLOAD)
 # Lock — long-running servers receiving high-cardinality explicit ids would
 # otherwise leak one Lock per id forever. While requests are queued on a
 # lock their `async with lock:` frame keeps it alive.
-_doc_id_parse_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+_doc_id_parse_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 _doc_id_parse_locks_guard = asyncio.Lock()
 
 
@@ -1448,6 +1448,75 @@ def _looks_like_plain_table_row(line: str) -> bool:
     return False
 
 
+def _extract_pdf_page_tables(
+    page: Any,
+) -> tuple[list[str], list[tuple[float, float, float, float]]]:
+    """Return (markdown_tables, bboxes). The two lists are kept aligned: a table is
+    only recorded when both its markdown and bbox are usable, so callers can rely on
+    bboxes to strip every table region surfaced via markdown."""
+    try:
+        finder = page.find_tables()
+    except Exception as exc:
+        logger.warning("find_tables failed on page %d: %s", page.number + 1, exc)
+        return [], []
+    tabs = finder.tables if hasattr(finder, "tables") else list(finder)
+    out_md: list[str] = []
+    out_bboxes: list[tuple[float, float, float, float]] = []
+    for table in tabs:
+        try:
+            md = table.to_markdown()
+        except Exception as exc:
+            logger.warning("table.to_markdown failed on page %d: %s", page.number + 1, exc)
+            continue
+        if not md or not md.strip():
+            continue
+        bbox = getattr(table, "bbox", None)
+        if bbox is None:
+            logger.warning(
+                "table missing bbox on page %d; skipping (cannot dedupe)", page.number + 1
+            )
+            continue
+        try:
+            bbox_tuple = (float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3]))
+        except (TypeError, ValueError, IndexError):
+            logger.warning("table bbox invalid on page %d; skipping", page.number + 1)
+            continue
+        out_md.append(md.strip())
+        out_bboxes.append(bbox_tuple)
+    return out_md, out_bboxes
+
+
+def _strip_text_in_table_bboxes(
+    page: Any, bboxes: list[tuple[float, float, float, float]]
+) -> str | None:
+    """Return the page text with table-region blocks removed, or None if the strip
+    could not be performed (caller should leave raw text untouched and treat tables
+    as already embedded)."""
+    if not bboxes:
+        return page.get_text("text").strip()
+    import fitz
+
+    rects = [fitz.Rect(*bbox) for bbox in bboxes]
+    try:
+        blocks = page.get_text("blocks")
+    except Exception as exc:
+        logger.warning("get_text(blocks) failed on page %d: %s", page.number + 1, exc)
+        return None
+    kept: list[str] = []
+    for block in blocks:
+        try:
+            x0, y0, x1, y1, text = block[0], block[1], block[2], block[3], block[4]
+        except (IndexError, TypeError):
+            continue
+        if not isinstance(text, str) or not text.strip():
+            continue
+        centroid = fitz.Point((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        if any(centroid in r for r in rects):
+            continue
+        kept.append(text.rstrip())
+    return "\n".join(part for part in kept if part).strip()
+
+
 def _extract_tables_from_ocr_text(text: str, page_num: int, total_pages: int) -> tuple[str, list[str]]:
     lines = [line.rstrip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     lines = [line.strip() for line in lines if line.strip()]
@@ -2431,11 +2500,28 @@ def parse_pdf(
     # Build page-level baseline signals for selective enhancement.
     page_texts: dict[int, str] = {}
     page_signals: list[dict[str, Any]] = []
+    pdf_tables_by_page: dict[int, list[str]] = {}
+    # Pages where strip could not run; tables remain embedded in the raw page text,
+    # so downstream must not re-append them to avoid duplication.
+    pdf_tables_in_text_pages: set[int] = set()
 
     for i, page in enumerate(doc):
         page_num = i + 1
         text = page.get_text("text").strip()
-        page_texts[page_num] = text
+        if extract_tables:
+            page_tables, table_bboxes = _extract_pdf_page_tables(page)
+            pdf_tables_by_page[page_num] = page_tables
+            if table_bboxes:
+                stripped = _strip_text_in_table_bboxes(page, table_bboxes)
+                if stripped is None:
+                    page_texts[page_num] = text
+                    pdf_tables_in_text_pages.add(page_num)
+                else:
+                    page_texts[page_num] = stripped
+            else:
+                page_texts[page_num] = text
+        else:
+            page_texts[page_num] = text
         image_count = 0
         try:
             image_count = len(page.get_images(full=False))
@@ -2626,24 +2712,48 @@ def parse_pdf(
 
     pages: list[PageContent] = []
     ocr_table_count = 0
+    pdf_table_count = 0
     ocr_count = len(local_ocr_set | llm_ocr_set)
     for page_num in range(1, total_pages + 1):
         raw_text = page_texts.get(page_num, "")
         page_text = raw_text
         page_tables: list[str] = []
+        tables_in_text = False
         enhanced = llm_ocr_results.get(page_num) or local_ocr_results.get(page_num)
         if enhanced:
             page_text = _cleanup_ocr_text(_usable_page_text(raw_text, enhanced))
             if extract_tables:
                 page_text, page_tables = _extract_tables_from_ocr_text(page_text, page_num, total_pages)
                 ocr_table_count += len(page_tables)
+                tables_in_text = bool(page_tables)
+                # If OCR found no tables on this page but the PyMuPDF pass did
+                # (e.g. OCR failed and _usable_page_text fell back to the
+                # already-stripped raw text), recover them so the page's tables
+                # are not silently lost.
+                if not page_tables and pdf_tables_by_page.get(page_num):
+                    page_tables = pdf_tables_by_page[page_num]
+                    pdf_table_count += len(page_tables)
+                    # If we ended up using stripped raw text (OCR failed),
+                    # pdf_tables_in_text_pages tells us whether the strip ran.
+                    # If we ended up using enhanced OCR text, we cannot tell
+                    # whether the OCR'd text contains the table cells inline,
+                    # so be conservative and re-append (worst case duplicates,
+                    # but no table content is lost from section text).
+                    if _is_ocr_failed_text(enhanced):
+                        tables_in_text = page_num in pdf_tables_in_text_pages
+                    else:
+                        tables_in_text = False
+        elif extract_tables:
+            page_tables = pdf_tables_by_page.get(page_num, [])
+            pdf_table_count += len(page_tables)
+            tables_in_text = page_num in pdf_tables_in_text_pages
         pages.append(
             PageContent(
                 page_num=page_num,
                 text=page_text.strip(),
                 is_ocr=page_num in (local_ocr_set | llm_ocr_set),
                 tables=page_tables,
-                tables_in_text=bool(page_tables),
+                tables_in_text=tables_in_text,
             )
         )
 
@@ -2653,7 +2763,23 @@ def parse_pdf(
         logger.info(f"Local OCR pages: {sorted(local_ocr_results)}")
 
     if profile and not assessment.get("is_contract"):
-        combined_text = "\n".join(page.text for page in pages if page.text)
+        # Include reconstructed table markdown so terms inside table cells (e.g.
+        # 甲方/乙方/合同金额) are visible to the classifier even when page.text was
+        # bbox-stripped earlier in the pipeline. Skip append when the page already
+        # carries the table content inline (tables_in_text=True) so we don't
+        # double-count terms.
+        combined_text = "\n".join(
+            (
+                (page.text or "")
+                + (
+                    "\n" + "\n".join(page.tables)
+                    if (page.tables and not page.tables_in_text)
+                    else ""
+                )
+            )
+            for page in pages
+            if page.text or page.tables
+        )
         is_contract, matched_terms = _classify_contract_text(combined_text, profile)
         if is_contract:
             assessment["is_contract"] = True
@@ -2685,9 +2811,9 @@ def parse_pdf(
     for sec in sections:
         sec.sid = _section_sid(sec.title, sec.text)
 
-    # Count tables in Markdown output
+    # Count tables actually materialized onto pages (so manifest matches files on disk).
     if extract_tables:
-        table_count = _count_markdown_tables(markdown_text) if (markdown_text and (not profile or profile.table_policy.prefer_markitdown)) else ocr_table_count
+        table_count = ocr_table_count + pdf_table_count
     else:
         table_count = 0
 
@@ -4466,6 +4592,7 @@ def write_output(
             "source_size_bytes": (source_record or {}).get("size_bytes", 0),
         },
     }
+    _attach_table_refs(manifest["sections"], table_entries)
     _write_json(doc_dir / "sections.json", manifest["sections"])
     _write_json(doc_dir / "manifest.json", manifest)
     logger.info("manifest.json written")
@@ -4627,6 +4754,7 @@ def write_output_extract_only(
             "source_size_bytes": (source_record or {}).get("size_bytes", 0),
         },
     }
+    _attach_table_refs(manifest["sections"], table_entries)
     _write_json(doc_dir / "sections.json", manifest["sections"])
     _write_json(doc_dir / "manifest.json", manifest)
     _update_doc_index(
@@ -5355,10 +5483,59 @@ def _build_section_entry(sec: Section, summary_preview: str = "") -> dict[str, A
     }
 
 
+def _attach_table_refs(
+    section_entries: list[dict[str, Any]], table_entries: list[dict[str, Any]]
+) -> None:
+    """Populate each section's table_refs with table_ids whose page range overlaps the section.
+
+    Skipped when every section and every table collapse to a single identical page
+    span (typical for DOCX/XLSX/CSV/HTML where the parser sets page_num=1 everywhere):
+    in that case the page-overlap heuristic would attach every table to every
+    section, which is worse than leaving table_refs empty.
+    """
+    if not table_entries:
+        return
+
+    def _coalesce_page(entry: dict[str, Any], primary: str, secondary: str) -> int | None:
+        value = entry.get(primary)
+        if value is None:
+            value = entry.get(secondary)
+        return value if isinstance(value, int) else None
+
+    # The page-overlap heuristic degenerates when many sections share one page
+    # span (typical for DOCX/XLSX/CSV/HTML where the parser sets page_num=1
+    # everywhere): every section would receive every table_id. A single-section
+    # doc with multiple tables, on the other hand, is correctly served by
+    # attaching all tables to the one section, so we only skip when there is
+    # both span-collapse AND more than one section.
+    section_spans = {
+        (sec.get("page_start"), sec.get("page_end"))
+        for sec in section_entries
+        if sec.get("page_start") is not None and sec.get("page_end") is not None
+    }
+    if len(section_spans) == 1 and len(section_entries) > 1:
+        return
+
+    for sec in section_entries:
+        s_start = sec.get("page_start")
+        s_end = sec.get("page_end")
+        if s_start is None or s_end is None:
+            continue
+        refs: list[str] = []
+        for entry in table_entries:
+            t_start = _coalesce_page(entry, "page_start", "page")
+            t_end = _coalesce_page(entry, "page_end", "page")
+            if t_start is None or t_end is None:
+                continue
+            if t_start <= s_end and t_end >= s_start:
+                refs.append(entry["table_id"])
+        sec["table_refs"] = refs
+
+
 def _build_table_entries(parsed: ParsedDocument) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
-    for i, (page_num, table_md) in enumerate(
-        ((p.page_num, table) for p in parsed.pages for table in p.tables),
+    for i, (page_num, table_md, is_ocr) in enumerate(
+        ((p.page_num, table, p.is_ocr) for p in parsed.pages for table in p.tables),
         1,
     ):
         text_hash = hashlib.sha256(table_md.encode("utf-8", errors="ignore")).hexdigest()
@@ -5374,7 +5551,7 @@ def _build_table_entries(parsed: ParsedDocument) -> list[dict[str, Any]]:
                 "column_count": dimensions["column_count"],
                 "header_rows": dimensions["header_rows"],
                 "has_header": dimensions["has_header"],
-                "source": "ocr",
+                "source": "ocr" if is_ocr else (parsed.file_type or "extracted"),
                 "continued_from": None,
                 "continued_to": None,
                 "char_count": len(table_md),
