@@ -1449,7 +1449,7 @@ def _looks_like_plain_table_row(line: str) -> bool:
 
 
 def _extract_pdf_page_tables(
-    page: "fitz.Page",
+    page: Any,
 ) -> tuple[list[str], list[tuple[float, float, float, float]]]:
     """Return (markdown_tables, bboxes). The two lists are kept aligned: a table is
     only recorded when both its markdown and bbox are usable, so callers can rely on
@@ -1487,7 +1487,7 @@ def _extract_pdf_page_tables(
 
 
 def _strip_text_in_table_bboxes(
-    page: "fitz.Page", bboxes: list[tuple[float, float, float, float]]
+    page: Any, bboxes: list[tuple[float, float, float, float]]
 ) -> str | None:
     """Return the page text with table-region blocks removed, or None if the strip
     could not be performed (caller should leave raw text untouched and treat tables
