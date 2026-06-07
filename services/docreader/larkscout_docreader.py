@@ -2733,7 +2733,16 @@ def parse_pdf(
                 if not page_tables and pdf_tables_by_page.get(page_num):
                     page_tables = pdf_tables_by_page[page_num]
                     pdf_table_count += len(page_tables)
-                    tables_in_text = page_num in pdf_tables_in_text_pages
+                    # If we ended up using stripped raw text (OCR failed),
+                    # pdf_tables_in_text_pages tells us whether the strip ran.
+                    # If we ended up using enhanced OCR text, we cannot tell
+                    # whether the OCR'd text contains the table cells inline,
+                    # so be conservative and re-append (worst case duplicates,
+                    # but no table content is lost from section text).
+                    if _is_ocr_failed_text(enhanced):
+                        tables_in_text = page_num in pdf_tables_in_text_pages
+                    else:
+                        tables_in_text = False
         elif extract_tables:
             page_tables = pdf_tables_by_page.get(page_num, [])
             pdf_table_count += len(page_tables)
@@ -2756,9 +2765,18 @@ def parse_pdf(
     if profile and not assessment.get("is_contract"):
         # Include reconstructed table markdown so terms inside table cells (e.g.
         # 甲方/乙方/合同金额) are visible to the classifier even when page.text was
-        # bbox-stripped earlier in the pipeline.
+        # bbox-stripped earlier in the pipeline. Skip append when the page already
+        # carries the table content inline (tables_in_text=True) so we don't
+        # double-count terms.
         combined_text = "\n".join(
-            ((page.text or "") + ("\n" + "\n".join(page.tables) if page.tables else ""))
+            (
+                (page.text or "")
+                + (
+                    "\n" + "\n".join(page.tables)
+                    if (page.tables and not page.tables_in_text)
+                    else ""
+                )
+            )
             for page in pages
             if page.text or page.tables
         )
@@ -5484,20 +5502,18 @@ def _attach_table_refs(
             value = entry.get(secondary)
         return value if isinstance(value, int) else None
 
+    # The page-overlap heuristic degenerates when many sections share one page
+    # span (typical for DOCX/XLSX/CSV/HTML where the parser sets page_num=1
+    # everywhere): every section would receive every table_id. A single-section
+    # doc with multiple tables, on the other hand, is correctly served by
+    # attaching all tables to the one section, so we only skip when there is
+    # both span-collapse AND more than one section.
     section_spans = {
         (sec.get("page_start"), sec.get("page_end"))
         for sec in section_entries
         if sec.get("page_start") is not None and sec.get("page_end") is not None
     }
-    table_spans = {
-        (
-            _coalesce_page(entry, "page_start", "page"),
-            _coalesce_page(entry, "page_end", "page"),
-        )
-        for entry in table_entries
-    }
-    table_spans.discard((None, None))
-    if len(section_spans | table_spans) <= 1:
+    if len(section_spans) == 1 and len(section_entries) > 1:
         return
 
     for sec in section_entries:
