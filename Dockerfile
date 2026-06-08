@@ -12,6 +12,7 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 # Split into three layers to keep dpkg's peak memory low enough for constrained
 # Docker Desktop builders (single-shot install of LibreOffice + CJK fonts OOMs at 12 GB).
 RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 \
+        build-essential \
         curl \
         wget \
         gnupg \
