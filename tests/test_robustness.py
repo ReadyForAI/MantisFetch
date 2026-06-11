@@ -145,6 +145,17 @@ class TestPDFParse:
 
         assert text.startswith("[OCR failed")
 
+    def test_local_ocr_worker_default_command_points_at_real_worker(self, monkeypatch):
+        # No env override: the default must resolve to the on-disk worker script.
+        # Regression guard for the __file__-relative path after the ocr/ package move.
+        import larkscout_docreader
+
+        monkeypatch.delenv("LARKSCOUT_LOCAL_OCR_WORKER_CMD", raising=False)
+        cmd = larkscout_docreader.ocr.engines._local_ocr_worker_command()
+        worker_path = Path(cmd[-1])
+        assert worker_path.name == "paddle_ocr_worker.py"
+        assert worker_path.exists(), f"default worker path does not exist: {worker_path}"
+
     def test_load_document_profile_contract_cn(self):
         from larkscout_docreader import _load_document_profile
 

@@ -95,7 +95,9 @@ def _local_ocr_worker_command() -> list[str]:
     raw = os.environ.get("LARKSCOUT_LOCAL_OCR_WORKER_CMD", "").strip()
     if raw:
         return shlex.split(raw)
-    worker = Path(__file__).resolve().parent.parent / "paddle_ocr_worker.py"
+    # engines.py lives at services/docreader/larkscout_docreader/ocr/; the
+    # worker script sits at services/docreader/ — parents[2].
+    worker = Path(__file__).resolve().parents[2] / "paddle_ocr_worker.py"
     return [sys.executable, str(worker)]
 
 
