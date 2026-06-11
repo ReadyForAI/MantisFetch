@@ -737,4 +737,3 @@ def _split_sections(
     else:
         sections = _merge_short_sections(sections)
     return _renumber_sections(_promote_parent_sections_to_first_child(sections))
-
