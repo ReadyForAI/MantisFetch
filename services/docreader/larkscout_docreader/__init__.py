@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +26,7 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from i18n import init_locale, prompt_for_locale, t, tmpl_for_locale
+from i18n import init_locale, t, tmpl_for_locale
 from larkscout_common.atomic import _write_json, _write_text
 from larkscout_common.paths import _mask_path
 from larkscout_common.storage import (
@@ -529,6 +529,62 @@ from .storage import (
     _validate_doc_id as _validate_doc_id,
 )
 
+# Three-tier summary generation (per-section → brief → digest) + the LLM
+# summarize wrapper. Re-exported so write_output / the deferred-summary thread /
+# the endpoint and the summary tests (which monkeypatch gemini_summarize off the
+# facade) keep resolving these.
+from .summaries import (
+    SUMMARY_BATCH_CONCURRENCY as SUMMARY_BATCH_CONCURRENCY,
+)
+from .summaries import (
+    SUMMARY_BRIEF_MAX_INPUT_CHARS as SUMMARY_BRIEF_MAX_INPUT_CHARS,
+)
+from .summaries import (
+    SUMMARY_BRIEF_SECTION_EXCERPT_CHARS as SUMMARY_BRIEF_SECTION_EXCERPT_CHARS,
+)
+from .summaries import (
+    SUMMARY_MAX_CHARS as SUMMARY_MAX_CHARS,
+)
+from .summaries import (
+    SUMMARY_REQUEST_MIN_INTERVAL_SEC as SUMMARY_REQUEST_MIN_INTERVAL_SEC,
+)
+from .summaries import (
+    SUMMARY_SECTION_DETAIL_LIMIT as SUMMARY_SECTION_DETAIL_LIMIT,
+)
+from .summaries import (
+    _compress_sections_for_brief as _compress_sections_for_brief,
+)
+from .summaries import (
+    _local_section_preview as _local_section_preview,
+)
+from .summaries import (
+    _sections_overview_for_brief as _sections_overview_for_brief,
+)
+from .summaries import (
+    _sections_overview_from_text as _sections_overview_from_text,
+)
+from .summaries import (
+    _set_next_summary_llm_allowed_at as _set_next_summary_llm_allowed_at,
+)
+from .summaries import (
+    _should_skip_section_summaries as _should_skip_section_summaries,
+)
+from .summaries import (
+    _summarize_batch as _summarize_batch,
+)
+from .summaries import (
+    _summary_failed_text as _summary_failed_text,
+)
+from .summaries import (
+    _summary_llm_lock as _summary_llm_lock,
+)
+from .summaries import (
+    gemini_summarize as gemini_summarize,
+)
+from .summaries import (
+    generate_summaries as generate_summaries,
+)
+
 # Tabular + generic MarkItDown-backed parsers. Re-exported so the /doc/parse
 # dispatch and the xlsx/csv parse tests keep resolving these off the facade.
 from .tabular import (
@@ -741,21 +797,6 @@ def _parsed_document_locale(parsed: ParsedDocument) -> str:
 # ═══════════════════════════════════════════
 
 
-def gemini_summarize(text: str, summarize_prompt: str, max_retries: int = 2) -> str:
-    """Generate summary via the active LLM provider."""
-    from providers import get_provider
-
-    with _summary_llm_lock:
-        now = time.monotonic()
-        wait_sec = _summary_llm_next_allowed_at - now
-        if wait_sec > 0:
-            time.sleep(wait_sec)
-        try:
-            return get_provider().summarize(text, summarize_prompt, max_retries=max_retries)
-        finally:
-            _set_next_summary_llm_allowed_at()
-
-
 # ═══════════════════════════════════════════
 # Token estimation
 # ═══════════════════════════════════════════
@@ -793,35 +834,6 @@ WORD_IMAGE_OCR_MAX_IMAGES = max(
     0,
     int(os.environ.get("LARKSCOUT_WORD_IMAGE_OCR_MAX_IMAGES", "80")),
 )
-SUMMARY_BATCH_CONCURRENCY = max(
-    1,
-    int(os.environ.get("LARKSCOUT_SUMMARY_BATCH_CONCURRENCY", "1")),
-)
-SUMMARY_REQUEST_MIN_INTERVAL_SEC = max(
-    0.0,
-    float(os.environ.get("LARKSCOUT_SUMMARY_REQUEST_MIN_INTERVAL_SEC", "2.0")),
-)
-SUMMARY_SECTION_DETAIL_LIMIT = max(
-    1,
-    int(os.environ.get("LARKSCOUT_SUMMARY_SECTION_DETAIL_LIMIT", "10")),
-)
-SUMMARY_BRIEF_SECTION_EXCERPT_CHARS = max(
-    200,
-    int(os.environ.get("LARKSCOUT_SUMMARY_BRIEF_SECTION_EXCERPT_CHARS", "1200")),
-)
-SUMMARY_BRIEF_MAX_INPUT_CHARS = max(
-    4000,
-    int(os.environ.get("LARKSCOUT_SUMMARY_BRIEF_MAX_INPUT_CHARS", "32000")),
-)
-_summary_llm_lock = threading.Lock()
-_summary_llm_next_allowed_at = 0.0
-
-
-def _set_next_summary_llm_allowed_at() -> None:
-    global _summary_llm_next_allowed_at
-    _summary_llm_next_allowed_at = (
-        time.monotonic() + SUMMARY_REQUEST_MIN_INTERVAL_SEC
-    )
 
 
 _deferred_summary_sem = threading.BoundedSemaphore(DEFERRED_SUMMARY_MAX_CONCURRENT)
@@ -941,203 +953,6 @@ def _classify_summary_error(exc: Exception) -> tuple[str, str]:
 # ═══════════════════════════════════════════
 # Summary generation
 # ═══════════════════════════════════════════
-
-SUMMARY_MAX_CHARS = 500
-
-
-def _summary_failed_text(text: str | None) -> bool:
-    if not text:
-        return True
-    compact = text.strip().lower()
-    return compact in {
-        "[summary generation failed]",
-        "summary generation failed",
-    }
-
-
-def _local_section_preview(sec: Section, limit: int = SUMMARY_MAX_CHARS) -> str:
-    text = re.sub(r"\s+", " ", sec.text).strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "..."
-
-
-def _sections_overview_from_text(sections: list[Section]) -> str:
-    parts: list[str] = []
-    total_chars = 0
-    for sec in sections:
-        excerpt = _local_section_preview(sec, SUMMARY_BRIEF_SECTION_EXCERPT_CHARS)
-        part = f"## {sec.title} ({sec.page_range})\n{excerpt}".strip()
-        if not part:
-            continue
-        if total_chars + len(part) > SUMMARY_BRIEF_MAX_INPUT_CHARS and parts:
-            parts.append(
-                f"\n[Truncated after {len(parts)} sections due to summary input budget]"
-            )
-            break
-        parts.append(part)
-        total_chars += len(part)
-    return "\n\n".join(parts)
-
-
-def _sections_overview_for_brief(sections: list[Section]) -> str:
-    if len(sections) > 60:
-        overview = _compress_sections_for_brief(sections)
-    else:
-        overview = "\n\n".join(
-            f"## {sec.title} ({sec.page_range})\n{sec.summary[:SUMMARY_MAX_CHARS]}"
-            for sec in sections
-            if sec.summary and not _summary_failed_text(sec.summary)
-        )
-    if overview.strip():
-        return overview
-    return _sections_overview_from_text(sections)
-
-
-def _should_skip_section_summaries(parsed: ParsedDocument) -> bool:
-    return len(parsed.sections) > SUMMARY_SECTION_DETAIL_LIMIT
-
-
-def generate_summaries(
-    parsed: ParsedDocument, concurrency: int = 3, allow_single_fallback: bool = True
-) -> tuple[str, str, list[Section]]:
-    logger.info("Generating summaries...")
-    summary_locale = _parsed_document_locale(parsed)
-
-    if _should_skip_section_summaries(parsed):
-        logger.info(
-            "Skipping per-section summaries for long document: %s sections > limit %s",
-            len(parsed.sections),
-            SUMMARY_SECTION_DETAIL_LIMIT,
-        )
-        sections_overview = _sections_overview_from_text(parsed.sections)
-    else:
-        # Dynamic batching by token estimate
-        BATCH_TOKEN_LIMIT = 10000
-        batches: list[list[Section]] = []
-        current_batch: list[Section] = []
-        current_tokens = 0
-
-        for sec in parsed.sections:
-            sec_tokens = _estimate_tokens(sec.text) + _estimate_tokens(sec.title) + 20
-            if current_tokens + sec_tokens > BATCH_TOKEN_LIMIT and current_batch:
-                batches.append(current_batch)
-                current_batch = []
-                current_tokens = 0
-            current_batch.append(sec)
-            current_tokens += sec_tokens
-        if current_batch:
-            batches.append(current_batch)
-
-        summary_workers = min(max(1, concurrency), SUMMARY_BATCH_CONCURRENCY, len(batches))
-        if len(batches) > 1 and summary_workers > 1:
-            logger.info(f"{len(batches)} batches, {summary_workers} summary workers")
-            with ThreadPoolExecutor(max_workers=summary_workers) as pool:
-                futures = {
-                    pool.submit(_summarize_batch, batch, allow_single_fallback, summary_locale): batch
-                    for batch in batches
-                }
-                for fut in as_completed(futures):
-                    fut.result()
-        else:
-            for batch in batches:
-                _summarize_batch(batch, allow_single_fallback, summary_locale)
-
-        logger.info(f"{len(parsed.sections)} section summaries complete")
-        sections_overview = _sections_overview_for_brief(parsed.sections)
-
-    brief = gemini_summarize(
-        f"Document: {parsed.filename}\nTotal pages: {parsed.total_pages}\n\n{sections_overview}",
-        prompt_for_locale(summary_locale, "brief"),
-    )
-    if _summary_failed_text(brief):
-        raise RuntimeError("upstream brief generation failed")
-    logger.info("Brief generation complete")
-
-    digest = gemini_summarize(
-        f"Document: {parsed.filename}\n\nBriefing:\n{brief}",
-        prompt_for_locale(summary_locale, "digest"),
-    )
-    if _summary_failed_text(digest):
-        raise RuntimeError("upstream digest generation failed")
-    logger.info("Digest generation complete")
-
-    return digest, brief, parsed.sections
-
-
-def _summarize_batch(
-    sections: list[Section], allow_single_fallback: bool = True, summary_locale: str = "en"
-):
-    """Batch summarize with JSON output + single fallback."""
-    n = len(sections)
-
-    if n == 1:
-        sec = sections[0]
-        sec.summary = gemini_summarize(
-            f"## {sec.title} ({sec.page_range})\n\n{sec.text}",
-            prompt_for_locale(summary_locale, "section_summary"),
-        )
-        logger.info(f"Section {sec.index}: {sec.title[:30]}... done")
-        return
-
-    batch_text = ""
-    for sec in sections:
-        batch_text += f"\n\n## Section {sec.index}: {sec.title} ({sec.page_range})\n\n{sec.text}"
-
-    result = gemini_summarize(batch_text, prompt_for_locale(summary_locale, "batch_summary", n=n))
-    if _summary_failed_text(result):
-        raise RuntimeError("upstream summary generation failed")
-
-    # JSON parse
-    parsed_ok = False
-    try:
-        clean = result.strip()
-        if clean.startswith("```"):
-            clean = re.sub(r"^```(?:json)?\s*", "", clean)
-            clean = re.sub(r"\s*```$", "", clean)
-        items = json.loads(clean)
-        if isinstance(items, list) and len(items) >= n:
-            for sec in sections:
-                match = next((it for it in items if it.get("index") == sec.index), None)
-                if match and match.get("summary"):
-                    sec.summary = match["summary"]
-                else:
-                    sec.summary = t("summary_missing")
-            parsed_ok = True
-    except (json.JSONDecodeError, KeyError, TypeError):
-        pass
-
-    if parsed_ok:
-        for sec in sections:
-            logger.info(f"Section {sec.index}: {sec.title[:30]}... done")
-        return
-
-    # Fallback
-    if not allow_single_fallback:
-        logger.warning(
-            "Batch JSON parse failed for %d sections; using local section previews",
-            n,
-        )
-        for sec in sections:
-            sec.summary = _local_section_preview(sec)
-        return
-
-    logger.warning(f"Batch JSON parse failed, falling back to single ({n} items)")
-    for sec in sections:
-        sec.summary = gemini_summarize(
-            f"## {sec.title} ({sec.page_range})\n\n{sec.text}",
-            prompt_for_locale(summary_locale, "section_summary"),
-        )
-        logger.info(f"Section {sec.index}: {sec.title[:30]}... done (single)")
-
-
-def _compress_sections_for_brief(sections: list[Section]) -> str:
-    groups = []
-    for i in range(0, len(sections), 10):
-        group = sections[i : i + 10]
-        group_text = "; ".join(f"{s.title}: {s.summary[:150]}" for s in group if s.summary)
-        groups.append(f"**Sections {group[0].index}-{group[-1].index}**: {group_text}")
-    return "\n\n".join(groups)
 
 
 # ═══════════════════════════════════════════
