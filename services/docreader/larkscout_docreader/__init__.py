@@ -18,7 +18,6 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -68,7 +67,6 @@ from .models import (
     OCR_BLOCKS_COORDINATE_SYSTEM,
     OCR_BLOCKS_SIDECAR_PATH,
     OCR_BLOCKS_SIDECAR_VERSION,
-    DocumentProfile,
     EmbeddedImage,
     OCRBlocksSidecar,
     ParsedDocument,
@@ -82,6 +80,9 @@ from .models import (
 )
 from .models import (
     ClassificationPolicy as ClassificationPolicy,
+)
+from .models import (
+    DocumentProfile as DocumentProfile,
 )
 from .models import (
     FieldCrop as FieldCrop,
@@ -552,10 +553,19 @@ from .summaries import (
     SUMMARY_SECTION_DETAIL_LIMIT as SUMMARY_SECTION_DETAIL_LIMIT,
 )
 from .summaries import (
+    _classify_summary_error as _classify_summary_error,
+)
+from .summaries import (
     _compress_sections_for_brief as _compress_sections_for_brief,
 )
 from .summaries import (
+    _current_summary_attempts as _current_summary_attempts,
+)
+from .summaries import (
     _local_section_preview as _local_section_preview,
+)
+from .summaries import (
+    _resolve_summary_mode as _resolve_summary_mode,
 )
 from .summaries import (
     _sections_overview_for_brief as _sections_overview_for_brief,
@@ -565,6 +575,9 @@ from .summaries import (
 )
 from .summaries import (
     _set_next_summary_llm_allowed_at as _set_next_summary_llm_allowed_at,
+)
+from .summaries import (
+    _set_summary_metadata as _set_summary_metadata,
 )
 from .summaries import (
     _should_skip_section_summaries as _should_skip_section_summaries,
@@ -577,6 +590,9 @@ from .summaries import (
 )
 from .summaries import (
     _summary_llm_lock as _summary_llm_lock,
+)
+from .summaries import (
+    _summary_placeholder_text as _summary_placeholder_text,
 )
 from .summaries import (
     gemini_summarize as gemini_summarize,
@@ -850,104 +866,6 @@ DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC = float(
 def _section_sid(title: str, text: str) -> str:
     raw = (title + text[:200]).encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:12]
-
-
-def _resolve_summary_mode(
-    *,
-    profile: DocumentProfile | None,
-    parse_mode: str | None,
-    generate_summary: bool,
-    requested_mode: str | None,
-) -> str:
-    if not generate_summary:
-        return "off"
-
-    mode = (requested_mode or "").strip().lower()
-    if not mode:
-        mode = os.environ.get("LARKSCOUT_SUMMARY_MODE", "").strip().lower()
-
-    if mode in {"off", "sync", "defer"}:
-        return mode
-
-    selected_parse_mode = (parse_mode or "").strip().lower()
-    if profile:
-        if selected_parse_mode and selected_parse_mode in profile.summary_policy.async_modes:
-            return "defer"
-        if selected_parse_mode and selected_parse_mode in profile.summary_policy.sync_modes:
-            return "sync"
-        if profile.summary_policy.default_mode in {"off", "sync", "defer"}:
-            return profile.summary_policy.default_mode
-
-    return "sync"
-
-
-def _set_summary_metadata(
-    parsed: ParsedDocument,
-    *,
-    mode: str,
-    status: str,
-    error: str | None = None,
-    error_code: str | None = None,
-    attempts: int | None = None,
-) -> None:
-    metadata = parsed.metadata if isinstance(parsed.metadata, dict) else {}
-    existing = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
-    metadata["summary"] = {
-        "mode": mode,
-        "status": status,
-        "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "attempts": int(attempts if attempts is not None else existing.get("attempts", 0)),
-    }
-    if status == "running":
-        metadata["summary"]["started_at"] = metadata["summary"]["updated_at"]
-    elif existing.get("started_at"):
-        metadata["summary"]["started_at"] = existing.get("started_at")
-    if status in {"completed", "failed"}:
-        metadata["summary"]["finished_at"] = metadata["summary"]["updated_at"]
-    if error:
-        metadata["summary"]["error"] = error
-    if error_code:
-        metadata["summary"]["error_code"] = error_code
-    parsed.metadata = metadata
-
-
-def _summary_placeholder_text(
-    status: str, error: str | None = None, locale: str | None = None
-) -> str:
-    output_locale = "zh" if str(locale or "").lower().startswith("zh") else "en"
-    if status == "running":
-        return "(摘要生成中)" if output_locale == "zh" else "(Summary running)"
-    if status == "failed":
-        if error:
-            if output_locale == "zh":
-                return f"(摘要生成失败: {error})"
-            return f"(Summary failed: {error})"
-        return "(摘要生成失败)" if output_locale == "zh" else "(Summary failed)"
-    return "(摘要待生成)" if output_locale == "zh" else "(Summary pending)"
-
-
-def _current_summary_attempts(parsed: ParsedDocument) -> int:
-    metadata = parsed.metadata if isinstance(parsed.metadata, dict) else {}
-    summary = metadata.get("summary") if isinstance(metadata.get("summary"), dict) else {}
-    try:
-        return int(summary.get("attempts", 0))
-    except (TypeError, ValueError):
-        return 0
-
-
-def _classify_summary_error(exc: Exception) -> tuple[str, str]:
-    if isinstance(exc, FuturesTimeoutError):
-        return "timeout", f"summary timed out after {int(DEFERRED_SUMMARY_TIMEOUT_SEC)}s"
-
-    text = str(exc).strip() or exc.__class__.__name__
-    lower = text.lower()
-    if "attempt limit" in lower:
-        return "attempt_limit", text
-    if "429" in text or "rate limit" in lower or "速率限制" in text:
-        return "rate_limit", "upstream rate limit"
-    if "timeout" in lower or "timed out" in lower:
-        return "timeout", text
-    return "provider_error", text
 
 
 # ═══════════════════════════════════════════
