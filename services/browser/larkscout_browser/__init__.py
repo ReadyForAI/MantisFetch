@@ -1,5 +1,4 @@
 import asyncio
-import ipaddress
 import json
 import logging
 import os
@@ -15,7 +14,6 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -161,6 +159,15 @@ from .ranking import (
     _trim_action_fields as _trim_action_fields,
 )
 
+# URL validation (anti-SSRF). Re-exported so the goto/capture endpoints and
+# test_security keep calling _validate_url off the package namespace.
+from .security import (
+    _ALLOWED_SCHEMES as _ALLOWED_SCHEMES,
+)
+from .security import (
+    _validate_url as _validate_url,
+)
+
 logger = logging.getLogger("larkscout_browser")
 
 # ============================================================
@@ -176,26 +183,6 @@ _capture_sem = asyncio.Semaphore(_MAX_CONCURRENT_CAPTURE)
 _session_sem = asyncio.Semaphore(_MAX_CONCURRENT_SESSIONS)
 
 BASE_DIR = Path(__file__).resolve().parent
-
-# ---- URL validation (anti-SSRF) ----
-_ALLOWED_SCHEMES = {"http", "https"}
-
-
-def _validate_url(url: str) -> None:
-    """Block non-HTTP schemes and requests to private/loopback networks."""
-    parsed = urlparse(url)
-    if parsed.scheme not in _ALLOWED_SCHEMES:
-        raise HTTPException(400, f"URL scheme not allowed: {parsed.scheme!r}")
-    hostname = parsed.hostname or ""
-    try:
-        addr = ipaddress.ip_address(hostname)
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
-            raise HTTPException(400, f"URL target is a private/reserved address: {hostname}")
-    except ValueError:
-        # hostname is a domain name — resolve is left to Playwright;
-        # block obvious localhost aliases
-        if hostname.lower() in ("localhost", "localhost.localdomain"):
-            raise HTTPException(400, f"URL target not allowed: {hostname}")
 
 
 # ---- Readability.js local file ----
