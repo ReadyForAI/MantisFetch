@@ -132,15 +132,17 @@ from .ocr.engines import (
 )
 from .ocr.tables import (
     _apply_table_continuation_links,
-    _count_markdown_tables,
     _detect_table_candidates_from_ocr_blocks,
     _markdown_from_structured_table,
     _markdown_table_dimensions,
     _reconstruct_table_from_candidate,
 )
 
-# Used by the word parser (and the markdown-table tests via the facade); __init__
-# no longer references it directly, so keep it as an explicit re-export.
+# Used by the tabular/word parsers (and the markdown-table tests via the facade);
+# __init__ no longer references them directly, so keep them as explicit re-exports.
+from .ocr.tables import (
+    _count_markdown_tables as _count_markdown_tables,
+)
 from .ocr.tables import (
     _extract_markdown_table_blocks as _extract_markdown_table_blocks,
 )
@@ -449,6 +451,18 @@ from .storage import (
 )
 from .storage import (
     _validate_doc_id as _validate_doc_id,
+)
+
+# Tabular + generic MarkItDown-backed parsers. Re-exported so the /doc/parse
+# dispatch and the xlsx/csv parse tests keep resolving these off the facade.
+from .tabular import (
+    parse_csv as parse_csv,
+)
+from .tabular import (
+    parse_generic as parse_generic,
+)
+from .tabular import (
+    parse_xlsx as parse_xlsx,
 )
 from .text_utils import (
     _amount_to_uppercase_rmb as _amount_to_uppercase_rmb,
@@ -1570,163 +1584,6 @@ def parse_pdf(
             "ocr_rendering": render_meta,
             "field_ocr": field_ocr_meta,
         },
-    )
-
-
-# ═══════════════════════════════════════════
-# Word parsing
-# ═══════════════════════════════════════════
-
-
-# ═══════════════════════════════════════════
-# XLSX parsing
-# ═══════════════════════════════════════════
-
-
-def parse_xlsx(filepath: Path) -> ParsedDocument:
-    """Parse an XLSX workbook via MarkItDown."""
-    logger.info(f"Parsing XLSX: {filepath.name}")
-    markdown_text = _convert_to_markdown(filepath)
-    logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
-
-    # Split by sheet headers (MarkItDown uses "## Sheet: name" or similar)
-    pages: list[PageContent] = []
-    sections: list[Section] = []
-    table_count = 0
-
-    # Try to split by markdown headings for sheet-level sections
-    sheet_blocks = re.split(r"^(##\s+.+)$", markdown_text, flags=re.MULTILINE)
-
-    if len(sheet_blocks) > 1:
-        idx = 0
-        for i in range(1, len(sheet_blocks), 2):
-            idx += 1
-            title = sheet_blocks[i].lstrip("#").strip()
-            text = sheet_blocks[i + 1].strip() if i + 1 < len(sheet_blocks) else ""
-            if not text:
-                continue
-            page = PageContent(page_num=idx, text=text, tables=[text] if "| " in text else [])
-            pages.append(page)
-            if "| " in text:
-                table_count += 1
-            sid = _section_sid(title, text)
-            sections.append(
-                Section(
-                    index=idx, title=title, level=1, text=text, page_range=f"sheet {idx}", sid=sid
-                )
-            )
-    else:
-        # Single block — treat as one section
-        pages = [
-            PageContent(
-                page_num=1,
-                text=markdown_text,
-                tables=[markdown_text] if "| " in markdown_text else [],
-            )
-        ]
-        if "| " in markdown_text:
-            table_count = 1
-        sid = _section_sid(filepath.stem, markdown_text)
-        sections = (
-            [
-                Section(
-                    index=1,
-                    title=filepath.stem,
-                    level=1,
-                    text=markdown_text,
-                    page_range="sheet 1",
-                    sid=sid,
-                )
-            ]
-            if markdown_text.strip()
-            else []
-        )
-
-    # Size guard
-    truncated = len(markdown_text) > MAX_PARSE_ROWS * 100  # rough char limit
-
-    if truncated:
-        logger.warning("XLSX output may be truncated (large file)")
-    logger.info(f"XLSX parse complete: {len(sections)} sheets, {table_count} tables")
-    result = ParsedDocument(
-        filename=filepath.name,
-        file_type=filepath.suffix.lower().lstrip(".") or "xlsx",
-        total_pages=max(len(pages), 1),
-        pages=pages,
-        sections=sections,
-        table_count=table_count,
-    )
-    if truncated:
-        result.metadata["truncated"] = True
-        result.metadata["max_rows"] = MAX_PARSE_ROWS
-    return result
-
-
-# ═══════════════════════════════════════════
-# CSV parsing
-# ═══════════════════════════════════════════
-
-
-def parse_csv(filepath: Path) -> ParsedDocument:
-    """Parse a CSV file via MarkItDown."""
-    logger.info(f"Parsing CSV: {filepath.name}")
-    markdown_text = _convert_to_markdown(filepath)
-    logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
-
-    stem = filepath.stem
-    table_count = 1 if markdown_text.strip() else 0
-    sid = _section_sid(stem, markdown_text)
-
-    page = PageContent(
-        page_num=1,
-        text=markdown_text,
-        tables=[markdown_text] if markdown_text.strip() else [],
-    )
-    section = Section(
-        index=1,
-        title=stem,
-        level=1,
-        text=markdown_text,
-        page_range="sheet 1",
-        sid=sid,
-    )
-
-    logger.info(f"CSV parse complete: {table_count} tables")
-    return ParsedDocument(
-        filename=filepath.name,
-        file_type="csv",
-        total_pages=1,
-        pages=[page],
-        sections=[section] if markdown_text.strip() else [],
-        table_count=table_count,
-    )
-
-
-def parse_generic(filepath: Path, profile: DocumentProfile | None = None) -> ParsedDocument:
-    """Parse any MarkItDown-supported format (PPTX, HTML, etc.)."""
-    ext = filepath.suffix.lower()
-    file_type = ext.lstrip(".")
-    logger.info(f"Parsing {file_type.upper()}: {filepath.name}")
-    markdown_text = _convert_to_markdown(filepath)
-    logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
-
-    est_pages = max(1, len(markdown_text) // 3000)
-    pages = [PageContent(page_num=1, text=markdown_text)]
-    sections = _split_sections(pages, section_policy=profile.section_policy if profile else None)
-    for sec in sections:
-        sec.sid = _section_sid(sec.title, sec.text)
-
-    table_count = _count_markdown_tables(markdown_text)
-
-    logger.info(f"Parse complete: {len(sections)} sections, ~{est_pages} pages")
-    return ParsedDocument(
-        filename=filepath.name,
-        file_type=file_type,
-        total_pages=est_pages,
-        pages=pages,
-        sections=sections,
-        table_count=table_count,
-        metadata={"document_profile": profile.name if profile else None},
     )
 
 
