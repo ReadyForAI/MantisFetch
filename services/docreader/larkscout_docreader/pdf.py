@@ -121,202 +121,204 @@ def parse_pdf(
     }
     # Open with fitz for page count, TOC, and OCR rendering
     doc = fitz.open(str(filepath))
-    total_pages = len(doc)
-    logger.info(f"Total pages: {total_pages}")
+    try:
+        total_pages = len(doc)
+        logger.info(f"Total pages: {total_pages}")
 
-    # PDF TOC (for section splitting)
-    toc = doc.get_toc(simple=True)
-    if toc:
-        logger.info(f"PDF TOC detected: {len(toc)} entries")
+        # PDF TOC (for section splitting)
+        toc = doc.get_toc(simple=True)
+        if toc:
+            logger.info(f"PDF TOC detected: {len(toc)} entries")
 
-    ocr_page_set: set[int] | None = None
-    if ocr_pages_spec:
-        ocr_page_set = _parse_page_range(ocr_pages_spec, total_pages)
-        logger.info(f"OCR target pages: {sorted(ocr_page_set)}")
-    manual_blank_pages = (
-        _parse_page_range(manual_blank_pages_spec, total_pages)
-        if manual_blank_pages_spec
-        else set()
-    )
-    if manual_blank_pages:
-        logger.info("Manual blank/skip OCR pages: %s", sorted(manual_blank_pages))
+        ocr_page_set: set[int] | None = None
+        if ocr_pages_spec:
+            ocr_page_set = _parse_page_range(ocr_pages_spec, total_pages)
+            logger.info(f"OCR target pages: {sorted(ocr_page_set)}")
+        manual_blank_pages = (
+            _parse_page_range(manual_blank_pages_spec, total_pages)
+            if manual_blank_pages_spec
+            else set()
+        )
+        if manual_blank_pages:
+            logger.info("Manual blank/skip OCR pages: %s", sorted(manual_blank_pages))
 
-    # Build page-level baseline signals for selective enhancement.
-    page_texts: dict[int, str] = {}
-    page_signals: list[dict[str, Any]] = []
-    pdf_tables_by_page: dict[int, list[str]] = {}
-    # Pages where strip could not run; tables remain embedded in the raw page text,
-    # so downstream must not re-append them to avoid duplication.
-    pdf_tables_in_text_pages: set[int] = set()
+        # Build page-level baseline signals for selective enhancement.
+        page_texts: dict[int, str] = {}
+        page_signals: list[dict[str, Any]] = []
+        pdf_tables_by_page: dict[int, list[str]] = {}
+        # Pages where strip could not run; tables remain embedded in the raw page text,
+        # so downstream must not re-append them to avoid duplication.
+        pdf_tables_in_text_pages: set[int] = set()
 
-    for i, page in enumerate(doc):
-        page_num = i + 1
-        text = page.get_text("text").strip()
-        if extract_tables:
-            page_tables, table_bboxes = _extract_pdf_page_tables(page)
-            pdf_tables_by_page[page_num] = page_tables
-            if table_bboxes:
-                stripped = _strip_text_in_table_bboxes(page, table_bboxes)
-                if stripped is None:
-                    page_texts[page_num] = text
-                    pdf_tables_in_text_pages.add(page_num)
+        for i, page in enumerate(doc):
+            page_num = i + 1
+            text = page.get_text("text").strip()
+            if extract_tables:
+                page_tables, table_bboxes = _extract_pdf_page_tables(page)
+                pdf_tables_by_page[page_num] = page_tables
+                if table_bboxes:
+                    stripped = _strip_text_in_table_bboxes(page, table_bboxes)
+                    if stripped is None:
+                        page_texts[page_num] = text
+                        pdf_tables_in_text_pages.add(page_num)
+                    else:
+                        page_texts[page_num] = stripped
                 else:
-                    page_texts[page_num] = stripped
+                    page_texts[page_num] = text
             else:
                 page_texts[page_num] = text
-        else:
-            page_texts[page_num] = text
-        image_count = 0
-        try:
-            image_count = len(page.get_images(full=False))
-        except Exception:
             image_count = 0
-        manual_blank = page_num in manual_blank_pages
-        scan_like = _should_ocr(page, text, ocr_threshold)
-        blank_info: dict[str, Any] = {
-            "blank_like": False,
-            "blank_override": False,
-            "nonwhite_ratio": None,
-            "dark_ratio": None,
-        }
-        if manual_blank:
-            blank_info["blank_like"] = True
-            blank_info["blank_override"] = True
-        elif scan_like and not text and image_count:
-            blank_info = _page_blank_signal(page)
-            blank_info["blank_override"] = False
-        page_signals.append(
-            {
-                "page_num": page_num,
-                "text_len": len(text),
-                "image_count": image_count,
-                "scan_like": scan_like,
-                **blank_info,
+            try:
+                image_count = len(page.get_images(full=False))
+            except Exception:
+                image_count = 0
+            manual_blank = page_num in manual_blank_pages
+            scan_like = _should_ocr(page, text, ocr_threshold)
+            blank_info: dict[str, Any] = {
+                "blank_like": False,
+                "blank_override": False,
+                "nonwhite_ratio": None,
+                "dark_ratio": None,
             }
-        )
-
-    # Drop running headers/footers that repeat across most pages (e.g. a
-    # company-name banner on every page). Native PDF text keeps these on every
-    # page; removing them here cleans both the section body text and the
-    # classification text below.
-    page_texts = _strip_repeated_headers_footers(page_texts, total_pages)
-
-    # Contract/keyword classification must see the same content the dropped
-    # MarkItDown pass produced: native body text PLUS table text. page_texts has
-    # table regions stripped when extract_tables is on, so re-append the
-    # extracted tables here; otherwise keywords living only inside tables would
-    # be missed and matched_terms would be incomplete.
-    classification_parts: list[str] = []
-    for pn in sorted(page_texts):
-        classification_parts.append(page_texts[pn])
-        classification_parts.extend(pdf_tables_by_page.get(pn, []))
-    native_full_text = "\n".join(classification_parts)
-    assessment = _assess_contract_quality(native_full_text, page_signals, profile)
-    ocr_plan = _plan_pdf_ocr(
-        profile=profile,
-        parse_mode=selected_mode,
-        force_ocr=force_ocr,
-        explicit_ocr_pages=ocr_page_set,
-        assessment=assessment,
-    )
-    logger.info(
-        "PDF parse plan: mode=%s quality=%s local_pages=%s llm_pages=%s region_llm=%s",
-        ocr_plan["parse_mode"],
-        assessment["document_quality"],
-        ocr_plan["local_ocr_pages"],
-        ocr_plan["llm_ocr_pages"],
-        ocr_plan["region_llm"],
-    )
-
-    local_ocr_set = set(ocr_plan["local_ocr_pages"])
-    llm_ocr_set = set(ocr_plan["llm_ocr_pages"])
-    local_ocr_results: dict[int, str] = {}
-    llm_ocr_results: dict[int, str] = {}
-    local_ocr_layout_pages: dict[int, OCRPageBlocks] = {}
-    local_tasks: list[tuple[int, bytes]] = []
-    llm_tasks: list[tuple[int, bytes]] = []
-    render_meta: dict[str, Any] = {
-        "local_ocr_render_scale": processing_policy.local_ocr_render_scale,
-        "llm_ocr_render_scale": processing_policy.llm_ocr_render_scale,
-        "max_local_ocr_pixels": processing_policy.max_local_ocr_pixels,
-        "max_llm_ocr_pixels": processing_policy.max_llm_ocr_pixels,
-        "min_ocr_render_scale": processing_policy.min_ocr_render_scale,
-        "pages_capped": [],
-    }
-
-    for page in doc:
-        page_num = page.number + 1
-        if page_num not in local_ocr_set and page_num not in llm_ocr_set:
-            continue
-        if page_num in llm_ocr_set:
-            requested_scale = processing_policy.llm_ocr_render_scale
-            max_pixels = processing_policy.max_llm_ocr_pixels
-            cache_key = "llm"
-        else:
-            requested_scale = processing_policy.local_ocr_render_scale
-            max_pixels = processing_policy.max_local_ocr_pixels
-            cache_key = f"local-{ocr_plan['local_backend']}"
-        scale, render_pixels, capped = _resolve_ocr_render_scale(
-            page,
-            requested_scale=requested_scale,
-            max_pixels=max_pixels,
-            min_scale=processing_policy.min_ocr_render_scale,
-        )
-        if capped:
-            logger.info(
-                "Page %d/%d: capped %s OCR render scale %.2f -> %.2f (%d px)",
-                page_num,
-                total_pages,
-                cache_key,
-                requested_scale,
-                scale,
-                render_pixels,
-            )
-            render_meta["pages_capped"].append(
+            if manual_blank:
+                blank_info["blank_like"] = True
+                blank_info["blank_override"] = True
+            elif scan_like and not text and image_count:
+                blank_info = _page_blank_signal(page)
+                blank_info["blank_override"] = False
+            page_signals.append(
                 {
                     "page_num": page_num,
-                    "backend": cache_key,
-                    "requested_scale": requested_scale,
-                    "actual_scale": scale,
-                    "render_pixels": render_pixels,
-                    "max_pixels": max_pixels,
+                    "text_len": len(text),
+                    "image_count": image_count,
+                    "scan_like": scan_like,
+                    **blank_info,
                 }
             )
-        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
-        img_bytes = pix.tobytes("png")
 
-        if cache_dir:
-            ck = _ocr_cache_key(img_bytes)
+        # Drop running headers/footers that repeat across most pages (e.g. a
+        # company-name banner on every page). Native PDF text keeps these on every
+        # page; removing them here cleans both the section body text and the
+        # classification text below.
+        page_texts = _strip_repeated_headers_footers(page_texts, total_pages)
+
+        # Contract/keyword classification must see the same content the dropped
+        # MarkItDown pass produced: native body text PLUS table text. page_texts has
+        # table regions stripped when extract_tables is on, so re-append the
+        # extracted tables here; otherwise keywords living only inside tables would
+        # be missed and matched_terms would be incomplete.
+        classification_parts: list[str] = []
+        for pn in sorted(page_texts):
+            classification_parts.append(page_texts[pn])
+            classification_parts.extend(pdf_tables_by_page.get(pn, []))
+        native_full_text = "\n".join(classification_parts)
+        assessment = _assess_contract_quality(native_full_text, page_signals, profile)
+        ocr_plan = _plan_pdf_ocr(
+            profile=profile,
+            parse_mode=selected_mode,
+            force_ocr=force_ocr,
+            explicit_ocr_pages=ocr_page_set,
+            assessment=assessment,
+        )
+        logger.info(
+            "PDF parse plan: mode=%s quality=%s local_pages=%s llm_pages=%s region_llm=%s",
+            ocr_plan["parse_mode"],
+            assessment["document_quality"],
+            ocr_plan["local_ocr_pages"],
+            ocr_plan["llm_ocr_pages"],
+            ocr_plan["region_llm"],
+        )
+
+        local_ocr_set = set(ocr_plan["local_ocr_pages"])
+        llm_ocr_set = set(ocr_plan["llm_ocr_pages"])
+        local_ocr_results: dict[int, str] = {}
+        llm_ocr_results: dict[int, str] = {}
+        local_ocr_layout_pages: dict[int, OCRPageBlocks] = {}
+        local_tasks: list[tuple[int, bytes]] = []
+        llm_tasks: list[tuple[int, bytes]] = []
+        render_meta: dict[str, Any] = {
+            "local_ocr_render_scale": processing_policy.local_ocr_render_scale,
+            "llm_ocr_render_scale": processing_policy.llm_ocr_render_scale,
+            "max_local_ocr_pixels": processing_policy.max_local_ocr_pixels,
+            "max_llm_ocr_pixels": processing_policy.max_llm_ocr_pixels,
+            "min_ocr_render_scale": processing_policy.min_ocr_render_scale,
+            "pages_capped": [],
+        }
+
+        for page in doc:
+            page_num = page.number + 1
+            if page_num not in local_ocr_set and page_num not in llm_ocr_set:
+                continue
             if page_num in llm_ocr_set:
-                cp = _ocr_cache_path(cache_dir, page_num)
-                ck_path = cp.with_suffix(f".{ck}.txt")
+                requested_scale = processing_policy.llm_ocr_render_scale
+                max_pixels = processing_policy.max_llm_ocr_pixels
+                cache_key = "llm"
             else:
-                ck_path = _ocr_cache_variant_path(
-                    cache_dir,
-                    f"ocr_p{page_num:04d}.{cache_key}.{ck}.txt",
+                requested_scale = processing_policy.local_ocr_render_scale
+                max_pixels = processing_policy.max_local_ocr_pixels
+                cache_key = f"local-{ocr_plan['local_backend']}"
+            scale, render_pixels, capped = _resolve_ocr_render_scale(
+                page,
+                requested_scale=requested_scale,
+                max_pixels=max_pixels,
+                min_scale=processing_policy.min_ocr_render_scale,
+            )
+            if capped:
+                logger.info(
+                    "Page %d/%d: capped %s OCR render scale %.2f -> %.2f (%d px)",
+                    page_num,
+                    total_pages,
+                    cache_key,
+                    requested_scale,
+                    scale,
+                    render_pixels,
                 )
-            if ck_path.exists():
-                cached = ck_path.read_text(encoding="utf-8")
-                if _is_ocr_failed_text(cached):
-                    logger.info(
-                        "Page %d/%d: ignoring failed %s OCR cache",
-                        page_num,
-                        total_pages,
-                        cache_key,
-                    )
-                else:
-                    if page_num in llm_ocr_set:
-                        llm_ocr_results[page_num] = cached
-                    else:
-                        local_ocr_results[page_num] = cached
-                    logger.info("Page %d/%d: %s OCR cache hit", page_num, total_pages, cache_key)
-                    continue
-        if page_num in llm_ocr_set:
-            llm_tasks.append((page_num, img_bytes))
-        else:
-            local_tasks.append((page_num, img_bytes))
+                render_meta["pages_capped"].append(
+                    {
+                        "page_num": page_num,
+                        "backend": cache_key,
+                        "requested_scale": requested_scale,
+                        "actual_scale": scale,
+                        "render_pixels": render_pixels,
+                        "max_pixels": max_pixels,
+                    }
+                )
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            img_bytes = pix.tobytes("png")
 
-    doc.close()
+            if cache_dir:
+                ck = _ocr_cache_key(img_bytes)
+                if page_num in llm_ocr_set:
+                    cp = _ocr_cache_path(cache_dir, page_num)
+                    ck_path = cp.with_suffix(f".{ck}.txt")
+                else:
+                    ck_path = _ocr_cache_variant_path(
+                        cache_dir,
+                        f"ocr_p{page_num:04d}.{cache_key}.{ck}.txt",
+                    )
+                if ck_path.exists():
+                    cached = ck_path.read_text(encoding="utf-8")
+                    if _is_ocr_failed_text(cached):
+                        logger.info(
+                            "Page %d/%d: ignoring failed %s OCR cache",
+                            page_num,
+                            total_pages,
+                            cache_key,
+                        )
+                    else:
+                        if page_num in llm_ocr_set:
+                            llm_ocr_results[page_num] = cached
+                        else:
+                            local_ocr_results[page_num] = cached
+                        logger.info("Page %d/%d: %s OCR cache hit", page_num, total_pages, cache_key)
+                        continue
+            if page_num in llm_ocr_set:
+                llm_tasks.append((page_num, img_bytes))
+            else:
+                local_tasks.append((page_num, img_bytes))
+
+    finally:
+        doc.close()
 
     if local_tasks:
         logger.info(

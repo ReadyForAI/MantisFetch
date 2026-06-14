@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from starlette.testclient import TestClient
 
 
@@ -34,6 +35,28 @@ def test_capture_empty_body_returns_422(client: TestClient) -> None:
     """POST /web/capture with empty body must return 422 (field validation), not 404."""
     resp = client.post("/web/capture", json={})
     assert resp.status_code == 422
+
+
+def test_capture_closes_context_when_setup_fails(client: TestClient) -> None:
+    """C12: if setup raises before the session manager takes ownership, the
+    BrowserContext must be closed (not leaked)."""
+    import larkscout_browser as lb
+
+    mock_context = AsyncMock()
+    mock_context.close = AsyncMock()
+    orig_browser = lb._browser
+    lb._browser = MagicMock()
+    lb._browser.new_context = AsyncMock(return_value=mock_context)
+    try:
+        with (
+            patch("larkscout_browser._setup_routing", new=AsyncMock(side_effect=RuntimeError("boom"))),
+            pytest.raises(RuntimeError),
+        ):
+            client.post("/web/capture", json={"url": "https://example.com"})
+    finally:
+        lb._browser = orig_browser
+
+    mock_context.close.assert_awaited()
 
 
 def test_capture_persists_to_doc_library(client: TestClient) -> None:
