@@ -22,6 +22,7 @@ back into helpers defined here.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
@@ -54,16 +55,23 @@ _HF_EDGE_LINES = 2
 _HF_RATIO = 0.5
 
 
-def _norm_edge_line(line: str) -> str:
+def _norm_edge_line(line: str, page_num: int, total_pages: int) -> str:
     """Normalise an edge line for cross-page comparison.
 
-    Whitespace is dropped. A line that is *only* digits (a bare page number)
-    collapses to one sentinel so page numbers compare equal across pages, while
-    alphanumeric body lines like ``item1`` / ``item2`` stay distinct and are
-    never mistaken for a repeating template.
+    Whitespace is dropped. A digits-only line collapses to one sentinel ONLY
+    when its value tracks the page index (a real page number, with a small
+    offset tolerated for cover / front-matter pages). A standalone numeric
+    heading or list marker like ``1`` / ``2`` whose value does not match the
+    page index stays distinct, so body numbering is never mistaken for a
+    running header/footer. Alphanumeric body lines (``item1`` / ``item2``)
+    also stay distinct.
     """
     compact = re.sub(r"\s+", "", line)
-    return "\x00page-number" if compact.isdigit() else compact
+    if compact.isdigit():
+        value = int(compact)
+        if 1 <= value <= total_pages and abs(value - page_num) <= 2:
+            return "\x00page-number"
+    return compact
 
 
 def _strip_repeated_headers_footers(page_texts: dict[int, str], total_pages: int) -> dict[int, str]:
@@ -84,13 +92,13 @@ def _strip_repeated_headers_footers(page_texts: dict[int, str], total_pages: int
     for pn in range(1, total_pages + 1):
         nonblank = [ln for ln in (x.strip() for x in page_texts.get(pn, "").split("\n")) if ln]
         for ln in nonblank[:_HF_EDGE_LINES]:
-            key = _norm_edge_line(ln)
+            key = _norm_edge_line(ln, pn, total_pages)
             top_counts[key] = top_counts.get(key, 0) + 1
         for ln in nonblank[-_HF_EDGE_LINES:]:
-            key = _norm_edge_line(ln)
+            key = _norm_edge_line(ln, pn, total_pages)
             bottom_counts[key] = bottom_counts.get(key, 0) + 1
 
-    threshold = max(2, int(total_pages * _HF_RATIO))
+    threshold = max(2, math.ceil(total_pages * _HF_RATIO))
     top_templates = {k for k, c in top_counts.items() if k and c >= threshold}
     bottom_templates = {k for k, c in bottom_counts.items() if k and c >= threshold}
     if not top_templates and not bottom_templates:
@@ -108,7 +116,7 @@ def _strip_repeated_headers_footers(page_texts: dict[int, str], total_pages: int
             seen += 1
             if seen > _HF_EDGE_LINES:
                 break
-            if _norm_edge_line(stripped) in top_templates:
+            if _norm_edge_line(stripped, pn, total_pages) in top_templates:
                 drop.add(i)
             else:
                 break
@@ -120,7 +128,7 @@ def _strip_repeated_headers_footers(page_texts: dict[int, str], total_pages: int
             seen += 1
             if seen > _HF_EDGE_LINES:
                 break
-            if _norm_edge_line(stripped) in bottom_templates:
+            if _norm_edge_line(stripped, pn, total_pages) in bottom_templates:
                 drop.add(i)
             else:
                 break

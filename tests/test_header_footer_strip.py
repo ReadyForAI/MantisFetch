@@ -73,6 +73,36 @@ def test_mid_page_repetition_kept_edges_stripped():
         assert f"B{pn}" in out[pn]
 
 
+def test_numeric_heading_not_page_number_kept():
+    # Standalone numeric headings whose value does not track the page index
+    # must NOT be collapsed to the page-number sentinel and deleted.
+    pages = _pages(
+        "banner\n10\nScope text",
+        "banner\n20\nDefinitions text",
+        "banner\n30\nRequirements text",
+        "banner\n40\nAcceptance text",
+    )
+    out = _strip_repeated_headers_footers(pages, 4)
+    assert "10" in out[1]  # value 10 != page 1 -> body numbering, kept
+    assert "20" in out[2]
+    assert "banner" not in out[1]  # the real running header still goes
+
+
+def test_odd_page_count_uses_ceiling_threshold():
+    # 5 pages: an edge line on only 2 pages (40%) is below "at least half"
+    # and must be kept (ceil(5*0.5) == 3, not floor == 2).
+    pages = _pages(
+        "edge x\nbody1",
+        "edge x\nbody2",
+        "uniq3\nbody3",
+        "uniq4\nbody4",
+        "uniq5\nbody5",
+    )
+    out = _strip_repeated_headers_footers(pages, 5)
+    assert "edge x" in out[1]
+    assert "edge x" in out[2]
+
+
 def test_rare_edge_line_kept():
     pages = _pages(
         "banner\nbody1",
