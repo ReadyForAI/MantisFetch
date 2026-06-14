@@ -23,7 +23,9 @@ def _atomic_write(path: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.chmod(tmp_name, 0o644)  # mkstemp creates 0600; match the usual data perms
+        # Leave mkstemp's owner-only 0600 perms: the doc library is private and
+        # served via the API, so we never widen access (a chmod here would make
+        # artifacts world-readable on a restrictive-umask deployment).
         os.replace(tmp_name, path)
     except BaseException:
         try:
