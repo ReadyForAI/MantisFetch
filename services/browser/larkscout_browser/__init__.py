@@ -166,6 +166,9 @@ from .security import (
     _ALLOWED_SCHEMES as _ALLOWED_SCHEMES,
 )
 from .security import (
+    _url_allowed as _url_allowed,
+)
+from .security import (
     _validate_url as _validate_url,
 )
 from .session import (
@@ -234,18 +237,32 @@ _BLOCKED_KEYWORDS = frozenset(
 _BLOCKED_RESOURCE_TYPES = frozenset(["image", "media", "font"])
 
 
-async def _setup_routing(context: BrowserContext, block_resources: bool):
-    if not block_resources:
-        return
+async def _navigation_allowed(url: str) -> bool:
+    """Run the full (DNS-resolving) SSRF check off the event loop."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _url_allowed, url)
+    except Exception:
+        return False
 
+
+async def _setup_routing(context: BrowserContext, block_resources: bool):
     async def route_handler(route) -> None:
         req = route.request
-        if req.resource_type in _BLOCKED_RESOURCE_TYPES:
-            return await route.abort()
+        # Anti-SSRF (defense in depth): block navigations — including HTTP
+        # redirects and popups — to private/loopback/metadata targets at the
+        # network layer, even when the literal pre-check passed (DNS rebinding,
+        # redirect to an internal host). Always installed, not just when
+        # block_resources is set.
+        if req.is_navigation_request() and not await _navigation_allowed(req.url):
+            return await route.abort("addressunreachable")
 
-        url_lower = req.url.lower()
-        if any(x in url_lower for x in _BLOCKED_KEYWORDS):
-            return await route.abort()
+        if block_resources:
+            if req.resource_type in _BLOCKED_RESOURCE_TYPES:
+                return await route.abort()
+            url_lower = req.url.lower()
+            if any(x in url_lower for x in _BLOCKED_KEYWORDS):
+                return await route.abort()
 
         return await route.continue_()
 
