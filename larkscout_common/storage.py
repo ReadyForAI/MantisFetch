@@ -7,9 +7,16 @@ module; this is the single source of truth.
 """
 
 import os
+import threading
 from pathlib import Path
 
 from fastapi import HTTPException
+
+# Single lock guarding read-modify-write of the shared doc-index.json. Both the
+# /web (browser) and /doc (docreader) sub-apps run in one process and update the
+# same index file, so they must serialize through ONE lock — previously each had
+# its own, allowing lost updates when a capture and a parse wrote concurrently.
+_doc_index_lock = threading.Lock()
 
 DEFAULT_DOCS_DIR = Path(
     os.environ.get(

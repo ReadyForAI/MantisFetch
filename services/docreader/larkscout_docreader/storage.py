@@ -32,6 +32,7 @@ from i18n import t
 from larkscout_common.atomic import _write_json
 from larkscout_common.storage import (
     CONTENT_TYPE_DIRS,
+    _doc_index_lock,
     _doc_storage_dir,
     _doc_storage_rel_path,
     _normalize_content_type,
@@ -73,7 +74,8 @@ async def _optional_doc_id_lock(doc_id: str | None):
 # ═══════════════════════════════════════════
 
 _doc_counter_lock = threading.Lock()
-_doc_index_lock = threading.Lock()
+# _doc_index_lock is the process-wide shared lock from larkscout_common.storage
+# (imported above) so /web and /doc serialize on the same doc-index.json.
 
 
 def _indexable_metadata(value: dict[str, Any]) -> dict[str, Any]:
@@ -111,7 +113,7 @@ def _update_doc_index(
             try:
                 with open(index_path, encoding="utf-8") as f:
                     index = json.load(f)
-            except (json.JSONDecodeError, Exception):
+            except (OSError, ValueError):
                 index = {"version": 2, "documents": []}
         else:
             index = {"version": 2, "documents": []}
