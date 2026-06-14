@@ -15,9 +15,11 @@ from fastapi import FastAPI, HTTPException
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from i18n import t
+from larkscout_common.atomic import _write_json
 from larkscout_common.atomic import _write_text as _write_text_atomic
 from larkscout_common.paths import _mask_path
 from larkscout_common.storage import (
+    _doc_index_lock,
     _doc_storage_rel_path,
     _get_docs_dir,
     _normalize_content_type,
@@ -1442,7 +1444,8 @@ _browser: Browser | None = None
 
 
 _web_counter_lock = threading.Lock()
-_web_index_lock = threading.Lock()
+# doc-index.json writes serialize on the shared larkscout_common lock
+# (_doc_index_lock, imported above) so they can't race docreader's parse writes.
 
 
 def _next_web_doc_id(docs_dir: Path) -> str:
@@ -1585,14 +1588,14 @@ def _persist_web_capture(
         doc_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
     )
 
-    # doc-index.json (v2, shared with docreader) — locked + atomic write
-    with _web_index_lock:
+    # doc-index.json (v2, shared with docreader) — shared lock + atomic write
+    with _doc_index_lock:
         index_path = docs_dir / "doc-index.json"
         if index_path.exists():
             try:
                 with open(index_path, encoding="utf-8") as f:
                     index: dict[str, Any] = json.load(f)
-            except Exception:
+            except (OSError, ValueError):
                 index = {"version": 2, "documents": []}
         else:
             index = {"version": 2, "documents": []}
@@ -1620,9 +1623,7 @@ def _persist_web_capture(
             "content_hash": content_hash,
         })
         index["last_updated"] = now_str
-        tmp_path = index_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_path, index_path)
+        _write_json(index_path, index)
 
 
 @asynccontextmanager

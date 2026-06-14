@@ -105,6 +105,21 @@ class TestDocIndexIntegrity:
             expected = {f"DOC-{i:03d}" for i in range(1, 11)}
             assert doc_ids == expected, f"Missing entries: {expected - doc_ids}"
 
+    def test_web_and_doc_share_one_index_lock(self):
+        """C6: /web and /doc must serialize on the SAME lock for doc-index.json.
+
+        They run in one process and write the same file; two disjoint locks
+        (the old _web_index_lock vs _doc_index_lock) allowed lost updates when a
+        capture and a parse interleaved.
+        """
+        import larkscout_browser
+        import larkscout_docreader.storage as doc_storage
+
+        from larkscout_common.storage import _doc_index_lock as common_lock
+
+        assert larkscout_browser._doc_index_lock is common_lock
+        assert doc_storage._doc_index_lock is common_lock
+
 
 class TestSessionClosedFlag:
     """H2: session use-after-close — closed sessions must be rejected."""
