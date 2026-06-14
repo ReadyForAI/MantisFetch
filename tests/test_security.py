@@ -104,6 +104,45 @@ class TestUploadSizeLimit:
         assert resp.status_code != 413
 
 
+class TestUploadFilenameTraversal:
+    """P0: the multipart upload filename must not escape the scratch dir."""
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            "../../../../etc/passwd.pdf",
+            "../../../../../../tmp/PWNED.pdf",
+            "..\\..\\..\\PWNED.pdf",
+            "/abs/PWNED.pdf",
+            "..",
+            "...pdf",
+        ],
+    )
+    def test_safe_source_filename_cannot_escape(self, evil, tmp_path):
+        from larkscout_docreader import _safe_source_filename
+
+        safe = _safe_source_filename(evil)
+        assert "/" not in safe and "\\" not in safe
+        # The real invariant: joining the result onto a dir stays in that dir.
+        assert (tmp_path / safe).resolve().parent == tmp_path.resolve()
+
+    def test_parse_filename_cannot_escape_scratch_dir(self, doc_client, monkeypatch, tmp_path):
+        import larkscout_common.storage as common_storage
+
+        docs_dir = tmp_path / "docs"
+        monkeypatch.setattr(common_storage, "DEFAULT_DOCS_DIR", docs_dir)
+        # Enough "../" to land at tmp_path (outside docs_dir) if unsanitized.
+        evil = "../../../../PWNED.pdf"
+        doc_client.post(
+            "/parse",
+            files={"file": (evil, io.BytesIO(b"%PDF-1.4 fake"), "application/pdf")},
+            data={"generate_summary": "false"},
+        )
+        docs_resolved = str(docs_dir.resolve())
+        for hit in tmp_path.rglob("PWNED.pdf"):
+            assert str(hit.resolve()).startswith(docs_resolved), f"upload escaped to {hit}"
+
+
 # ── Browser security (SSRF) ────────────────────────────────────────
 
 
