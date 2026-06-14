@@ -213,10 +213,20 @@ def _next_doc_id(docs_dir: Path) -> str:
                 counter = 1
         else:
             counter = 1
-        doc_id = f"DOC-{counter:03d}"
+        # Skip ids that already exist on disk (e.g. .counter was reset, or a doc
+        # was previously created with an explicit DOC-NNN id) so a counter mint
+        # can never silently overwrite an existing document. Raise rather than
+        # return a colliding id if the search space is somehow exhausted.
+        for _ in range(1_000_000):
+            doc_id = f"DOC-{counter:03d}"
+            counter += 1
+            if not _doc_exists_anywhere(docs_dir, doc_id):
+                break
+        else:
+            raise RuntimeError("doc_id allocation exhausted: too many existing DOC ids")
         counter_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = counter_path.with_suffix(".tmp")
-        tmp.write_text(str(counter + 1), encoding="utf-8")
+        tmp.write_text(str(counter), encoding="utf-8")
         os.replace(tmp, counter_path)
         return doc_id
 

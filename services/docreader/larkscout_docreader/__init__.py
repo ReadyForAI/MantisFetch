@@ -3222,47 +3222,56 @@ async def get_summary_status(doc_id: str):
 async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
     _validate_doc_id(doc_id)
     docs_dir = _get_docs_dir()
-    parsed, metadata, source_record = _load_parsed_document_from_storage(docs_dir, doc_id)
-    tags = _load_doc_tags(docs_dir, doc_id)
-    content_type = _doc_content_type(docs_dir, doc_id)
+    # Serialize on the per-doc_id lock (the same registry /parse uses) so the
+    # load → status check → placeholder write is atomic w.r.t. a concurrent
+    # parse/retry of the same doc — otherwise two callers both pass the
+    # "running" check and double-schedule, or clobber each other's output.
+    async with _optional_doc_id_lock(doc_id):
+        parsed, metadata, source_record = _load_parsed_document_from_storage(docs_dir, doc_id)
+        tags = _load_doc_tags(docs_dir, doc_id)
+        content_type = _doc_content_type(docs_dir, doc_id)
 
-    summary_meta = parsed.metadata.get("summary") if isinstance(parsed.metadata, dict) else {}
-    current_status = summary_meta.get("status") if isinstance(summary_meta, dict) else None
-    attempts = _current_summary_attempts(parsed)
-    if current_status == "running" and not force:
-        raise HTTPException(409, f"summary already running for {doc_id}")
-    if attempts >= DEFERRED_SUMMARY_MAX_ATTEMPTS and not force:
-        raise HTTPException(409, f"summary attempt limit reached for {doc_id}")
+        summary_meta = parsed.metadata.get("summary") if isinstance(parsed.metadata, dict) else {}
+        current_status = summary_meta.get("status") if isinstance(summary_meta, dict) else None
+        attempts = _current_summary_attempts(parsed)
+        if current_status == "running" and not force:
+            raise HTTPException(409, f"summary already running for {doc_id}")
+        if attempts >= DEFERRED_SUMMARY_MAX_ATTEMPTS and not force:
+            raise HTTPException(409, f"summary attempt limit reached for {doc_id}")
 
-    _set_summary_metadata(parsed, mode="defer", status="pending", attempts=attempts)
-    write_output_extract_only(
-        doc_id,
-        parsed,
-        docs_dir,
-        tags=tags,
-        source="upload",
-        metadata=metadata,
-        source_record=source_record,
-        content_type=content_type,
-        summary_placeholder=_summary_placeholder_text(
-            "pending", locale=_parsed_document_locale(parsed)
-        ),
-    )
-    worker = threading.Thread(
-        target=_generate_deferred_summary,
-        args=(
+        # Claim the slot by marking running *under the lock* before starting the
+        # worker. A concurrent retry then sees "running" and 409s, closing the
+        # double-schedule window — without rejecting the legit "pending" state a
+        # parse leaves behind (which must stay retryable).
+        _set_summary_metadata(parsed, mode="defer", status="running", attempts=attempts)
+        write_output_extract_only(
             doc_id,
             parsed,
             docs_dir,
-            concurrency,
-            tags,
-            metadata,
-            source_record,
-            content_type,
-        ),
-        daemon=True,
-    )
-    worker.start()
+            tags=tags,
+            source="upload",
+            metadata=metadata,
+            source_record=source_record,
+            content_type=content_type,
+            summary_placeholder=_summary_placeholder_text(
+                "running", locale=_parsed_document_locale(parsed)
+            ),
+        )
+        worker = threading.Thread(
+            target=_generate_deferred_summary,
+            args=(
+                doc_id,
+                parsed,
+                docs_dir,
+                concurrency,
+                tags,
+                metadata,
+                source_record,
+                content_type,
+            ),
+            daemon=True,
+        )
+        worker.start()
     logger.info("Deferred summary retry scheduled: %s", doc_id)
     return {
         "doc_id": doc_id,

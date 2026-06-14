@@ -35,6 +35,19 @@ class TestDocCounterConcurrency:
             assert len(results) == 10
             assert len(set(results)) == 10, f"Duplicate IDs: {results}"
 
+    def test_next_doc_id_skips_existing(self):
+        """C8: a counter mint must not reuse an id that already exists on disk."""
+        from larkscout_docreader import _next_doc_id
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docs_dir = Path(tmp)
+            existing = docs_dir / "DOC-001"
+            existing.mkdir(parents=True)
+            (existing / "manifest.json").write_text("{}", encoding="utf-8")
+            (docs_dir / ".counter").write_text("1", encoding="utf-8")
+            # Counter says 1, but DOC-001 exists → must skip to DOC-002.
+            assert _next_doc_id(docs_dir) == "DOC-002"
+
 
 class TestWebCounterConcurrency:
     """C1: concurrent _next_web_doc_id must produce unique IDs."""

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -756,6 +757,83 @@ class TestParseReplaceProtection:
             assert "LOCK-EPHEMERAL" in larkscout_docreader._doc_id_parse_locks
         gc.collect()
         assert "LOCK-EPHEMERAL" not in larkscout_docreader._doc_id_parse_locks
+
+    @pytest.mark.asyncio
+    async def test_retry_summary_serializes_on_doc_lock(self, monkeypatch, tmp_path):
+        """C13/C47: retry_summary must hold the per-doc_id lock so it can't race
+        a concurrent parse/retry — and it must use the (formerly dead) helper."""
+        import asyncio
+
+        import larkscout_docreader as dr
+        from larkscout_docreader.models import ParsedDocument
+
+        parsed = ParsedDocument(
+            filename="f", file_type="pdf", total_pages=0, pages=[], sections=[], metadata={}
+        )
+        monkeypatch.setattr(dr, "_get_docs_dir", lambda: tmp_path)
+        monkeypatch.setattr(dr, "_load_parsed_document_from_storage", lambda d, i: (parsed, {}, {}))
+        monkeypatch.setattr(dr, "_load_doc_tags", lambda d, i: [])
+        monkeypatch.setattr(dr, "_doc_content_type", lambda d, i: "General")
+        monkeypatch.setattr(dr, "write_output_extract_only", lambda *a, **k: None)
+        monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: None)
+
+        dr._doc_id_parse_locks.pop("RETRY-1", None)
+        # Hold the per-doc lock; retry_summary on the same id must block on it.
+        async with dr._optional_doc_id_lock("RETRY-1"):
+            task = asyncio.create_task(dr.retry_summary("RETRY-1"))
+            await asyncio.sleep(0.05)
+            assert not task.done(), "retry_summary did not wait on the per-doc lock"
+        # Lock released → retry proceeds.
+        result = await asyncio.wait_for(task, timeout=2)
+        assert result["scheduled"] is True
+
+    @pytest.mark.asyncio
+    async def test_retry_summary_claims_running_then_rejects_concurrent(self, monkeypatch, tmp_path):
+        """C13: a retry claims the slot by marking running; a second retry then
+        409s (no duplicate worker), but force overrides."""
+        import larkscout_docreader as dr
+        from larkscout_docreader.models import ParsedDocument
+
+        parsed = ParsedDocument(
+            filename="f", file_type="pdf", total_pages=0, pages=[], sections=[], metadata={}
+        )
+        monkeypatch.setattr(dr, "_get_docs_dir", lambda: tmp_path)
+        monkeypatch.setattr(dr, "_load_parsed_document_from_storage", lambda d, i: (parsed, {}, {}))
+        monkeypatch.setattr(dr, "_load_doc_tags", lambda d, i: [])
+        monkeypatch.setattr(dr, "_doc_content_type", lambda d, i: "General")
+        monkeypatch.setattr(dr, "write_output_extract_only", lambda *a, **k: None)
+        monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: None)
+        dr._doc_id_parse_locks.pop("RETRY-2", None)
+
+        first = await dr.retry_summary("RETRY-2")  # claims slot -> status=running
+        assert first["scheduled"] is True
+        with pytest.raises(HTTPException) as exc:  # worker stubbed → still running
+            await dr.retry_summary("RETRY-2")
+        assert exc.value.status_code == 409
+        forced = await dr.retry_summary("RETRY-2", force=True)
+        assert forced["scheduled"] is True
+
+    @pytest.mark.asyncio
+    async def test_retry_summary_allows_stale_pending(self, monkeypatch, tmp_path):
+        """C13: a doc left 'pending' by the parse path (worker never ran) must
+        still be retryable without force — pending is not treated as in-flight."""
+        import larkscout_docreader as dr
+        from larkscout_docreader.models import ParsedDocument
+
+        parsed = ParsedDocument(
+            filename="f", file_type="pdf", total_pages=0, pages=[], sections=[],
+            metadata={"summary": {"status": "pending", "attempts": 0}},
+        )
+        monkeypatch.setattr(dr, "_get_docs_dir", lambda: tmp_path)
+        monkeypatch.setattr(dr, "_load_parsed_document_from_storage", lambda d, i: (parsed, {}, {}))
+        monkeypatch.setattr(dr, "_load_doc_tags", lambda d, i: [])
+        monkeypatch.setattr(dr, "_doc_content_type", lambda d, i: "General")
+        monkeypatch.setattr(dr, "write_output_extract_only", lambda *a, **k: None)
+        monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: None)
+        dr._doc_id_parse_locks.pop("RETRY-3", None)
+
+        result = await dr.retry_summary("RETRY-3")  # pending → not rejected
+        assert result["scheduled"] is True
 
     @pytest.mark.asyncio
     async def test_next_filename_doc_id_skips_reserved_id(self):
