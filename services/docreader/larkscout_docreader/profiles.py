@@ -50,6 +50,30 @@ FIELD_OCR_RENDER_SCALE = float(os.environ.get("LARKSCOUT_FIELD_OCR_RENDER_SCALE"
 _DOCUMENT_PROFILE_ALIASES = {"tender_cn": "bid_cn"}
 
 
+def _resolve_profile_config_path(requested: str) -> Path | None:
+    """Resolve a profile name to a JSON file inside an allowed config dir.
+
+    The directory part of ``requested`` is discarded (basename only) and the
+    resolved file must stay within a config dir, so attacker-supplied "../" or
+    absolute paths (the profile/config form fields are public on /parse) cannot
+    escape to read arbitrary local files (LFI).
+    """
+    name = Path(requested).name
+    if not name or name in {".", ".."}:
+        return None
+    if not name.endswith(".json"):
+        name = f"{name}.json"
+    for base in (DOCUMENT_PROFILE_CONFIG_DIR, FIELD_OCR_CONFIG_DIR):
+        candidate = (base / name).resolve()
+        try:
+            candidate.relative_to(base.resolve())
+        except ValueError:
+            continue
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _load_document_profile(profile_name: str | None, config_path: str | None) -> DocumentProfile | None:
     from . import LOCAL_OCR_RENDER_SCALE, OCR_RENDER_SCALE
 
@@ -60,15 +84,12 @@ def _load_document_profile(profile_name: str | None, config_path: str | None) ->
 
     selected = _DOCUMENT_PROFILE_ALIASES.get(selected, selected)
 
-    if custom:
-        path = Path(custom).expanduser()
-    else:
-        path = DOCUMENT_PROFILE_CONFIG_DIR / f"{selected}.json"
-        if not path.exists():
-            path = FIELD_OCR_CONFIG_DIR / f"{selected}.json"
-
-    if not path.exists():
-        raise RuntimeError(f"field OCR config not found: {path}")
+    # Both inputs are public /parse form values; treat them as opaque profile
+    # names confined to the config dirs (never arbitrary paths) to prevent LFI.
+    requested = custom or selected
+    path = _resolve_profile_config_path(requested)
+    if path is None:
+        raise RuntimeError(f"field OCR config not found: {requested!r}")
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
