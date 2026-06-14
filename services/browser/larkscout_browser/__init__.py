@@ -237,7 +237,7 @@ _BLOCKED_KEYWORDS = frozenset(
 _BLOCKED_RESOURCE_TYPES = frozenset(["image", "media", "font"])
 
 
-async def _navigation_allowed(url: str) -> bool:
+async def _request_allowed(url: str) -> bool:
     """Run the full (DNS-resolving) SSRF check off the event loop."""
     loop = asyncio.get_running_loop()
     try:
@@ -249,12 +249,14 @@ async def _navigation_allowed(url: str) -> bool:
 async def _setup_routing(context: BrowserContext, block_resources: bool):
     async def route_handler(route) -> None:
         req = route.request
-        # Anti-SSRF (defense in depth): block navigations — including HTTP
-        # redirects and popups — to private/loopback/metadata targets at the
-        # network layer, even when the literal pre-check passed (DNS rebinding,
-        # redirect to an internal host). Always installed, not just when
-        # block_resources is set.
-        if req.is_navigation_request() and not await _navigation_allowed(req.url):
+        # Anti-SSRF (defense in depth): block ANY request — navigations, their
+        # redirects, popups, and subresources (fetch/XHR/script/etc.) — to
+        # private/loopback/metadata targets at the network layer, even when the
+        # literal pre-check passed (DNS rebinding, redirect/fetch to an internal
+        # host). A public page issuing fetch("http://169.254.169.254/...") still
+        # sends the request regardless of CORS, so every request is validated.
+        # Always installed, not just when block_resources is set.
+        if not await _request_allowed(req.url):
             return await route.abort("addressunreachable")
 
         if block_resources:
