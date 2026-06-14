@@ -878,15 +878,75 @@ def _section_sid(title: str, text: str) -> str:
 # ═══════════════════════════════════════════
 
 
-def _reset_generated_output_dirs(doc_dir: Path) -> None:
-    for child in ("sections", "tables", "images"):
+def _reset_generated_output_dirs(doc_dir: Path, include_extracted: bool = True) -> None:
+    dirs = ["sections"]
+    files = ["sections.json"]
+    if include_extracted:
+        dirs += ["tables", "images"]
+        files += ["tables.json", "images.json", OCR_BLOCKS_SIDECAR_PATH]
+    for child in dirs:
         path = doc_dir / child
         if path.exists():
             shutil.rmtree(path)
-    for child in ("sections.json", "tables.json", "images.json", OCR_BLOCKS_SIDECAR_PATH):
+    for child in files:
         path = doc_dir / child
         if path.exists():
             path.unlink()
+
+
+def _resolve_extracted_outputs(
+    doc_dir: Path, doc_id: str, parsed: ParsedDocument, preserve_extracted: bool
+) -> tuple[int, int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Write tables/images/ocr-blocks from `parsed`, or keep the existing on-disk
+    artifacts and carry their manifest metadata forward when preserving.
+
+    The summary-retry path reconstructs `parsed` from storage with no
+    pages/tables/images/ocr_blocks; regenerating would wipe those artifacts, so
+    preserve_extracted keeps them untouched and reuses the prior manifest's
+    table/image/layout entries. Returns
+    (table_count, image_count, table_entries, image_entries, layout_entry).
+    """
+    if preserve_extracted:
+        prior: dict[str, Any] = {}
+        manifest_path = doc_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                prior = {}
+        table_entries = prior.get("tables") if isinstance(prior.get("tables"), list) else []
+        image_entries = prior.get("images") if isinstance(prior.get("images"), list) else []
+        layout_entry = (
+            prior.get("layout")
+            if isinstance(prior.get("layout"), dict)
+            else _build_layout_manifest_entry(available=False)
+        )
+        return (
+            int(prior.get("table_count") or 0),
+            int(prior.get("image_count") or 0),
+            table_entries,
+            image_entries,
+            layout_entry,
+        )
+
+    table_entries = _write_tables(doc_dir, parsed)
+    if table_entries:
+        _write_json(doc_dir / "tables.json", table_entries)
+    image_entries = _write_images(doc_dir, parsed)
+    if image_entries:
+        _write_json(doc_dir / "images.json", image_entries)
+    layout_entry = _build_layout_manifest_entry(available=False)
+    if parsed.ocr_blocks is not None:
+        layout_entry = _write_ocr_blocks_sidecar(
+            doc_dir,
+            OCRBlocksSidecar(
+                doc_id=doc_id,
+                pages=parsed.ocr_blocks.pages,
+                version=parsed.ocr_blocks.version,
+                coordinate_system=parsed.ocr_blocks.coordinate_system,
+            ),
+        )
+    return (parsed.table_count, len(parsed.images), table_entries, image_entries, layout_entry)
 
 
 def write_output(
@@ -901,15 +961,20 @@ def write_output(
     metadata: dict[str, Any] | None = None,
     source_record: dict[str, Any] | None = None,
     content_type: str | None = None,
+    preserve_extracted: bool = False,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
     doc_dir.mkdir(parents=True, exist_ok=True)
-    _reset_generated_output_dirs(doc_dir)
+    _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
     sections_dir.mkdir(exist_ok=True)
     output_locale = _parsed_document_locale(parsed)
+
+    table_count, image_count, table_entries, image_entries, layout_entry = (
+        _resolve_extracted_outputs(doc_dir, doc_id, parsed, preserve_extracted)
+    )
 
     meta = {
         "doc_id": doc_id,
@@ -918,8 +983,8 @@ def write_output(
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
         "ocr_page_count": parsed.ocr_page_count,
-        "table_count": parsed.table_count,
-        "image_count": len(parsed.images),
+        "table_count": table_count,
+        "image_count": image_count,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
@@ -984,26 +1049,6 @@ def write_output(
         _write_text(sections_dir / sec_filename, sec_content)
     logger.info(f"sections/ ({len(parsed.sections)} files)")
 
-    table_entries = _write_tables(doc_dir, parsed)
-    if table_entries:
-        _write_json(doc_dir / "tables.json", table_entries)
-        logger.info(f"tables/ ({len(table_entries)} files)")
-    image_entries = _write_images(doc_dir, parsed)
-    if image_entries:
-        _write_json(doc_dir / "images.json", image_entries)
-        logger.info(f"images/ ({len(image_entries)} files)")
-    layout_entry = _build_layout_manifest_entry(available=False)
-    if parsed.ocr_blocks is not None:
-        layout_entry = _write_ocr_blocks_sidecar(
-            doc_dir,
-            OCRBlocksSidecar(
-                doc_id=doc_id,
-                pages=parsed.ocr_blocks.pages,
-                version=parsed.ocr_blocks.version,
-                coordinate_system=parsed.ocr_blocks.coordinate_system,
-            ),
-        )
-
     # v3: content_hash
     full_text = "\n".join(sec.text for sec in parsed.sections)
     content_hash = (
@@ -1021,8 +1066,8 @@ def write_output(
         "tags": list(tags) if tags else [],
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
-        "table_count": parsed.table_count,
-        "image_count": len(parsed.images),
+        "table_count": table_count,
+        "image_count": image_count,
         "ocr_page_count": parsed.ocr_page_count,
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
@@ -1091,15 +1136,20 @@ def write_output_extract_only(
     source_record: dict[str, Any] | None = None,
     summary_placeholder: str | None = None,
     content_type: str | None = None,
+    preserve_extracted: bool = False,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
     doc_dir.mkdir(parents=True, exist_ok=True)
-    _reset_generated_output_dirs(doc_dir)
+    _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
     sections_dir.mkdir(exist_ok=True)
     output_locale = _parsed_document_locale(parsed)
+
+    table_count, image_count, table_entries, image_entries, layout_entry = (
+        _resolve_extracted_outputs(doc_dir, doc_id, parsed, preserve_extracted)
+    )
 
     meta = {
         "doc_id": doc_id,
@@ -1108,8 +1158,8 @@ def write_output_extract_only(
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
         "ocr_page_count": parsed.ocr_page_count,
-        "table_count": parsed.table_count,
-        "image_count": len(parsed.images),
+        "table_count": table_count,
+        "image_count": image_count,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
@@ -1143,24 +1193,6 @@ def write_output_extract_only(
         fn = f"{sec.index:02d}-{sec.sid}-{_safe_filename(sec.title)}.md"
         _write_text(sections_dir / fn, f"# {sec.title}\n\n{sec.text}\n")
 
-    table_entries = _write_tables(doc_dir, parsed)
-    if table_entries:
-        _write_json(doc_dir / "tables.json", table_entries)
-    image_entries = _write_images(doc_dir, parsed)
-    if image_entries:
-        _write_json(doc_dir / "images.json", image_entries)
-    layout_entry = _build_layout_manifest_entry(available=False)
-    if parsed.ocr_blocks is not None:
-        layout_entry = _write_ocr_blocks_sidecar(
-            doc_dir,
-            OCRBlocksSidecar(
-                doc_id=doc_id,
-                pages=parsed.ocr_blocks.pages,
-                version=parsed.ocr_blocks.version,
-                coordinate_system=parsed.ocr_blocks.coordinate_system,
-            ),
-        )
-
     placeholder = summary_placeholder or _summary_placeholder_text("pending", locale=output_locale)
     _write_text(
         doc_dir / "digest.md",
@@ -1186,8 +1218,8 @@ def write_output_extract_only(
         "tags": list(tags) if tags else [],
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
-        "table_count": parsed.table_count,
-        "image_count": len(parsed.images),
+        "table_count": table_count,
+        "image_count": image_count,
         "ocr_page_count": parsed.ocr_page_count,
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
@@ -1251,6 +1283,7 @@ def _generate_deferred_summary(
     metadata: dict[str, Any] | None,
     source_record: dict[str, Any] | None,
     content_type: str | None = None,
+    preserve_extracted: bool = False,
 ) -> None:
     logger.info("Deferred summary thread started: %s", doc_id)
     attempts = _current_summary_attempts(parsed) + 1
@@ -1279,6 +1312,7 @@ def _generate_deferred_summary(
             metadata=metadata,
             source_record=source_record,
             content_type=content_type,
+            preserve_extracted=preserve_extracted,
             summary_placeholder=_summary_placeholder_text(
                 "running", locale=_parsed_document_locale(parsed)
             ),
@@ -1304,6 +1338,7 @@ def _generate_deferred_summary(
             metadata=metadata,
             source_record=source_record,
             content_type=content_type,
+            preserve_extracted=preserve_extracted,
         )
         logger.info("Deferred summary complete: %s", doc_id)
     except Exception as exc:
@@ -1326,6 +1361,7 @@ def _generate_deferred_summary(
             metadata=metadata,
             source_record=source_record,
             content_type=content_type,
+            preserve_extracted=preserve_extracted,
             summary_placeholder=_summary_placeholder_text(
                 "failed", error_message, locale=_parsed_document_locale(parsed)
             ),
@@ -3244,6 +3280,9 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
         # double-schedule window — without rejecting the legit "pending" state a
         # parse leaves behind (which must stay retryable).
         _set_summary_metadata(parsed, mode="defer", status="running", attempts=attempts)
+        # preserve_extracted: parsed was reconstructed from storage and has no
+        # tables/images/ocr_blocks, so regenerating would wipe them — keep the
+        # existing on-disk artifacts (both here and in the worker's writes).
         write_output_extract_only(
             doc_id,
             parsed,
@@ -3253,6 +3292,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
             metadata=metadata,
             source_record=source_record,
             content_type=content_type,
+            preserve_extracted=True,
             summary_placeholder=_summary_placeholder_text(
                 "running", locale=_parsed_document_locale(parsed)
             ),
@@ -3269,6 +3309,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
                 source_record,
                 content_type,
             ),
+            kwargs={"preserve_extracted": True},
             daemon=True,
         )
         worker.start()
