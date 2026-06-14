@@ -194,10 +194,16 @@ def parse_pdf(
             }
         )
 
-    # Contract/keyword classification runs on the native PyMuPDF page text. This
-    # is the same content the dropped MarkItDown pass produced (body text is
-    # byte-identical), so we reuse page_texts instead of parsing the PDF twice.
-    native_full_text = "\n".join(page_texts[pn] for pn in sorted(page_texts))
+    # Contract/keyword classification must see the same content the dropped
+    # MarkItDown pass produced: native body text PLUS table text. page_texts has
+    # table regions stripped when extract_tables is on, so re-append the
+    # extracted tables here; otherwise keywords living only inside tables would
+    # be missed and matched_terms would be incomplete.
+    classification_parts: list[str] = []
+    for pn in sorted(page_texts):
+        classification_parts.append(page_texts[pn])
+        classification_parts.extend(pdf_tables_by_page.get(pn, []))
+    native_full_text = "\n".join(classification_parts)
     assessment = _assess_contract_quality(native_full_text, page_signals, profile)
     ocr_plan = _plan_pdf_ocr(
         profile=profile,
