@@ -217,6 +217,7 @@ def main() -> int:
     _write({"type": "ready"})
 
     for line in sys.stdin:
+        request = None  # reset each line so a malformed line can't report a prior page_num
         try:
             request = json.loads(line)
             page_num = int(request.get("page_num") or 0)
@@ -239,7 +240,7 @@ def main() -> int:
             _write(
                 {
                     "ok": False,
-                    "page_num": int(request.get("page_num") or 0) if "request" in locals() else 0,
+                    "page_num": int(request.get("page_num") or 0) if isinstance(request, dict) else 0,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )

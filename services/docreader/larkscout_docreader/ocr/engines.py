@@ -103,36 +103,52 @@ def _local_ocr_worker_command() -> list[str]:
 
 def _drain_local_ocr_worker_stderr(proc: subprocess.Popen[str]) -> None:
     assert proc.stderr is not None
-    for line in proc.stderr:
-        value = line.rstrip()
-        if value:
-            logger.info("[local-ocr-worker] %s", value)
+    # Must never die: if this thread stops draining, the stderr pipe fills and
+    # the worker blocks on write (deadlock). errors="replace" prevents decode
+    # errors; this guard catches anything else.
+    try:
+        for line in proc.stderr:
+            value = line.rstrip()
+            if value:
+                logger.info("[local-ocr-worker] %s", value)
+    except Exception as exc:
+        logger.warning("local OCR worker stderr drain stopped: %s", exc)
 
 
 def _read_local_ocr_worker_message(proc: subprocess.Popen[str], timeout: float) -> dict[str, Any]:
     if proc.stdout is None:
         raise RuntimeError("local OCR worker stdout is unavailable")
     deadline = time.monotonic() + max(timeout, 0.1)
+    # Non-blocking reads + our own line buffering so a partial line written by
+    # the worker can't block readline() past the deadline (#45).
+    os.set_blocking(proc.stdout.fileno(), False)
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
+    buffer = ""
     try:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(f"local OCR worker exited with code {proc.returncode}")
-            remaining = max(deadline - time.monotonic(), 0.1)
-            events = selector.select(timeout=remaining)
-            if not events:
-                continue
-            line = proc.stdout.readline()
-            if not line:
-                raise RuntimeError(f"local OCR worker closed stdout with code {proc.poll()}")
+            remaining = max(deadline - time.monotonic(), 0.05)
+            selector.select(timeout=remaining)
             try:
-                message = json.loads(line)
-            except json.JSONDecodeError:
-                logger.warning("Ignoring non-JSON local OCR worker output: %s", line.rstrip())
+                chunk = proc.stdout.read()
+            except (BlockingIOError, OSError):
+                chunk = None
+            if not chunk:  # None = nothing ready yet; "" = EOF (caught via poll)
                 continue
-            if isinstance(message, dict):
-                return message
+            buffer += chunk
+            while "\n" in buffer:
+                line, _, buffer = buffer.partition("\n")
+                if not line.strip():
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("Ignoring non-JSON local OCR worker output: %s", line.rstrip())
+                    continue
+                if isinstance(message, dict):
+                    return message
         raise TimeoutError(f"local OCR worker timed out after {timeout:.1f}s")
     finally:
         selector.close()
@@ -183,6 +199,11 @@ def _get_local_ocr_worker() -> subprocess.Popen[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # Tolerant decode: native libs (Paddle/CUDA) can emit non-UTF-8 bytes
+            # on stdout/stderr. Strict decoding would crash the protocol read
+            # (#18) and kill the stderr drain thread, filling the pipe and
+            # deadlocking the worker (#17).
+            errors="replace",
             bufsize=1,
         )
         _local_ocr_worker = proc
