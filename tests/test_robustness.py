@@ -1124,8 +1124,10 @@ class TestGeminiOCRRetry:
         PILImage.new("RGB", (1, 1)).save(buf, format="PNG")
         img_bytes = buf.getvalue()
 
+        # proofread=False isolates retry behavior; proofread now correctly runs
+        # after a transcribe retry (covered in test_failure_sentinel).
         with patch("time.sleep"):
-            result = provider.ocr(img_bytes, page_num=1, max_retries=2)
+            result = provider.ocr(img_bytes, page_num=1, max_retries=2, proofread=False)
 
         assert result == "extracted text"
         assert mock_client.models.generate_content.call_count == 2
