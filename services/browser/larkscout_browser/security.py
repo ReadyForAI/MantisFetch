@@ -100,11 +100,16 @@ def _url_violation(url: str, *, resolve: bool) -> str | None:
     ips = _literal_ips(hostname)
     if not ips and resolve:
         ips = _resolved_ips(hostname)
+        if not ips:
+            # Fail closed: this guard's resolver returned nothing, but Chromium
+            # runs its own resolution at fetch time and may reach a private
+            # address (split-horizon / transient SERVFAIL). Block rather than
+            # defer to the browser. (The DNS-free pre-check, resolve=False,
+            # stays permissive for domains — the route guard does the real check.)
+            return f"URL host could not be resolved: {hostname}"
     for ip in ips:
         if _ip_disallowed(ip):
             return f"URL target is a private/reserved address: {hostname}"
-    # No resolvable address (unresolvable / DNS not attempted) → allow: the
-    # browser cannot reach a target it cannot resolve, so this is not an SSRF.
     return None
 
 

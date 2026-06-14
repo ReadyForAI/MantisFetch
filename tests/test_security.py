@@ -252,12 +252,24 @@ class TestSSRF:
         monkeypatch.setattr(sec.socket, "getaddrinfo", fake_getaddrinfo)
         assert sec._url_allowed("http://public.example/") is True
 
-    def test_url_allowed_allows_unresolvable(self, monkeypatch):
+    def test_url_allowed_blocks_unresolvable(self, monkeypatch):
         import larkscout_browser.security as sec
 
         def boom(host, *a, **k):
             raise OSError("nxdomain")
 
         monkeypatch.setattr(sec.socket, "getaddrinfo", boom)
-        # Cannot resolve => browser cannot reach it => not an SSRF => allowed.
-        assert sec._url_allowed("http://nonexistent.invalid/") is True
+        # Fail closed: our resolver got nothing but Chromium may still resolve
+        # it to a private address at fetch time, so the guard must block.
+        assert sec._url_allowed("http://nonexistent.invalid/") is False
+
+    def test_validate_url_prechecks_domain_without_dns(self, monkeypatch):
+        import larkscout_browser.security as sec
+
+        def boom(host, *a, **k):
+            raise AssertionError("pre-check must not resolve DNS")
+
+        monkeypatch.setattr(sec.socket, "getaddrinfo", boom)
+        # _validate_url (resolve=False) must not call DNS and must allow a plain
+        # domain (the route guard does the resolving check).
+        sec._validate_url("https://example.com/page")
