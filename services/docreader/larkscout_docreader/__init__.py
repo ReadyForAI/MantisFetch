@@ -3234,15 +3234,16 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
         summary_meta = parsed.metadata.get("summary") if isinstance(parsed.metadata, dict) else {}
         current_status = summary_meta.get("status") if isinstance(summary_meta, dict) else None
         attempts = _current_summary_attempts(parsed)
-        # "pending" is in-flight too: the first retry writes pending and the
-        # worker only flips to running once it starts, so without this a second
-        # retry in that window would schedule a duplicate worker.
-        if current_status in {"running", "pending"} and not force:
-            raise HTTPException(409, f"summary already scheduled for {doc_id}")
+        if current_status == "running" and not force:
+            raise HTTPException(409, f"summary already running for {doc_id}")
         if attempts >= DEFERRED_SUMMARY_MAX_ATTEMPTS and not force:
             raise HTTPException(409, f"summary attempt limit reached for {doc_id}")
 
-        _set_summary_metadata(parsed, mode="defer", status="pending", attempts=attempts)
+        # Claim the slot by marking running *under the lock* before starting the
+        # worker. A concurrent retry then sees "running" and 409s, closing the
+        # double-schedule window — without rejecting the legit "pending" state a
+        # parse leaves behind (which must stay retryable).
+        _set_summary_metadata(parsed, mode="defer", status="running", attempts=attempts)
         write_output_extract_only(
             doc_id,
             parsed,
@@ -3253,7 +3254,7 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
             source_record=source_record,
             content_type=content_type,
             summary_placeholder=_summary_placeholder_text(
-                "pending", locale=_parsed_document_locale(parsed)
+                "running", locale=_parsed_document_locale(parsed)
             ),
         )
         worker = threading.Thread(
