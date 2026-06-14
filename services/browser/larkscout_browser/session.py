@@ -53,14 +53,20 @@ class SessionManager:
     def __len__(self):
         return len(self._sessions)
 
+    # NOTE: _close_session() awaits context.close() (browser I/O) and must run
+    # OUTSIDE self._lock — holding the manager lock across it would serialize
+    # every other session operation behind a slow close.
+
     async def put(self, sid: str, sess: Session) -> None:
+        evicted: Session | None = None
         async with self._lock:
             # evict oldest
             if len(self._sessions) >= self._maxsize:
-                old_sid, (_, old_sess) = self._sessions.popitem(last=False)
+                old_sid, (_, evicted) = self._sessions.popitem(last=False)
                 logger.info("session evicted (maxsize): %s", old_sid)
-                await self._close_session(old_sess)
             self._sessions[sid] = (time.time(), sess)
+        if evicted is not None:
+            await self._close_session(evicted)
 
     async def get(self, sid: str) -> Session | None:
         async with self._lock:
@@ -70,36 +76,39 @@ class SessionManager:
             ts, sess = item
             if time.time() - ts > self._ttl:
                 del self._sessions[sid]
-                logger.info("session expired on access: %s", sid)
-                await self._close_session(sess)
-                return None
-            # refresh timestamp & move to end
-            self._sessions[sid] = (time.time(), sess)
-            self._sessions.move_to_end(sid)
-            return sess
+            else:
+                # refresh timestamp & move to end
+                self._sessions[sid] = (time.time(), sess)
+                self._sessions.move_to_end(sid)
+                return sess
+        # only reached when the session had expired
+        logger.info("session expired on access: %s", sid)
+        await self._close_session(sess)
+        return None
 
     async def remove(self, sid: str) -> None:
         async with self._lock:
             item = self._sessions.pop(sid, None)
-            if item:
-                _, sess = item
-                await self._close_session(sess)
+        if item:
+            _, sess = item
+            await self._close_session(sess)
 
     async def cleanup(self) -> None:
         """Periodic cleanup of expired sessions."""
         async with self._lock:
             now = time.time()
-            expired = [sid for sid, (ts, _) in self._sessions.items() if now - ts > self._ttl]
-            for sid in expired:
-                _, sess = self._sessions.pop(sid)
-                logger.info("session expired (cleanup): %s", sid)
-                await self._close_session(sess)
+            expired_ids = [sid for sid, (ts, _) in self._sessions.items() if now - ts > self._ttl]
+            expired = [(sid, self._sessions.pop(sid)[1]) for sid in expired_ids]
+        for sid, sess in expired:
+            logger.info("session expired (cleanup): %s", sid)
+            await self._close_session(sess)
 
     async def close_all(self) -> None:
         async with self._lock:
-            for sid, (_, sess) in self._sessions.items():
-                await self._close_session(sess)
+            items = list(self._sessions.values())
             self._sessions.clear()
+        for _, sess in items:
+            await self._close_session(sess)
 
     @staticmethod
     async def _close_session(sess: Session):

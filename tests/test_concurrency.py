@@ -134,6 +134,30 @@ class TestDocIndexIntegrity:
         assert doc_storage._doc_index_lock is common_lock
 
 
+class TestSessionEviction:
+    """C16: eviction/expiry still closes the session (now outside the lock)."""
+
+    def test_eviction_closes_evicted_session(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from larkscout_browser import Session, SessionManager
+
+        async def run():
+            mgr = SessionManager(ttl=60, maxsize=1)
+            ctx1 = AsyncMock()
+            s1 = Session(context=ctx1, page=MagicMock(), lang="en")
+            s2 = Session(context=AsyncMock(), page=MagicMock(), lang="en")
+            await mgr.put("a", s1)
+            await mgr.put("b", s2)  # exceeds maxsize → evicts "a"
+            assert s1.closed
+            ctx1.close.assert_awaited()
+            assert await mgr.get("a") is None
+            assert await mgr.get("b") is not None
+
+        asyncio.run(run())
+
+
 class TestSessionClosedFlag:
     """H2: session use-after-close — closed sessions must be rejected."""
 

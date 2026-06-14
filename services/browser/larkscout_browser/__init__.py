@@ -1715,8 +1715,14 @@ async def new_session(req: NewSessionRequest) -> NewSessionResponse:
             # SSRF route guard — block service workers entirely.
             service_workers="block",
         )
-        await _setup_routing(context, req.block_resources)
-        page = await context.new_page()
+        # Close the context if setup fails before the session manager takes
+        # ownership — otherwise the BrowserContext leaks.
+        try:
+            await _setup_routing(context, req.block_resources)
+            page = await context.new_page()
+        except BaseException:
+            await context.close()
+            raise
 
         # secrets.token_hex replaces sha1(time) to avoid collision
         sid = "s_" + secrets.token_hex(8)
@@ -2044,8 +2050,14 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             # and would defeat the SSRF route guard (see /session/new).
             service_workers="block",
         )
-        await _setup_routing(context, block_resources=True)
-        page = await context.new_page()
+        # Close the context if setup fails before the session manager takes
+        # ownership — otherwise the BrowserContext leaks.
+        try:
+            await _setup_routing(context, block_resources=True)
+            page = await context.new_page()
+        except BaseException:
+            await context.close()
+            raise
         sid = "s_" + secrets.token_hex(8)
         sess = Session(context=context, page=page, lang=req.lang)
         await sessions.put(sid, sess)
