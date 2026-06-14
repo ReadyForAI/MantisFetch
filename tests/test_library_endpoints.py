@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from starlette.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -785,6 +786,33 @@ class TestParseReplaceProtection:
         # Lock released → retry proceeds.
         result = await asyncio.wait_for(task, timeout=2)
         assert result["scheduled"] is True
+
+    @pytest.mark.asyncio
+    async def test_retry_summary_rejects_pending(self, monkeypatch, tmp_path):
+        """C13: a second retry while the first is still 'pending' (worker not yet
+        running) must 409, not schedule a duplicate worker."""
+        import larkscout_docreader as dr
+        from larkscout_docreader.models import ParsedDocument
+
+        parsed = ParsedDocument(
+            filename="f", file_type="pdf", total_pages=0, pages=[], sections=[], metadata={}
+        )
+        monkeypatch.setattr(dr, "_get_docs_dir", lambda: tmp_path)
+        monkeypatch.setattr(dr, "_load_parsed_document_from_storage", lambda d, i: (parsed, {}, {}))
+        monkeypatch.setattr(dr, "_load_doc_tags", lambda d, i: [])
+        monkeypatch.setattr(dr, "_doc_content_type", lambda d, i: "General")
+        monkeypatch.setattr(dr, "write_output_extract_only", lambda *a, **k: None)
+        monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: None)
+        dr._doc_id_parse_locks.pop("RETRY-2", None)
+
+        first = await dr.retry_summary("RETRY-2")  # sets status=pending
+        assert first["scheduled"] is True
+        with pytest.raises(HTTPException) as exc:  # worker stubbed → still pending
+            await dr.retry_summary("RETRY-2")
+        assert exc.value.status_code == 409
+        # force overrides the in-flight guard
+        forced = await dr.retry_summary("RETRY-2", force=True)
+        assert forced["scheduled"] is True
 
     @pytest.mark.asyncio
     async def test_next_filename_doc_id_skips_reserved_id(self):

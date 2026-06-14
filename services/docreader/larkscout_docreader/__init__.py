@@ -3234,8 +3234,11 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
         summary_meta = parsed.metadata.get("summary") if isinstance(parsed.metadata, dict) else {}
         current_status = summary_meta.get("status") if isinstance(summary_meta, dict) else None
         attempts = _current_summary_attempts(parsed)
-        if current_status == "running" and not force:
-            raise HTTPException(409, f"summary already running for {doc_id}")
+        # "pending" is in-flight too: the first retry writes pending and the
+        # worker only flips to running once it starts, so without this a second
+        # retry in that window would schedule a duplicate worker.
+        if current_status in {"running", "pending"} and not force:
+            raise HTTPException(409, f"summary already scheduled for {doc_id}")
         if attempts >= DEFERRED_SUMMARY_MAX_ATTEMPTS and not force:
             raise HTTPException(409, f"summary attempt limit reached for {doc_id}")
 
