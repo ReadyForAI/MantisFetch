@@ -143,6 +143,49 @@ class TestUploadFilenameTraversal:
             assert str(hit.resolve()).startswith(docs_resolved), f"upload escaped to {hit}"
 
 
+class TestProfileConfigLFI:
+    """P1: document_profile / field_ocr_config must not read arbitrary files."""
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            "../../../../etc/passwd",
+            "/etc/passwd",
+            "/etc/hosts",
+            "..",
+        ],
+    )
+    def test_profile_name_cannot_escape(self, evil):
+        from larkscout_docreader.profiles import _load_document_profile
+
+        # Must NOT read the target — raises "not found", never loads the file.
+        with pytest.raises(RuntimeError, match="not found"):
+            _load_document_profile(evil, None)
+
+    def test_traversal_basename_collision_loads_in_dir_profile(self):
+        from larkscout_docreader.profiles import _load_document_profile
+
+        # The directory part is stripped, so this can only ever load the
+        # in-config-dir bid_cn profile — never the targeted path.
+        prof = _load_document_profile("../../../../bid_cn", None)
+        assert prof is not None
+
+    def test_field_ocr_config_absolute_path_blocked(self, tmp_path):
+        from larkscout_docreader.profiles import _load_document_profile
+
+        # A valid JSON file outside the config dirs must not be loadable.
+        leak = tmp_path / "leak.json"
+        leak.write_text('{"classification": {}}', encoding="utf-8")
+        with pytest.raises(RuntimeError, match="not found"):
+            _load_document_profile(None, str(leak))
+
+    def test_known_profile_still_loads(self):
+        from larkscout_docreader.profiles import _load_document_profile
+
+        prof = _load_document_profile("bid_cn", None)
+        assert prof is not None
+
+
 # ── Browser security (SSRF) ────────────────────────────────────────
 
 
