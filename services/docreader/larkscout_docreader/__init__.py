@@ -1839,7 +1839,11 @@ def _safe_source_filename(filename: str) -> str:
     base = Path(filename).name or "source.bin"
     suffix = Path(base).suffix
     stem = base[: -len(suffix)] if suffix else base
-    safe_stem = _safe_filename(stem, max_len=80)
+    # Strip leading dots so the result can never be ".", ".." or a hidden file
+    # — joining it onto a directory must stay inside that directory.
+    safe_stem = _safe_filename(stem, max_len=80).lstrip(".")
+    if not safe_stem:
+        safe_stem = "source"
     return f"{safe_stem}{suffix}" if suffix else safe_stem
 
 
@@ -2604,7 +2608,10 @@ async def api_parse_doc(
                 doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
                 tmp_dir = doc_storage_dir / ".tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
-                tmp_path = tmp_dir / filename
+                # Sanitize to a basename: the raw multipart filename is
+                # attacker-controlled and must never be joined onto a path
+                # (e.g. "../../../etc/x.pdf" would escape the scratch dir).
+                tmp_path = tmp_dir / _safe_source_filename(filename)
                 shutil.move(str(scratch_path), str(tmp_path))
                 scratch_path = None
             except HTTPException:
