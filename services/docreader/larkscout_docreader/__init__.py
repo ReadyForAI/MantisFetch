@@ -2698,7 +2698,13 @@ async def api_parse_doc(
                         ),
                     )
                 elif suffix in (".doc", ".docx"):
-                    word_path = _convert_legacy_office(tmp_path, "docx") if suffix == ".doc" else tmp_path
+                    # LibreOffice conversion shells out and can take seconds —
+                    # run it off the event loop.
+                    word_path = (
+                        await loop.run_in_executor(None, _convert_legacy_office, tmp_path, "docx")
+                        if suffix == ".doc"
+                        else tmp_path
+                    )
                     if extract_images:
                         embedded_image_count = _count_word_embedded_image_references(word_path)
                         requested_ocr_image_count = min(embedded_image_count, max_images)
@@ -2750,7 +2756,9 @@ async def api_parse_doc(
                 # below removes tmp_dir, and we no longer hold the bytes in
                 # memory after the streaming upload.
                 source_record = (
-                    _persist_source_file(doc_storage_dir, filename, tmp_path)
+                    await loop.run_in_executor(
+                        None, _persist_source_file, doc_storage_dir, filename, tmp_path
+                    )
                     if STORE_SOURCE_FILES else {}
                 )
             except HTTPException:

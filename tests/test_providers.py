@@ -64,6 +64,28 @@ class TestGeminiProvider:
         p = get_provider()
         assert isinstance(p, LLMProvider)
 
+    def test_get_provider_is_thread_safe_singleton(self, monkeypatch):
+        """C38: concurrent cold get_provider() calls must share one instance."""
+        import threading
+
+        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        reset_provider()
+        results: list[LLMProvider] = []
+        barrier = threading.Barrier(8)
+
+        def grab():
+            barrier.wait()  # release all threads onto the cold path at once
+            results.append(get_provider())
+
+        threads = [threading.Thread(target=grab) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(results) == 8
+        assert all(r is results[0] for r in results)
+
     def test_gemini_summarize_delegates_to_sdk(self, monkeypatch):
         """GeminiProvider.summarize() calls client.models.generate_content."""
         monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
