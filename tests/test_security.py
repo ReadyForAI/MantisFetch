@@ -206,3 +206,70 @@ class TestSSRF:
         from larkscout_browser import _validate_url
 
         _validate_url("http://example.com:8080/api")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://2130706433/",            # decimal 127.0.0.1
+            "http://0x7f000001/",            # hex 127.0.0.1
+            "http://0177.0.0.1/",            # octal 127.0.0.1
+            "http://0xa9fea9fe/latest/",     # hex 169.254.169.254 (metadata)
+        ],
+    )
+    def test_encoded_ip_forms_blocked(self, url):
+        from larkscout_browser import _validate_url
+
+        with pytest.raises(Exception, match="private/reserved"):
+            _validate_url(url)
+
+    def test_trailing_dot_localhost_blocked(self):
+        from larkscout_browser import _validate_url
+
+        with pytest.raises(Exception, match="not allowed"):
+            _validate_url("http://localhost./")
+
+    def test_metadata_fqdn_blocked(self):
+        from larkscout_browser import _validate_url
+
+        with pytest.raises(Exception, match="not allowed"):
+            _validate_url("http://metadata.google.internal/computeMetadata/v1/")
+
+    def test_url_allowed_blocks_domain_resolving_to_private(self, monkeypatch):
+        import larkscout_browser.security as sec
+
+        def fake_getaddrinfo(host, *a, **k):
+            return [(2, 1, 6, "", ("169.254.169.254", 0))]
+
+        monkeypatch.setattr(sec.socket, "getaddrinfo", fake_getaddrinfo)
+        assert sec._url_allowed("http://rebind.attacker.example/") is False
+
+    def test_url_allowed_passes_domain_resolving_to_public(self, monkeypatch):
+        import larkscout_browser.security as sec
+
+        def fake_getaddrinfo(host, *a, **k):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr(sec.socket, "getaddrinfo", fake_getaddrinfo)
+        assert sec._url_allowed("http://public.example/") is True
+
+    def test_url_allowed_blocks_unresolvable(self, monkeypatch):
+        import larkscout_browser.security as sec
+
+        def boom(host, *a, **k):
+            raise OSError("nxdomain")
+
+        monkeypatch.setattr(sec.socket, "getaddrinfo", boom)
+        # Fail closed: our resolver got nothing but Chromium may still resolve
+        # it to a private address at fetch time, so the guard must block.
+        assert sec._url_allowed("http://nonexistent.invalid/") is False
+
+    def test_validate_url_prechecks_domain_without_dns(self, monkeypatch):
+        import larkscout_browser.security as sec
+
+        def boom(host, *a, **k):
+            raise AssertionError("pre-check must not resolve DNS")
+
+        monkeypatch.setattr(sec.socket, "getaddrinfo", boom)
+        # _validate_url (resolve=False) must not call DNS and must allow a plain
+        # domain (the route guard does the resolving check).
+        sec._validate_url("https://example.com/page")

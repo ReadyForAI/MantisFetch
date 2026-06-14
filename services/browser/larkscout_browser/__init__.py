@@ -166,6 +166,9 @@ from .security import (
     _ALLOWED_SCHEMES as _ALLOWED_SCHEMES,
 )
 from .security import (
+    _url_allowed as _url_allowed,
+)
+from .security import (
     _validate_url as _validate_url,
 )
 from .session import (
@@ -234,18 +237,34 @@ _BLOCKED_KEYWORDS = frozenset(
 _BLOCKED_RESOURCE_TYPES = frozenset(["image", "media", "font"])
 
 
-async def _setup_routing(context: BrowserContext, block_resources: bool):
-    if not block_resources:
-        return
+async def _request_allowed(url: str) -> bool:
+    """Run the full (DNS-resolving) SSRF check off the event loop."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _url_allowed, url)
+    except Exception:
+        return False
 
+
+async def _setup_routing(context: BrowserContext, block_resources: bool):
     async def route_handler(route) -> None:
         req = route.request
-        if req.resource_type in _BLOCKED_RESOURCE_TYPES:
-            return await route.abort()
+        # Anti-SSRF (defense in depth): block ANY request — navigations, their
+        # redirects, popups, and subresources (fetch/XHR/script/etc.) — to
+        # private/loopback/metadata targets at the network layer, even when the
+        # literal pre-check passed (DNS rebinding, redirect/fetch to an internal
+        # host). A public page issuing fetch("http://169.254.169.254/...") still
+        # sends the request regardless of CORS, so every request is validated.
+        # Always installed, not just when block_resources is set.
+        if not await _request_allowed(req.url):
+            return await route.abort("addressunreachable")
 
-        url_lower = req.url.lower()
-        if any(x in url_lower for x in _BLOCKED_KEYWORDS):
-            return await route.abort()
+        if block_resources:
+            if req.resource_type in _BLOCKED_RESOURCE_TYPES:
+                return await route.abort()
+            url_lower = req.url.lower()
+            if any(x in url_lower for x in _BLOCKED_KEYWORDS):
+                return await route.abort()
 
         return await route.continue_()
 
@@ -1690,6 +1709,10 @@ async def new_session(req: NewSessionRequest) -> NewSessionResponse:
             viewport=req.viewport,
             storage_state=req.storage_state,
             extra_http_headers={"Accept-Language": f"{req.lang},en;q=0.9"},
+            # Service-worker requests bypass Playwright route interception, which
+            # would let a worker fetch() reach private/metadata hosts past the
+            # SSRF route guard — block service workers entirely.
+            service_workers="block",
         )
         await _setup_routing(context, req.block_resources)
         page = await context.new_page()
@@ -2016,6 +2039,9 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             user_agent=DEFAULT_UA,
             locale=req.lang,
             viewport={"width": 900, "height": 700},
+            # Block service workers: their requests bypass route interception
+            # and would defeat the SSRF route guard (see /session/new).
+            service_workers="block",
         )
         await _setup_routing(context, block_resources=True)
         page = await context.new_page()
