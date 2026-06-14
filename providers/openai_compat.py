@@ -196,11 +196,17 @@ class OpenAICompatProvider(LLMProvider):
             {"role": "system", "content": prompt},
             {"role": "user", "content": text},
         ]
-        return self._chat(
-            messages,
-            max_retries=max_retries,
-            extra_body=self._chat_extra_body,
-        )
+        try:
+            return self._chat(
+                messages,
+                max_retries=max_retries,
+                extra_body=self._chat_extra_body,
+            )
+        except Exception as exc:
+            # Honor the same failure-sentinel contract as GeminiProvider —
+            # callers check _summary_failed_text() rather than catching.
+            logger.error("OpenAI-compat summarize failed: %s", exc)
+            return "[summary generation failed]"
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """OCR a page image via the OpenAI vision endpoint (base64-encoded)."""
@@ -218,12 +224,18 @@ class OpenAICompatProvider(LLMProvider):
                 ],
             }
         ]
-        result = self._chat(
-            messages,
-            max_retries=2,
-            model=self._ocr_model,
-            extra_body=self._ocr_extra_body,
-        )
+        try:
+            result = self._chat(
+                messages,
+                max_retries=2,
+                model=self._ocr_model,
+                extra_body=self._ocr_extra_body,
+            )
+        except Exception as exc:
+            # Match GeminiProvider: return the OCR failure sentinel instead of
+            # raising, so the OCR pipeline detects it via _is_ocr_failed_text.
+            logger.warning("OpenAI-compat OCR failed for page %d: %s", page_num, exc)
+            return f"[OCR failed for page {page_num}]"
         if do_proofread and result and not result.startswith("["):
             review_messages = [
                 {
@@ -237,12 +249,16 @@ class OpenAICompatProvider(LLMProvider):
                     ],
                 }
             ]
-            reviewed = self._chat(
-                review_messages,
-                max_retries=1,
-                model=self._ocr_model,
-                extra_body=self._ocr_extra_body,
-            )
+            try:
+                reviewed = self._chat(
+                    review_messages,
+                    max_retries=1,
+                    model=self._ocr_model,
+                    extra_body=self._ocr_extra_body,
+                )
+            except Exception as exc:
+                logger.warning("OpenAI-compat OCR proofread skipped for page %d: %s", page_num, exc)
+                reviewed = ""
             if reviewed and not reviewed.startswith("["):
                 result = reviewed
         if result.startswith("["):

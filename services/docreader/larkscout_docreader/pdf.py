@@ -367,10 +367,13 @@ def parse_pdf(
                 llm_ocr_results[pn] = result
                 logger.info(f"Page {pn}/{total_pages}: LLM OCR done")
                 if cache_dir:
-                    cp = _ocr_cache_path(cache_dir, pn)
-                    ck = _ocr_cache_key(img_b)
-                    ck_path = cp.with_suffix(f".{ck}.txt")
-                    ck_path.write_text(result, encoding="utf-8")
+                    if _is_ocr_failed_text(result):
+                        logger.info("Page %d/%d: not caching failed LLM OCR result", pn, total_pages)
+                    else:
+                        cp = _ocr_cache_path(cache_dir, pn)
+                        ck = _ocr_cache_key(img_b)
+                        ck_path = cp.with_suffix(f".{ck}.txt")
+                        ck_path.write_text(result, encoding="utf-8")
 
     pages: list[PageContent] = []
     ocr_table_count = 0

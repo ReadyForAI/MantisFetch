@@ -221,10 +221,15 @@ def _summarize_batch(
 
     if n == 1:
         sec = sections[0]
-        sec.summary = gemini_summarize(
+        summary = gemini_summarize(
             f"## {sec.title} ({sec.page_range})\n\n{sec.text}",
             prompt_for_locale(summary_locale, "section_summary"),
         )
+        # Treat a failure sentinel as a hard failure (like the batch path) so the
+        # summary is marked failed/retryable instead of silently storing it.
+        if _summary_failed_text(summary):
+            raise RuntimeError("upstream summary generation failed")
+        sec.summary = summary
         logger.info(f"Section {sec.index}: {sec.title[:30]}... done")
         return
 
@@ -272,9 +277,14 @@ def _summarize_batch(
 
     logger.warning(f"Batch JSON parse failed, falling back to single ({n} items)")
     for sec in sections:
-        sec.summary = gemini_summarize(
+        summary = gemini_summarize(
             f"## {sec.title} ({sec.page_range})\n\n{sec.text}",
             prompt_for_locale(summary_locale, "section_summary"),
+        )
+        # Don't persist the failure sentinel — degrade to a local preview so the
+        # stored summary is usable and the brief overview filter behaves.
+        sec.summary = (
+            summary if not _summary_failed_text(summary) else _local_section_preview(sec)
         )
         logger.info(f"Section {sec.index}: {sec.title[:30]}... done (single)")
 
@@ -283,7 +293,11 @@ def _compress_sections_for_brief(sections: list[Section]) -> str:
     groups = []
     for i in range(0, len(sections), 10):
         group = sections[i : i + 10]
-        group_text = "; ".join(f"{s.title}: {s.summary[:150]}" for s in group if s.summary)
+        group_text = "; ".join(
+            f"{s.title}: {s.summary[:150]}"
+            for s in group
+            if s.summary and not _summary_failed_text(s.summary)
+        )
         groups.append(f"**Sections {group[0].index}-{group[-1].index}**: {group_text}")
     return "\n\n".join(groups)
 

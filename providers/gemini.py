@@ -110,7 +110,9 @@ class GeminiProvider(LLMProvider):
                     config={"http_options": {"timeout": 60_000}},
                 )
                 result = response.text.strip()
-                if do_proofread and attempt == 0 and result and not result.startswith("["):
+                # Proofread whenever transcription succeeded — gating on
+                # attempt == 0 skipped it for any page that needed a retry.
+                if do_proofread and result and not result.startswith("["):
                     try:
                         review = self._client.models.generate_content(
                             model=self._model,
