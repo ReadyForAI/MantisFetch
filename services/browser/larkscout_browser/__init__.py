@@ -1709,6 +1709,10 @@ async def new_session(req: NewSessionRequest) -> NewSessionResponse:
             viewport=req.viewport,
             storage_state=req.storage_state,
             extra_http_headers={"Accept-Language": f"{req.lang},en;q=0.9"},
+            # Service-worker requests bypass Playwright route interception, which
+            # would let a worker fetch() reach private/metadata hosts past the
+            # SSRF route guard — block service workers entirely.
+            service_workers="block",
         )
         await _setup_routing(context, req.block_resources)
         page = await context.new_page()
@@ -2035,6 +2039,9 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             user_agent=DEFAULT_UA,
             locale=req.lang,
             viewport={"width": 900, "height": 700},
+            # Block service workers: their requests bypass route interception
+            # and would defeat the SSRF route guard (see /session/new).
+            service_workers="block",
         )
         await _setup_routing(context, block_resources=True)
         page = await context.new_page()
