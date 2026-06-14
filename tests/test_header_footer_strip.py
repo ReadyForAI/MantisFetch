@@ -131,6 +131,19 @@ def test_odd_page_count_uses_ceiling_threshold():
     assert "edge x" in out[2]
 
 
+def test_within_page_duplicate_not_treated_as_cross_page_repeat():
+    # The same edge line twice on ONE page must not count as a cross-page
+    # repeat (count at most once per page).
+    pages = _pages(
+        "dup\ndup\nbody1",  # 'dup' appears twice, page 1 only
+        "h2\nbody2",
+        "h3\nbody3",
+        "h4\nbody4",
+    )
+    out = _strip_repeated_headers_footers(pages, 4)
+    assert "dup" in out[1]
+
+
 def test_rare_edge_line_kept():
     pages = _pages(
         "banner\nbody1",

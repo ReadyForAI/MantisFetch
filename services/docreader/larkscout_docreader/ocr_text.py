@@ -92,11 +92,19 @@ def _strip_repeated_headers_footers(page_texts: dict[int, str], total_pages: int
     bottom_counts: dict[str, int] = {}
     for pn in range(1, total_pages + 1):
         nonblank = [ln for ln in (x.strip() for x in page_texts.get(pn, "").split("\n")) if ln]
-        for ln in nonblank[:_HF_EDGE_LINES]:
-            key = _norm_edge_line(ln, pn, total_pages, is_footer=False)
+        # Count each normalized key at most once per page, so a line duplicated
+        # within a single page is not mistaken for a cross-page running header.
+        top_keys = {
+            _norm_edge_line(ln, pn, total_pages, is_footer=False)
+            for ln in nonblank[:_HF_EDGE_LINES]
+        }
+        for key in top_keys:
             top_counts[key] = top_counts.get(key, 0) + 1
-        for ln in nonblank[-_HF_EDGE_LINES:]:
-            key = _norm_edge_line(ln, pn, total_pages, is_footer=True)
+        bottom_keys = {
+            _norm_edge_line(ln, pn, total_pages, is_footer=True)
+            for ln in nonblank[-_HF_EDGE_LINES:]
+        }
+        for key in bottom_keys:
             bottom_counts[key] = bottom_counts.get(key, 0) + 1
 
     threshold = max(2, math.ceil(total_pages * _HF_RATIO))
