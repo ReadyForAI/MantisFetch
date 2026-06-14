@@ -656,6 +656,84 @@ class TestInputValidation:
 # ---------------------------------------------------------------------------
 
 
+class TestRetrySummaryPreservesExtracted:
+    """C2: a summary-only rewrite must not delete extracted tables/images/ocr."""
+
+    def _seed_doc(self, docs_dir: Path, doc_id: str = "DOC-901") -> Path:
+        d = docs_dir / "General" / doc_id
+        (d / "sections").mkdir(parents=True)
+        (d / "tables").mkdir()
+        (d / "images").mkdir()
+        (d / "sections" / "01-s1-Intro.md").write_text("# Intro\n\nbody\n", encoding="utf-8")
+        (d / "tables.json").write_text(json.dumps([{"table_id": "01", "page": 1}]), encoding="utf-8")
+        (d / "tables" / "01.md").write_text("|a|b|\n|-|-|\n|1|2|\n", encoding="utf-8")
+        (d / "images.json").write_text(json.dumps([{"image_id": "01"}]), encoding="utf-8")
+        (d / "images" / "01.png").write_bytes(b"\x89PNG")
+        (d / "ocr_blocks.json").write_text(json.dumps({"pages": []}), encoding="utf-8")
+        manifest = {
+            "doc_id": doc_id, "filename": "f.pdf", "file_type": "pdf",
+            "total_pages": 1, "section_count": 1, "table_count": 1, "image_count": 1,
+            "ocr_page_count": 0, "content_type": "General", "storage_path": f"General/{doc_id}",
+            "parse_metadata": {"total_pages": 1},
+            "sections": [{"index": 1, "sid": "s1", "title": "Intro", "page_range": "p.1",
+                          "file": "sections/01-s1-Intro.md", "image_refs": []}],
+            "tables": [{"table_id": "01", "page": 1}],
+            "images": [{"image_id": "01"}],
+            "layout": {"available": True, "ocr_blocks_path": "ocr_blocks.json"},
+        }
+        (d / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        return d
+
+    def test_summary_rewrite_keeps_tables_images_ocr(self, monkeypatch, tmp_path):
+        import larkscout_docreader as dr
+
+        import larkscout_common.storage as cs
+
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        monkeypatch.setattr(cs, "DEFAULT_DOCS_DIR", docs_dir)
+        d = self._seed_doc(docs_dir)
+
+        parsed, metadata, source_record = dr._load_parsed_document_from_storage(docs_dir, "DOC-901")
+        assert parsed.table_count == 0 and not parsed.images  # reconstructed: empty extracted
+
+        dr.write_output_extract_only(
+            "DOC-901", parsed, docs_dir, content_type="General",
+            metadata=metadata, source_record=source_record, preserve_extracted=True,
+            summary_placeholder="pending",
+        )
+
+        assert (d / "tables.json").exists(), "tables.json was deleted"
+        assert (d / "tables" / "01.md").exists(), "table file was deleted"
+        assert (d / "images.json").exists(), "images.json was deleted"
+        assert (d / "ocr_blocks.json").exists(), "ocr sidecar was deleted"
+        m = json.loads((d / "manifest.json").read_text())
+        assert m["table_count"] == 1 and m["image_count"] == 1
+        assert m["tables"] and m["images"]
+
+    def test_full_rewrite_without_preserve_resets_extracted(self, monkeypatch, tmp_path):
+        # Control: the default (parse) path still regenerates from parsed.
+        import larkscout_docreader as dr
+
+        import larkscout_common.storage as cs
+
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        monkeypatch.setattr(cs, "DEFAULT_DOCS_DIR", docs_dir)
+        d = self._seed_doc(docs_dir)
+        parsed, metadata, source_record = dr._load_parsed_document_from_storage(docs_dir, "DOC-901")
+
+        dr.write_output_extract_only(
+            "DOC-901", parsed, docs_dir, content_type="General",
+            metadata=metadata, source_record=source_record, preserve_extracted=False,
+            summary_placeholder="pending",
+        )
+        # parsed has no tables/images → regeneration writes none → they're gone.
+        assert not (d / "tables.json").exists()
+        m = json.loads((d / "manifest.json").read_text())
+        assert m["table_count"] == 0
+
+
 class TestParseReplaceProtection:
     def test_collision_without_replace_returns_409(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
