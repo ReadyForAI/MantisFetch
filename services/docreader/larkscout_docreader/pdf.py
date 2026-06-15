@@ -155,6 +155,11 @@ def parse_pdf(
             text = page.get_text("text").strip()
             if extract_tables:
                 page_tables, table_bboxes = _extract_pdf_page_tables(page)
+                # Honor the documented max_tables_per_page cap (was ignored):
+                # keep the first N tables; excess table text stays inline in body.
+                if 0 <= max_tables_per_page < len(page_tables):
+                    page_tables = page_tables[:max_tables_per_page]
+                    table_bboxes = table_bboxes[:max_tables_per_page]
                 pdf_tables_by_page[page_num] = page_tables
                 if table_bboxes:
                     stripped = _strip_text_in_table_bboxes(page, table_bboxes)

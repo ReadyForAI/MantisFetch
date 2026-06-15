@@ -1417,6 +1417,7 @@ def _safe_filename(title: str, max_len: int = 40) -> str:
 # ═══════════════════════════════════════════
 
 MAX_UPLOAD_BYTES = int(os.environ.get("LARKSCOUT_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+SEARCH_LIMIT_MAX = int(os.environ.get("LARKSCOUT_SEARCH_LIMIT_MAX", "200"))
 STORE_SOURCE_FILES = os.environ.get("LARKSCOUT_STORE_SOURCE_FILES", "true").lower() not in {
     "0",
     "false",
@@ -2879,6 +2880,7 @@ async def library_search(
     limit: int = 20,
 ):
     """Search document library."""
+    limit = max(1, min(limit, SEARCH_LIMIT_MAX))  # clamp: negative dropped results
     docs_dir = _get_docs_dir()
     metadata_filters = _metadata_filters_from_request(request)
     documents = _filter_documents(
@@ -2912,9 +2914,11 @@ async def library_search(
             if score > 0:
                 scored.append((d, score))
         scored.sort(key=lambda x: x[1], reverse=True)
+        total = len(scored)  # true match count, before the page limit
         documents = [d for d, _ in scored[:limit]]
         scores = {d.get("id"): s for d, s in scored[:limit]}
     else:
+        total = len(documents)
         documents = documents[:limit]
         scores = {}
 
@@ -2940,7 +2944,7 @@ async def library_search(
         )
         for d in documents
     ]
-    return SearchResponse(results=results, total=len(results))
+    return SearchResponse(results=results, total=total)
 
 
 @app.get("/library/search_text", response_model=SearchResponse)
@@ -2955,6 +2959,7 @@ async def library_search_text(
     scope: str = "all",
 ):
     """Search full text and/or section text with snippets and page hints."""
+    limit = max(1, min(limit, SEARCH_LIMIT_MAX))  # clamp: negative dropped results
     query = q.strip()
     if not query:
         raise HTTPException(422, "q is required")
@@ -3368,14 +3373,21 @@ async def get_full(doc_id: str):
 async def get_section(doc_id: str, sid: str):
     """Read a single section by sid."""
     _validate_doc_id(doc_id)
-    sections_dir = _resolve_doc_dir(_get_docs_dir(), doc_id) / "sections"
-    if not sections_dir.exists():
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
+    manifest_path = doc_dir / "manifest.json"
+    if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
 
-    # sid is in filename: 01-{sid}-{title}.md
-    for f in sections_dir.iterdir():
-        if f.is_file() and sid in f.name:
-            return {"doc_id": doc_id, "sid": sid, "content": f.read_text(encoding="utf-8")}
+    # Match the sid EXACTLY against the manifest (the old substring scan of
+    # filenames "NN-{sid}-{title}.md" matched the index prefix or title too,
+    # returning the wrong section). The file path is resolved + bounds-checked.
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for sec in manifest.get("sections", []):
+        if isinstance(sec, dict) and sec.get("sid") == sid:
+            path = _resolve_manifest_section_path(doc_dir, sec.get("file"))
+            if path and path.exists():
+                return {"doc_id": doc_id, "sid": sid, "content": path.read_text(encoding="utf-8")}
+            break
 
     raise HTTPException(404, t("section_not_found", sid=sid))
 
