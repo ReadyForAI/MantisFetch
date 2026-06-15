@@ -16,9 +16,6 @@
     "full_llm_modes": ["full"],
     "proofread_modes": ["full"]
   },
-  "table_policy": {
-    "prefer_markitdown": true
-  },
   "cache_policy": {
     "page_ocr": true,
     "region_ocr": true
