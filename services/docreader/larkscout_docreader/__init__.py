@@ -2574,9 +2574,11 @@ async def api_parse_doc(
             else:
                 selected_content_type = requested_content_type
                 parsed_metadata.setdefault("content_type", selected_content_type)
+            # Client-supplied only; _resolve_pdf_parse_mode applies the env /
+            # profile fallback itself. Merging env here would make a bad env
+            # value look client-requested (→ 422 instead of a 500 server error).
             requested_parse_mode = (
                 str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
-                or os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "").strip()
                 or None
             )
             field_ocr_profile = (
