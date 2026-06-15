@@ -93,3 +93,15 @@ def test_gemini_ocr_proofreads_after_transcribe_retry(monkeypatch):  # #22
     # Proofread ran after the transcribe retry (old code gated on attempt == 0):
     assert result == "corrected"
     assert client.models.generate_content.call_count == 3
+
+
+def test_ocr_prompts_are_single_source_of_truth():  # #31
+    """Both providers must reference the shared base prompt constants — no
+    byte-for-byte duplication that can drift."""
+    from providers import gemini, openai_compat
+    from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT
+
+    assert gemini._OCR_TRANSCRIBE_PROMPT is OCR_TRANSCRIBE_PROMPT
+    assert gemini._OCR_PROOFREAD_PROMPT is OCR_PROOFREAD_PROMPT
+    assert openai_compat._OCR_TRANSCRIBE_PROMPT is OCR_TRANSCRIBE_PROMPT
+    assert openai_compat._OCR_PROOFREAD_PROMPT is OCR_PROOFREAD_PROMPT

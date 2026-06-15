@@ -10,27 +10,13 @@ import logging
 import os
 import time
 
-from providers.base import LLMProvider
+from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "gemini-2.5-flash"
-_OCR_TRANSCRIBE_PROMPT = (
-    "Transcribe this document page exactly as written. "
-    "Preserve names, numbers, dates, account numbers, email addresses, and punctuation exactly. "
-    "Do not summarize, translate, infer, normalize, or correct the source. "
-    "Ignore only obvious scanner borders or decorative watermarks. "
-    "If the page contains a table, return the table as a complete GitHub-flavored Markdown table. "
-    "Return only the transcribed page text."
-)
-_OCR_PROOFREAD_PROMPT = (
-    "Proofread the following OCR draft against the document page image. "
-    "Fix OCR mistakes only where the image clearly supports the correction. "
-    "Pay extra attention to company names, amounts, percentages, dates, account numbers, email addresses, and table cells. "
-    "Keep the same layout style, including Markdown tables where present. "
-    "Return only the corrected page text.\n\n"
-    "OCR draft:\n{draft}"
-)
+_OCR_TRANSCRIBE_PROMPT = OCR_TRANSCRIBE_PROMPT
+_OCR_PROOFREAD_PROMPT = OCR_PROOFREAD_PROMPT
 
 
 class GeminiProvider(LLMProvider):
