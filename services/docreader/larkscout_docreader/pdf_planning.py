@@ -129,18 +129,15 @@ def _page_blank_signal(page: Any, *, scale: float = 0.5) -> dict[str, Any]:
 
 
 def _resolve_pdf_parse_mode(profile: DocumentProfile | None, requested_mode: str | None) -> str:
-    allowed = {"fast", "accurate", "full"}
-    # A bad *client-requested* mode is a 422; a bad env/profile default is a
-    # server misconfiguration (500), not the caller's fault.
-    requested = (requested_mode or "").strip().lower()
-    if requested and requested not in allowed:
-        raise HTTPException(422, "parse_mode must be one of: fast, accurate, full.")
-    mode = requested
+    mode = (requested_mode or "").strip().lower()
     if not mode and profile:
         mode = profile.upgrade_policy.default_mode
     if not mode:
         mode = os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "accurate").strip().lower()
-    if mode not in allowed:
+    # A bad final mode here means env/profile misconfiguration (client-supplied
+    # parse_mode is validated → 422 at the /parse handler before this point), so
+    # surface it as a server error.
+    if mode not in {"fast", "accurate", "full"}:
         raise RuntimeError("PDF parse mode must be one of: fast, accurate, full.")
     return mode
 

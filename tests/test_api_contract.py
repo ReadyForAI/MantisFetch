@@ -85,13 +85,21 @@ def test_get_section_matches_sid_exactly(client: TestClient):  # #39
         assert by_title.status_code == 404
 
 
-def test_parse_page_range_and_mode_raise_422():  # #26
+def test_parse_page_range_raises_422():  # #26 (ocr_pages / skip_ocr_pages)
     from fastapi import HTTPException
-    from larkscout_docreader.pdf_planning import _parse_page_range, _resolve_pdf_parse_mode
+    from larkscout_docreader.pdf_planning import _parse_page_range
 
     with pytest.raises(HTTPException) as e1:
         _parse_page_range("not-a-range", 10)
     assert e1.value.status_code == 422
-    with pytest.raises(HTTPException) as e2:
-        _resolve_pdf_parse_mode(None, "turbo")
-    assert e2.value.status_code == 422
+
+
+def test_parse_rejects_bad_client_parse_mode_with_422(client: TestClient):  # #26 (parse_mode)
+    import io
+
+    resp = client.post(
+        "/doc/parse",
+        files={"file": ("x.pdf", io.BytesIO(b"%PDF-1.4 fake"), "application/pdf")},
+        data={"parse_mode": "turbo", "generate_summary": "false"},
+    )
+    assert resp.status_code == 422

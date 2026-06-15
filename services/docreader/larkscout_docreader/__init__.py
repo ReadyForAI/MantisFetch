@@ -2433,6 +2433,11 @@ async def api_parse_doc(
     selected_image_ocr_backend = (image_ocr_backend or "auto").strip().lower()
     if selected_image_ocr_backend not in {"auto", "local", "llm"}:
         raise HTTPException(422, "image_ocr_backend must be one of: auto, local, llm")
+    # Validate a client-supplied parse_mode here (422); env/profile defaults are
+    # resolved later and a bad one there is a 500 server-config error.
+    client_parse_mode = str(parse_mode or parsed_metadata.get("parse_mode") or "").strip().lower()
+    if client_parse_mode and client_parse_mode not in {"fast", "accurate", "full"}:
+        raise HTTPException(422, "parse_mode must be one of: fast, accurate, full.")
 
     # Reject explicit-doc_id conflicts before streaming the body — the resolver
     # returns the input verbatim for explicit ids, so the existence check
@@ -2574,11 +2579,12 @@ async def api_parse_doc(
             else:
                 selected_content_type = requested_content_type
                 parsed_metadata.setdefault("content_type", selected_content_type)
-            # Client-supplied only; _resolve_pdf_parse_mode applies the env /
-            # profile fallback itself. Merging env here would make a bad env
-            # value look client-requested (→ 422 instead of a 500 server error).
+            # Effective parse mode (incl. env fallback) — also drives summary-mode
+            # selection, so it must reflect env. A bad *client* parse_mode is
+            # already rejected with 422 in the early form validation above.
             requested_parse_mode = (
                 str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
+                or os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "").strip()
                 or None
             )
             field_ocr_profile = (
