@@ -155,6 +155,11 @@ def parse_pdf(
             text = page.get_text("text").strip()
             if extract_tables:
                 page_tables, table_bboxes = _extract_pdf_page_tables(page)
+                # Honor the documented max_tables_per_page cap (was ignored):
+                # keep the first N tables; excess table text stays inline in body.
+                if 0 <= max_tables_per_page < len(page_tables):
+                    page_tables = page_tables[:max_tables_per_page]
+                    table_bboxes = table_bboxes[:max_tables_per_page]
                 pdf_tables_by_page[page_num] = page_tables
                 if table_bboxes:
                     stripped = _strip_text_in_table_bboxes(page, table_bboxes)
@@ -389,6 +394,14 @@ def parse_pdf(
             page_text = _cleanup_ocr_text(_usable_page_text(raw_text, enhanced))
             if extract_tables:
                 page_text, page_tables = _extract_tables_from_ocr_text(page_text, page_num, total_pages)
+                # Apply the documented per-page cap to OCR-derived tables too,
+                # but keep overflow tables' content inline in the body (the OCR
+                # extractor already removed them from page_text) so capping
+                # never loses document content — matching the native path.
+                if 0 <= max_tables_per_page < len(page_tables):
+                    overflow = page_tables[max_tables_per_page:]
+                    page_tables = page_tables[:max_tables_per_page]
+                    page_text = page_text.rstrip() + "\n\n" + "\n\n".join(overflow)
                 ocr_table_count += len(page_tables)
                 tables_in_text = bool(page_tables)
                 # If OCR found no tables on this page but the PyMuPDF pass did

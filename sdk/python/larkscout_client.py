@@ -41,6 +41,36 @@ _CONTENT_TYPE_LOOKUP = {v.lower(): v for v in CONTENT_TYPES}
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
+class LarkScoutAPIError(Exception):
+    """Raised when the LarkScout API returns an error response.
+
+    Carries the server-provided ``detail`` (e.g. the 409 "already exists" or 422
+    validation message) which httpx's ``raise_for_status()`` would otherwise drop.
+    """
+
+    def __init__(self, message: str, *, status_code: int, detail: Any = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _raise_for_status(resp: Any) -> None:
+    """Like ``resp.raise_for_status()`` but surfaces the server's error detail."""
+    if resp.is_success:
+        return
+    detail = None
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            detail = body.get("detail")
+    except Exception:
+        detail = None
+    message = f"LarkScout API {resp.status_code} {resp.reason_phrase}"
+    if detail:
+        message += f": {detail}"
+    raise LarkScoutAPIError(message, status_code=resp.status_code, detail=detail)
+
+
 def _validate_content_type(value: str) -> str:
     """Return the canonical content_type value, or raise ValueError.
 
@@ -124,12 +154,12 @@ class LarkScoutClient:
 
     def _get(self, path: str, **params: Any) -> dict[str, Any]:
         resp = self._http.get(f"{self._base}{path}", params={k: v for k, v in params.items() if v is not None})
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         resp = self._http.post(f"{self._base}{path}", json=body)
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     def _post_multipart(self, path: str, data: dict[str, Any], file_path: Path) -> dict[str, Any]:
@@ -139,7 +169,7 @@ class LarkScoutClient:
                 data={k: v for k, v in data.items() if v is not None},
                 files={"file": (file_path.name, fh)},
             )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     # ── public API ────────────────────────────────────────────────────────────
@@ -467,12 +497,12 @@ class AsyncLarkScoutClient:
             f"{self._base}{path}",
             params={k: v for k, v in params.items() if v is not None},
         )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     async def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         resp = await self._http.post(f"{self._base}{path}", json=body)
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     async def _post_multipart(self, path: str, data: dict[str, Any], file_path: Path) -> dict[str, Any]:
@@ -482,7 +512,7 @@ class AsyncLarkScoutClient:
                 data={k: v for k, v in data.items() if v is not None},
                 files={"file": (file_path.name, fh)},
             )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
     # ── public API ────────────────────────────────────────────────────────────

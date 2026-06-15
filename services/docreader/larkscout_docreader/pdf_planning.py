@@ -21,23 +21,34 @@ import os
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+
 from .models import DocumentProfile, QualityPolicy
 
 
 def _parse_page_range(spec: str, total_pages: int) -> set[int]:
-    """Parse page range spec: "10-30" or "5,10-15,20"."""
+    """Parse page range spec: "10-30" or "5,10-15,20".
+
+    Raises HTTP 422 (not 500) on a malformed spec — it comes straight from a
+    request form field (ocr_pages / skip_ocr_pages).
+    """
     pages = set()
-    for part in spec.split(","):
-        part = part.strip()
-        if "-" in part:
-            a, b = part.split("-", 1)
-            start = max(1, int(a.strip()))
-            end = min(total_pages, int(b.strip()))
-            pages.update(range(start, end + 1))
-        else:
-            p = int(part.strip())
-            if 1 <= p <= total_pages:
-                pages.add(p)
+    try:
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                a, b = part.split("-", 1)
+                start = max(1, int(a.strip()))
+                end = min(total_pages, int(b.strip()))
+                pages.update(range(start, end + 1))
+            else:
+                p = int(part.strip())
+                if 1 <= p <= total_pages:
+                    pages.add(p)
+    except ValueError as exc:
+        raise HTTPException(422, f"invalid page range spec: {spec!r}") from exc
     return pages
 
 
@@ -123,8 +134,10 @@ def _resolve_pdf_parse_mode(profile: DocumentProfile | None, requested_mode: str
         mode = profile.upgrade_policy.default_mode
     if not mode:
         mode = os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "accurate").strip().lower()
-    allowed = {"fast", "accurate", "full"}
-    if mode not in allowed:
+    # A bad final mode here means env/profile misconfiguration (client-supplied
+    # parse_mode is validated → 422 at the /parse handler before this point), so
+    # surface it as a server error.
+    if mode not in {"fast", "accurate", "full"}:
         raise RuntimeError("PDF parse mode must be one of: fast, accurate, full.")
     return mode
 

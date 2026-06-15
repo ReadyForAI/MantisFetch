@@ -63,6 +63,27 @@ def sync_client(monkeypatch, tmp_path):
     return client, mock_http, mock_resp
 
 
+def test_api_error_surfaces_server_detail(monkeypatch):
+    """C50: the SDK must surface the server's error detail (e.g. 409 message),
+    not just the bare status code."""
+    monkeypatch.syspath_prepend(str(SDK_PATH))
+    from larkscout_client import LarkScoutAPIError, _raise_for_status
+
+    class FakeResp:
+        is_success = False
+        status_code = 409
+        reason_phrase = "Conflict"
+
+        def json(self):
+            return {"detail": "doc_id 'DOC-001' already exists. Pass replace=true"}
+
+    with pytest.raises(LarkScoutAPIError) as exc:
+        _raise_for_status(FakeResp())
+    assert exc.value.status_code == 409
+    assert "already exists" in str(exc.value)
+    assert exc.value.detail and "already exists" in exc.value.detail
+
+
 class TestSyncClient:
     def test_health(self, sync_client):
         client, mock_http, mock_resp = sync_client
