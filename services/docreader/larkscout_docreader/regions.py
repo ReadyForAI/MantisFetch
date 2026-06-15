@@ -447,9 +447,13 @@ def generate_visual_debug_artifacts(
         raise HTTPException(422, "dpi must be between 36 and 600")
     source_path, _manifest, source_file = _resolve_doc_source_file(docs_dir, doc_id)
     doc_dir = _resolve_doc_dir(docs_dir, doc_id)
-    ocr_pages = _load_ocr_debug_overlays(doc_dir) if include_ocr_blocks else {}
+    # Always load the OCR sidecar: its per-page width/height is the pixel space
+    # table bboxes live in, needed to scale table overlays even when OCR blocks
+    # are not drawn. Block drawing (and OCR-only page rendering) stays gated on
+    # include_ocr_blocks below.
+    ocr_pages = _load_ocr_debug_overlays(doc_dir)
     table_pages = _load_table_debug_overlays(doc_dir) if include_tables else {}
-    pages_to_render = sorted(set(ocr_pages) | set(table_pages))
+    pages_to_render = sorted((set(ocr_pages) if include_ocr_blocks else set()) | set(table_pages))
 
     debug_dir = doc_dir / VISUAL_DEBUG_ARTIFACT_DIR
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -470,30 +474,29 @@ def generate_visual_debug_artifacts(
             line_width = max(2, int(scale * 2))
             ocr_page = ocr_pages.get(page_num) or {}
             ocr_count = 0
-            for block in ocr_page.get("blocks") or []:
-                rect = _debug_bbox_to_pixels(
-                    block.get("bbox") or [],
-                    source_width=float(ocr_page.get("width") or 0),
-                    source_height=float(ocr_page.get("height") or 0),
-                    target_width=image.width,
-                    target_height=image.height,
-                )
-                if rect is None:
-                    continue
-                draw.rectangle(rect, outline=(0, 102, 255, 230), width=line_width)
-                ocr_count += 1
+            if include_ocr_blocks:
+                for block in ocr_page.get("blocks") or []:
+                    rect = _debug_bbox_to_pixels(
+                        block.get("bbox") or [],
+                        source_width=float(ocr_page.get("width") or 0),
+                        source_height=float(ocr_page.get("height") or 0),
+                        target_width=image.width,
+                        target_height=image.height,
+                    )
+                    if rect is None:
+                        continue
+                    draw.rectangle(rect, outline=(0, 102, 255, 230), width=line_width)
+                    ocr_count += 1
             table_count = 0
-            # Table bboxes are in PDF-point space, so scale them against the PDF
-            # page size — not the OCR sidecar width, which is absent (→ wrong
-            # image.width fallback, mis-positioned overlays) when
-            # include_ocr_blocks=False.
-            page_width_pt = float(page_obj.rect.width)
-            page_height_pt = float(page_obj.rect.height)
+            # Table bboxes are in image-pixel space (the OCR render), so scale
+            # them against the OCR sidecar page dimensions — now loaded even when
+            # include_ocr_blocks=False (the image.width fallback only applies if
+            # the sidecar is missing entirely).
             for table in table_pages.get(page_num) or []:
                 rect = _debug_bbox_to_pixels(
                     table.get("bbox") or [],
-                    source_width=page_width_pt,
-                    source_height=page_height_pt,
+                    source_width=float(ocr_page.get("width") or image.width),
+                    source_height=float(ocr_page.get("height") or image.height),
                     target_width=image.width,
                     target_height=image.height,
                 )
