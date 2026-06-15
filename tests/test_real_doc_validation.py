@@ -82,3 +82,13 @@ def test_validate_doc_output_flags_missing_table_sidecar_noise_and_blank_regress
     assert result["checks"]["table_sidecars_present"] is False
     assert result["checks"]["text_quality_clean"] is False
     assert result["checks"]["default_payloads_low_token"] is False
+
+
+def test_parse_metadata_uses_already_read_dicts():  # #51
+    from scripts.real_doc_validation import _parse_metadata
+
+    manifest = {"parse_metadata": {"total_pages": 7}}
+    assert _parse_metadata(manifest, None) == {"total_pages": 7}
+    # falls back to .meta when manifest lacks parse_metadata
+    assert _parse_metadata({}, {"parse_metadata": {"total_pages": 3}}) == {"total_pages": 3}
+    assert _parse_metadata(None, None) == {}

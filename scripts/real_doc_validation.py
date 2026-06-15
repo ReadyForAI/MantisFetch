@@ -33,7 +33,12 @@ OCR_NOISE_PATTERNS = (
 def _read_json(path: Path) -> Any:
     if not path.exists() or not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # Skip a corrupt/unreadable file instead of crashing the whole batch.
+        print(f"warning: skipping unreadable JSON {path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _read_text(path: Path) -> str:
@@ -42,11 +47,10 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="ignore")
 
 
-def _parse_metadata(doc_dir: Path) -> dict[str, Any]:
-    manifest = _read_json(doc_dir / "manifest.json")
+def _parse_metadata(manifest: Any, meta: Any) -> dict[str, Any]:
+    """Pull parse_metadata from already-read manifest / .meta dicts."""
     if isinstance(manifest, dict) and isinstance(manifest.get("parse_metadata"), dict):
         return manifest["parse_metadata"]
-    meta = _read_json(doc_dir / ".meta.json")
     if isinstance(meta, dict) and isinstance(meta.get("parse_metadata"), dict):
         return meta["parse_metadata"]
     return {}
@@ -95,7 +99,7 @@ def validate_doc_output(
     )
     meta = _read_json(doc_dir / ".meta.json")
     meta_dict = meta if isinstance(meta, dict) else {}
-    parse_metadata = _parse_metadata(doc_dir)
+    parse_metadata = _parse_metadata(manifest, meta)  # reuse the reads above
     quality = (
         parse_metadata.get("quality_assessment")
         if isinstance(parse_metadata.get("quality_assessment"), dict)
