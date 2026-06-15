@@ -151,7 +151,13 @@ def _trim_action_fields(a: dict[str, Any], name_max: int, selector_max: int) -> 
 
     strat = dict(a.get("strategy") or {})
     if strat.get("type") == "css":
-        strat["selector"] = (strat.get("selector") or "")[:selector_max]
+        # Never truncate a CSS selector — a partial selector matches the wrong
+        # element or nothing. Keep it whole within budget; drop it otherwise so
+        # the consumer fails fast (empty-selector error) instead of acting on the
+        # wrong node.
+        selector = strat.get("selector") or ""
+        if len(selector) > selector_max:
+            strat.pop("selector", None)
     elif strat.get("type") == "role":
         strat["name"] = _smart_truncate(strat.get("name") or "", name_max)
     a["strategy"] = strat

@@ -39,6 +39,10 @@ def _amount_to_uppercase_rmb(amount_text: str) -> str | None:
         while integer > 0:
             groups.append(integer % 10000)
             integer //= 10000
+        if len(groups) > len(large_units):
+            # Beyond 兆 (>= 1e16): not representable with our unit table. Return
+            # None (an absurd amount for a real document) rather than IndexError.
+            return None
 
         parts: list[str] = []
         zero_between = False

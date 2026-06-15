@@ -124,7 +124,10 @@ def _markdown_table_dimensions(table_md: str) -> dict[str, Any]:
         cells = [cell.strip() for cell in stripped.strip("|").split("|")]
         row_index = len(rows)
         rows.append(cells)
-        if re.fullmatch(r"\|[\s\-:|]+\|", stripped):
+        # A real separator has dashes ("|---|---|"); require one so an
+        # all-empty/all-blank row ("| | |") is treated as content, not a
+        # header separator.
+        if "-" in stripped and re.fullmatch(r"\|[\s\-:|]+\|", stripped):
             separator_indexes.add(row_index)
 
     content_rows = [row for idx, row in enumerate(rows) if idx not in separator_indexes]

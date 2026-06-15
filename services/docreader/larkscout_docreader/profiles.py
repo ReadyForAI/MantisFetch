@@ -312,17 +312,23 @@ def _replace_blob_segment(text: str, group: FieldGroup, replacement: str) -> str
         return replacement.strip()
 
     start = -1
+    matched_start = ""
     if group.start_alias:
-        start = text.find(group.start_alias)
+        idx = text.find(group.start_alias)
+        if idx >= 0:
+            start, matched_start = idx, group.start_alias
     if start < 0:
-        starts = [text.find(alias) for alias in group.aliases if alias and text.find(alias) >= 0]
-        start = min(starts) if starts else -1
+        candidates = [(text.find(a), a) for a in group.aliases if a and text.find(a) >= 0]
+        if candidates:
+            start, matched_start = min(candidates, key=lambda c: c[0])
     if start < 0:
         return text
 
     end = len(text)
     if group.end_alias:
-        found = text.find(group.end_alias, start + len(group.start_alias))
+        # Search past the matched start marker. matched_start (not start_alias,
+        # which may be None when the start came from `aliases`) gives its length.
+        found = text.find(group.end_alias, start + len(matched_start))
         if found >= 0:
             end = found
     return (text[:start].rstrip() + "\n\n" + replacement.strip() + "\n\n" + text[end:].lstrip()).strip()

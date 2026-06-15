@@ -483,11 +483,17 @@ def generate_visual_debug_artifacts(
                 draw.rectangle(rect, outline=(0, 102, 255, 230), width=line_width)
                 ocr_count += 1
             table_count = 0
+            # Table bboxes are in PDF-point space, so scale them against the PDF
+            # page size — not the OCR sidecar width, which is absent (→ wrong
+            # image.width fallback, mis-positioned overlays) when
+            # include_ocr_blocks=False.
+            page_width_pt = float(page_obj.rect.width)
+            page_height_pt = float(page_obj.rect.height)
             for table in table_pages.get(page_num) or []:
                 rect = _debug_bbox_to_pixels(
                     table.get("bbox") or [],
-                    source_width=float(ocr_page.get("width") or image.width),
-                    source_height=float(ocr_page.get("height") or image.height),
+                    source_width=page_width_pt,
+                    source_height=page_height_pt,
                     target_width=image.width,
                     target_height=image.height,
                 )
