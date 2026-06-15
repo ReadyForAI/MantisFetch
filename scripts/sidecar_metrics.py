@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,12 @@ def _file_size(path: Path) -> int:
 def _read_json(path: Path) -> Any:
     if not path.exists() or not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # Skip a corrupt/unreadable file instead of crashing the whole batch.
+        print(f"warning: skipping unreadable JSON {path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _contains_large_geometry(value: Any) -> bool:

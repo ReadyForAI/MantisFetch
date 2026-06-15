@@ -60,3 +60,19 @@ def test_collect_metrics_flags_default_geometry_regression(tmp_path):
 
     assert metrics["doc_count"] == 1
     assert metrics["summary"]["large_geometry_in_default_payloads"] is True
+
+
+def test_read_json_skips_malformed_without_crashing(tmp_path):  # #29
+    from scripts.sidecar_metrics import _read_json, collect_metrics
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    assert _read_json(bad) is None  # no exception
+
+    # A doc with a corrupt manifest must not crash the whole batch.
+    doc = tmp_path / "DOC-001"
+    doc.mkdir()
+    (doc / "manifest.json").write_text("{ broken", encoding="utf-8")
+    (doc / "sections.json").write_text("[]", encoding="utf-8")
+    metrics = collect_metrics(tmp_path)
+    assert metrics["doc_count"] == 1
