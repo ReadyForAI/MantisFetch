@@ -118,9 +118,6 @@ from .models import (
     SummaryPolicy as SummaryPolicy,
 )
 from .models import (
-    TablePolicy as TablePolicy,
-)
-from .models import (
     UpgradePolicy as UpgradePolicy,
 )
 from .models import (
@@ -949,6 +946,49 @@ def _resolve_extracted_outputs(
     return (parsed.table_count, len(parsed.images), table_entries, image_entries, layout_entry)
 
 
+def _build_doc_meta(
+    doc_id: str,
+    parsed: ParsedDocument,
+    *,
+    table_count: int,
+    image_count: int,
+    metadata: dict[str, Any] | None,
+    source_record: dict[str, Any] | None,
+    content_type: str | None,
+    storage_path: str,
+) -> dict[str, Any]:
+    """Build the .meta.json dict shared by write_output / write_output_extract_only."""
+    return {
+        "doc_id": doc_id,
+        "filename": parsed.filename,
+        "file_type": parsed.file_type,
+        "total_pages": parsed.total_pages,
+        "section_count": len(parsed.sections),
+        "ocr_page_count": parsed.ocr_page_count,
+        "table_count": table_count,
+        "image_count": image_count,
+        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "metadata": metadata or {},
+        "parse_metadata": parsed.metadata or {},
+        "source_file": source_record or {},
+        "content_type": content_type or "General",
+        "storage_path": storage_path,
+        "sections": [
+            {
+                "index": sec.index,
+                "sid": sec.sid,
+                "title": sec.title,
+                "page_range": sec.page_range,
+                "page_start": _page_bounds(sec.page_range)[0],
+                "page_end": _page_bounds(sec.page_range)[1],
+                "char_count": len(sec.text),
+                "image_refs": list(sec.image_refs),
+            }
+            for sec in parsed.sections
+        ],
+    }
+
+
 def write_output(
     doc_id: str,
     parsed: ParsedDocument,
@@ -976,35 +1016,16 @@ def write_output(
         _resolve_extracted_outputs(doc_dir, doc_id, parsed, preserve_extracted)
     )
 
-    meta = {
-        "doc_id": doc_id,
-        "filename": parsed.filename,
-        "file_type": parsed.file_type,
-        "total_pages": parsed.total_pages,
-        "section_count": len(parsed.sections),
-        "ocr_page_count": parsed.ocr_page_count,
-        "table_count": table_count,
-        "image_count": image_count,
-        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "metadata": metadata or {},
-        "parse_metadata": parsed.metadata or {},
-        "source_file": source_record or {},
-        "content_type": normalized_content_type or "General",
-        "storage_path": storage_path,
-        "sections": [
-            {
-                "index": sec.index,
-                "sid": sec.sid,
-                "title": sec.title,
-                "page_range": sec.page_range,
-                "page_start": _page_bounds(sec.page_range)[0],
-                "page_end": _page_bounds(sec.page_range)[1],
-                "char_count": len(sec.text),
-                "image_refs": list(sec.image_refs),
-            }
-            for sec in parsed.sections
-        ],
-    }
+    meta = _build_doc_meta(
+        doc_id,
+        parsed,
+        table_count=table_count,
+        image_count=image_count,
+        metadata=metadata,
+        source_record=source_record,
+        content_type=normalized_content_type,
+        storage_path=storage_path,
+    )
     _write_json(doc_dir / ".meta.json", meta)
     logger.info(".meta.json written")
 
@@ -1151,35 +1172,16 @@ def write_output_extract_only(
         _resolve_extracted_outputs(doc_dir, doc_id, parsed, preserve_extracted)
     )
 
-    meta = {
-        "doc_id": doc_id,
-        "filename": parsed.filename,
-        "file_type": parsed.file_type,
-        "total_pages": parsed.total_pages,
-        "section_count": len(parsed.sections),
-        "ocr_page_count": parsed.ocr_page_count,
-        "table_count": table_count,
-        "image_count": image_count,
-        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "metadata": metadata or {},
-        "parse_metadata": parsed.metadata or {},
-        "source_file": source_record or {},
-        "content_type": normalized_content_type or "General",
-        "storage_path": storage_path,
-        "sections": [
-            {
-                "index": sec.index,
-                "sid": sec.sid,
-                "title": sec.title,
-                "page_range": sec.page_range,
-                "page_start": _page_bounds(sec.page_range)[0],
-                "page_end": _page_bounds(sec.page_range)[1],
-                "char_count": len(sec.text),
-                "image_refs": list(sec.image_refs),
-            }
-            for sec in parsed.sections
-        ],
-    }
+    meta = _build_doc_meta(
+        doc_id,
+        parsed,
+        table_count=table_count,
+        image_count=image_count,
+        metadata=metadata,
+        source_record=source_record,
+        content_type=normalized_content_type,
+        storage_path=storage_path,
+    )
     _write_json(doc_dir / ".meta.json", meta)
 
     full_parts = [

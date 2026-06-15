@@ -226,11 +226,6 @@ class UpgradePolicy:
 
 
 @dataclass(frozen=True)
-class TablePolicy:
-    prefer_markitdown: bool = True
-
-
-@dataclass(frozen=True)
 class CachePolicy:
     page_ocr: bool = True
     region_ocr: bool = True
@@ -266,7 +261,6 @@ class DocumentProfile:
     classification: ClassificationPolicy = ClassificationPolicy()
     quality_policy: QualityPolicy = QualityPolicy()
     upgrade_policy: UpgradePolicy = UpgradePolicy()
-    table_policy: TablePolicy = TablePolicy()
     cache_policy: CachePolicy = CachePolicy()
     processing_policy: ProcessingPolicy = ProcessingPolicy()
     summary_policy: SummaryPolicy = SummaryPolicy()

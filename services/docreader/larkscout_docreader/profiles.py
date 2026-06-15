@@ -37,7 +37,6 @@ from .models import (
     QualityPolicy,
     SectionPolicy,
     SummaryPolicy,
-    TablePolicy,
     UpgradePolicy,
 )
 from .ocr.engines import _ocr_cache_key, _ocr_cache_variant_path, gemini_ocr
@@ -102,7 +101,6 @@ def _load_document_profile(profile_name: str | None, config_path: str | None) ->
     classification_raw = raw.get("classification") if isinstance(raw.get("classification"), dict) else {}
     quality_raw = raw.get("quality_policy") if isinstance(raw.get("quality_policy"), dict) else {}
     upgrade_raw = raw.get("upgrade_policy") if isinstance(raw.get("upgrade_policy"), dict) else {}
-    table_raw = raw.get("table_policy") if isinstance(raw.get("table_policy"), dict) else {}
     cache_raw = raw.get("cache_policy") if isinstance(raw.get("cache_policy"), dict) else {}
     processing_raw = raw.get("processing_policy") if isinstance(raw.get("processing_policy"), dict) else {}
     summary_raw = raw.get("summary_policy") if isinstance(raw.get("summary_policy"), dict) else {}
@@ -181,9 +179,6 @@ def _load_document_profile(profile_name: str | None, config_path: str | None) ->
                 for v in upgrade_raw.get("proofread_modes", ["full"])
                 if str(v).strip()
             ),
-        ),
-        table_policy=TablePolicy(
-            prefer_markitdown=bool(table_raw.get("prefer_markitdown", True))
         ),
         cache_policy=CachePolicy(
             page_ocr=bool(cache_raw.get("page_ocr", True)),

@@ -10,9 +10,6 @@
     "async_modes": ["fast", "accurate"],
     "sync_modes": ["full"]
   },
-  "table_policy": {
-    "prefer_markitdown": true
-  },
   "fields": [
     {
       "id": "project_no",
