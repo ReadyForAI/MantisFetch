@@ -351,7 +351,14 @@ def parse_word(
                 "embedded_image_count": embedded_image_count,
                 "max_images": max(0, int(max_images or 0)),
                 "extracted": len(images),
-                "truncated": bool(extract_images and embedded_image_count > len(images)),
+                # Truncated only when the max_images cap was actually hit — not
+                # when embedded_image_count is inflated by dangling/unextractable
+                # media references (which never reach `images`).
+                "truncated": bool(
+                    extract_images
+                    and embedded_image_count > max_images
+                    and len(images) >= max_images
+                ),
                 "render_ok": sum(1 for image in images if image.render_status == "ok"),
                 "render_failed": sum(1 for image in images if image.render_status == "failed"),
                 "ocr_ok": sum(1 for image in images if image.ocr_status == "ok"),

@@ -259,3 +259,42 @@ def test_generate_visual_debug_artifacts_is_opt_in_and_annotates_overlays(tmp_pa
     assert (doc_dir / "derived/debug/page-0001.png").read_bytes().startswith(b"\x89PNG")
     written = json.loads((doc_dir / metadata["metadata_path"]).read_text(encoding="utf-8"))
     assert written["pages"][0]["output_path"] == "derived/debug/page-0001.png"
+
+
+def test_visual_debug_tables_render_without_ocr_blocks(tmp_path):  # #23
+    """Table overlays must still scale (against OCR-sidecar pixel dims) and
+    render when include_ocr_blocks=False — they don't fall back to PDF points."""
+    from larkscout_docreader import generate_visual_debug_artifacts
+
+    docs_dir, doc_dir = _write_doc_fixture(tmp_path, with_ocr_blocks=True)
+    (doc_dir / "ocr_blocks.json").write_text(
+        json.dumps(
+            {
+                "version": 1, "doc_id": "DOC-001", "coordinate_system": "image_pixels",
+                "pages": [{"page": 1, "width": 400, "height": 200, "blocks": [
+                    {"block_id": "p1-b0001", "text": "甲方", "bbox": [80, 40, 160, 80], "confidence": 0.9},
+                ]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (doc_dir / "tables.json").write_text(
+        json.dumps([{"table_id": "table-01", "page": 1, "bbox": [80, 40, 240, 140], "source": "layout"}]),
+        encoding="utf-8",
+    )
+
+    metadata = generate_visual_debug_artifacts(
+        docs_dir, "DOC-001", dpi=72, include_ocr_blocks=False
+    )
+
+    # Blocks suppressed, but the table page still renders with its overlay.
+    assert metadata["pages"] == [
+        {
+            "page": 1,
+            "output_path": "derived/debug/page-0001.png",
+            "dpi": 72,
+            "ocr_block_count": 0,
+            "table_region_count": 1,
+        }
+    ]
+    assert (doc_dir / "derived/debug/page-0001.png").read_bytes().startswith(b"\x89PNG")
