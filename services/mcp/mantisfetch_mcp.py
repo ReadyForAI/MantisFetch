@@ -37,7 +37,7 @@ from typing import Any
 import httpx
 import mantisfetch_browser as _web_mod
 import mantisfetch_docreader as _doc_mod
-from mantisfetch_browser.security import _validate_url
+from mantisfetch_browser.security import _url_violation
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -183,8 +183,17 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
 
 
 async def _resolve_url_doc(url: str) -> tuple[str, bytes]:
-    """Fetch a remote document, guarded by the browser SSRF allowlist."""
-    _validate_url(url)  # raises on SSRF / disallowed host
+    """Fetch a remote document, guarded by the browser SSRF allowlist.
+
+    Uses the DNS-*resolving* check (resolve=True): unlike the browser's HTTP
+    endpoints — which back the fast DNS-free pre-check with a route-level guard
+    that re-validates each actual request — this path fetches directly, so it
+    must resolve the host here and reject any name that lands on a private,
+    loopback, link-local, or reserved address. Redirects stay off so a 3xx can't
+    bounce the fetch onto an internal host."""
+    violation = _url_violation(url, resolve=True)
+    if violation:
+        raise ToolError(f"URL target not allowed: {violation}")
     async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as c:
         resp = await c.get(url)
     if resp.status_code >= 400:
