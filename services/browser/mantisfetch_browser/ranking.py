@@ -121,6 +121,43 @@ def _dedup_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _merge_actions(
+    primary: list[dict[str, Any]], secondary: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Merge two action lists keyed by (role, name, nth) identity.
+
+    ``primary`` (the a11y tree) defines the canonical identity, ordering, and
+    surviving aid; a css fallback contributed by either source is folded into the
+    surviving entry, and elements only ``secondary`` (DOM) surfaced are appended.
+    Confidence becomes the max of the merged entries. Inputs are not mutated.
+    """
+
+    def key(a: dict[str, Any]) -> tuple[Any, ...]:
+        st = a.get("strategy") or {}
+        if st.get("type") == "role":
+            return ("role", st.get("role") or "", st.get("name") or "", st.get("nth", 0))
+        return ("css", st.get("selector") or "")
+
+    by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+    order: list[tuple[Any, ...]] = []
+    for a in [*primary, *secondary]:
+        k = key(a)
+        existing = by_key.get(k)
+        if existing is None:
+            entry = dict(a)
+            entry["strategy"] = dict(a.get("strategy") or {})
+            by_key[k] = entry
+            order.append(k)
+            continue
+        st = a.get("strategy") or {}
+        if not existing["strategy"].get("css") and st.get("css"):
+            existing["strategy"]["css"] = st["css"]
+        existing["confidence"] = max(
+            float(existing.get("confidence", 0.0)), float(a.get("confidence", 0.0))
+        )
+    return [by_key[k] for k in order]
+
+
 def _rank_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     src_w = {"dom": 0.03, "a11y": 0.02, "vision": 0.01}
     role_w = {
@@ -160,6 +197,11 @@ def _trim_action_fields(a: dict[str, Any], name_max: int, selector_max: int) -> 
             strat.pop("selector", None)
     elif strat.get("type") == "role":
         strat["name"] = _smart_truncate(strat.get("name") or "", name_max)
+        # Drop (never truncate) an oversized css fallback for the same reason; the
+        # role identity remains the primary locator either way.
+        css = strat.get("css") or ""
+        if len(css) > selector_max:
+            strat.pop("css", None)
     a["strategy"] = strat
     return a
 
@@ -176,7 +218,8 @@ def _estimate_action_chars(a: dict[str, Any]) -> int:
     name = a.get("name") or ""
     strat = a.get("strategy") or {}
     sel = strat.get("selector") or strat.get("name") or ""
-    return 40 + len(role) + len(name) + len(sel) + len(a.get("source", ""))
+    css = strat.get("css") or ""  # role-identity entries carry a css fallback too
+    return 40 + len(role) + len(name) + len(sel) + len(css) + len(a.get("source", ""))
 
 
 def _apply_total_output_budget(
