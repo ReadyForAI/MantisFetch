@@ -78,7 +78,7 @@ WebMCP（Web Model Context Protocol）是 Chrome 146+ 中提出的一个 W3C 标
 | 2      | **DOM**     | 始终运行。为匹配到的动作补充 **css 回退选择器**，并补全 A11y 树未覆盖的元素 | 0.80 |
 | 3      | **Vision（YOLO）** | 最后兜底，仅当树 + DOM 结果过少（`< min_actions_before_fallback`）且 `enable_vision_fallback=true` 时 | 0.60 |
 
-- 每个非 WebMCP 动作都是**双策略**：`role+name+nth` 身份为主定位器，css selector 为回退。`act` 按 身份 → css → 明确报错 的顺序解析（不再静默等待 25 秒超时）。
+- 每个非 WebMCP 动作都是**双策略**：`role+name+nth` 身份为主定位器，css selector 为回退。若身份不再命中（如控件被改名）但 css 仍匹配，`act` 通过回退恢复；否则保留身份定位器，让 Playwright 的可操作性等待照常生效（不会因 SPA 瞬时重渲染而快速失败）。
 - 同名同 role 的多个控件通过 `nth`（DOM 顺序）保持各自可定位；`aid` 在多次 distill 间保持稳定，与 css 回退无关。
 
 ---

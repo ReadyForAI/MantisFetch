@@ -1478,29 +1478,23 @@ async def _count(locator) -> int:
 async def _locate(page: Page, strategy: dict[str, Any]):
     stype = strategy.get("type")
     if stype == "role":
-        # Primary: the role+name+nth identity. Fall back to the css path only when
-        # the identity resolves to nothing (renamed/removed control); raise a clear
-        # error if neither matches instead of letting the action time out 25s.
+        # Primary: the role+name+nth identity. If it does not currently resolve
+        # but the css fallback does, switch to the fallback (renamed/removed
+        # control whose css still matches). Otherwise keep the identity locator
+        # so Playwright's own actionability wait still applies at click/fill time
+        # — SPAs briefly detach nodes between distill and act, and we must not
+        # fail before that wait.
         role = strategy["role"]
         name = strategy.get("name") or ""
         nth = strategy.get("nth")
+        css = strategy.get("css")
         loc = page.get_by_role(role, name=name)
         loc = loc.nth(nth) if isinstance(nth, int) else loc.first
-        if await _count(loc) > 0:
-            return loc
-
-        css = strategy.get("css")
-        if css:
+        if css and await _count(loc) == 0:
             css_loc = page.locator(css).first
             if await _count(css_loc) > 0:
                 return css_loc
-
-        ident = f"role={role!r} name={name!r}"
-        if isinstance(nth, int):
-            ident += f" nth={nth}"
-        if css:
-            ident += f" (css fallback {css!r} also empty)"
-        raise RuntimeError(f"no element matched {ident}")
+        return loc
     if stype == "css":
         sel = strategy.get("selector") or ""
         if not sel:

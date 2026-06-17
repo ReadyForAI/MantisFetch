@@ -208,19 +208,24 @@ async def test_locate_falls_back_to_css_when_identity_empty() -> None:
 
 
 @pytest.mark.asyncio
-async def test_locate_raises_clear_error_when_nothing_matches() -> None:
+async def test_locate_keeps_identity_when_nothing_resolves_yet() -> None:
+    """When neither identity nor css currently resolves (e.g. an SPA transiently
+    detached the node between distill and act), _locate returns the identity
+    locator so Playwright's own actionability wait still applies at click/fill
+    time — it must not fail fast."""
     page = MagicMock()
     base = MagicMock()
-    base.nth = MagicMock(return_value=_loc(0))
+    nth0 = _loc(0)
+    base.nth = MagicMock(return_value=nth0)
     page.get_by_role = MagicMock(return_value=base)
     css_loc = MagicMock()
     css_loc.first = _loc(0)
     page.locator = MagicMock(return_value=css_loc)
 
-    with pytest.raises(RuntimeError, match="no element matched"):
-        await _locate(
-            page, {"type": "role", "role": "button", "name": "Gone", "nth": 0, "css": ".x"}
-        )
+    result = await _locate(
+        page, {"type": "role", "role": "button", "name": "Gone", "nth": 0, "css": ".x"}
+    )
+    assert result is nth0  # identity locator returned, no RuntimeError
 
 
 # ── _click_blocker (pre-click occlusion hit-test) ──────────────────────────────

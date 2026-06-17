@@ -78,7 +78,7 @@ Below WebMCP, actions are extracted **accessibility-tree-first**:
 | 2        | **DOM**       | Always runs. Enriches matching actions with a **css fallback** and adds elements the tree didn't surface | 0.80 |
 | 3        | **Vision (YOLO)** | Last resort, only when tree + DOM came up thin (`< min_actions_before_fallback`) and `enable_vision_fallback=true` | 0.60 |
 
-- Each non-WebMCP action is **dual-strategy**: the `role+name+nth` identity is the primary locator, with a css selector as fallback. `act` resolves identity → css → clear error (no silent 25 s timeout).
+- Each non-WebMCP action is **dual-strategy**: the `role+name+nth` identity is the primary locator, with a css selector as fallback. If the identity stops resolving (e.g. a renamed control) but the css still matches, `act` recovers via the fallback; otherwise it keeps the identity locator so Playwright's actionability wait still applies (no fast-fail on SPA transient re-renders).
 - Duplicate `role+name` controls stay individually addressable via `nth` (DOM order) — `aid` is stable across distills regardless of the css fallback.
 
 ---
