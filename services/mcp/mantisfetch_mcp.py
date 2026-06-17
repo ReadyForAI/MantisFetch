@@ -17,8 +17,10 @@ Design (per IRP ReadyForAI/SharedSpecs#182):
   model sees each tier's token cost and picks the cheapest.
 - doc_parse local source is confined to a single allowlist root
   (``MANTISFETCH_ALLOWED_DOC_ROOTS``, deployed = NodalOS ``workspaces/shared/resource``)
-  via a relative-path arg + canonical containment check; a URL source (SSRF-guarded)
-  and small base64 inline source coexist.
+  via a relative-path arg + canonical containment check; a small base64 inline
+  source coexists. The remote ``url`` source (IRP option (b)) is a planned
+  follow-up — a safe direct fetch needs rebinding-proof IP pinning + streamed
+  size enforcement (see the note above ``doc_parse``).
 - Untrusted web page text returned by the web tools is wrapped in per-response
   nonce + origin boundary markers (in-band, verbatim-passthrough safe) to blunt
   prompt injection from scraped pages.
@@ -37,7 +39,6 @@ from typing import Any
 import httpx
 import mantisfetch_browser as _web_mod
 import mantisfetch_docreader as _doc_mod
-from mantisfetch_browser.security import _url_violation
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -182,27 +183,12 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
     raise ToolError(f"rel_path not found within an allowed doc root: {rel_path!r}")
 
 
-async def _resolve_url_doc(url: str) -> tuple[str, bytes]:
-    """Fetch a remote document, guarded by the browser SSRF allowlist.
-
-    Uses the DNS-*resolving* check (resolve=True): unlike the browser's HTTP
-    endpoints — which back the fast DNS-free pre-check with a route-level guard
-    that re-validates each actual request — this path fetches directly, so it
-    must resolve the host here and reject any name that lands on a private,
-    loopback, link-local, or reserved address. Redirects stay off so a 3xx can't
-    bounce the fetch onto an internal host."""
-    violation = _url_violation(url, resolve=True)
-    if violation:
-        raise ToolError(f"URL target not allowed: {violation}")
-    async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as c:
-        resp = await c.get(url)
-    if resp.status_code >= 400:
-        raise ToolError(f"fetch failed: {resp.status_code} for {url}")
-    body = resp.content
-    if len(body) > _MAX_INLINE_DOC_BYTES:
-        raise ToolError(f"document too large: {len(body)} bytes (max {_MAX_INLINE_DOC_BYTES})")
-    name = Path(url.split("?", 1)[0]).name or "document"
-    return name, body
+# NOTE: a remote `url` document source (IRP ① option (b)) is intentionally NOT
+# implemented here yet. A safe direct fetch must defeat DNS rebinding by pinning
+# the connection to the address validated by the SSRF guard (the validate→connect
+# gap re-resolves otherwise) and stream-enforce the size cap rather than buffer
+# the whole body. That belongs in a focused follow-up; the v1 local source is the
+# allowlist-rooted rel_path (shared/resource), with small base64 for inline bytes.
 
 
 # ============================================================
@@ -319,7 +305,7 @@ async def web_session_close(session_id: str) -> Any:
 
 @mcp.tool()
 async def doc_parse(
-    rel_path: str | None = None, url: str | None = None, content_b64: str | None = None,
+    rel_path: str | None = None, content_b64: str | None = None,
     filename: str | None = None, content_type: str = "General",
     generate_summary: bool = True, extract_tables: bool = True, force_ocr: bool = False,
     tags: list[str] | None = None, doc_id: str | None = None, replace: bool = False,
@@ -327,16 +313,14 @@ async def doc_parse(
     """Parse a document (PDF/DOCX/PPTX/XLSX/CSV/HTML, with OCR fallback) into the
     library; returns doc_id + structure. Provide exactly one source:
     - rel_path: a path relative to the configured allowlist root (shared/resource)
-    - url: a remote document (SSRF-guarded)
-    - content_b64: small inline bytes (with filename for the extension)."""
-    sources = [s for s in (rel_path, url, content_b64) if s]
+    - content_b64: small inline bytes (with filename for the extension).
+    (A remote `url` source is a planned follow-up — see the note above.)"""
+    sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
-        raise ToolError("provide exactly one of: rel_path, url, content_b64")
+        raise ToolError("provide exactly one of: rel_path, content_b64")
 
     if rel_path:
         name, data = _resolve_local_doc(rel_path)
-    elif url:
-        name, data = await _resolve_url_doc(url)
     else:
         try:
             data = base64.b64decode(content_b64 or "", validate=True)

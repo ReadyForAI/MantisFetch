@@ -104,10 +104,11 @@ def test_resolve_local_doc_disabled_without_root(monkeypatch) -> None:
 
 
 def test_doc_parse_requires_exactly_one_source() -> None:
+    good = base64.b64encode(b"data").decode()
     with pytest.raises(mm.ToolError, match="exactly one"):
         asyncio.run(mm.doc_parse())
     with pytest.raises(mm.ToolError, match="exactly one"):
-        asyncio.run(mm.doc_parse(rel_path="a.pdf", url="http://x/a.pdf"))
+        asyncio.run(mm.doc_parse(rel_path="a.pdf", content_b64=good))
 
 
 def test_doc_parse_rejects_bad_base64() -> None:
@@ -119,24 +120,6 @@ def test_doc_parse_base64_requires_filename() -> None:
     good = base64.b64encode(b"data").decode()
     with pytest.raises(mm.ToolError, match="filename"):
         asyncio.run(mm.doc_parse(content_b64=good))
-
-
-def test_doc_parse_url_blocks_metadata_ip() -> None:
-    # literal link-local / cloud-metadata address — rejected before any fetch
-    with pytest.raises(mm.ToolError, match="not allowed"):
-        asyncio.run(mm.doc_parse(url="http://169.254.169.254/latest/meta-data/"))
-
-
-def test_doc_parse_url_blocks_dns_rebinding(monkeypatch) -> None:
-    # a hostname (no literal IP) that *resolves* to loopback must be rejected by
-    # the DNS-resolving guard — the bug a DNS-free pre-check would have missed.
-    import ipaddress
-
-    from mantisfetch_browser import security
-
-    monkeypatch.setattr(security, "_resolved_ips", lambda h: [ipaddress.ip_address("127.0.0.1")])
-    with pytest.raises(mm.ToolError, match="not allowed"):
-        asyncio.run(mm.doc_parse(url="http://rebind.example/doc.pdf"))
 
 
 # ── delegation + wrapping (web tool over a stubbed transport) ───────────────────
