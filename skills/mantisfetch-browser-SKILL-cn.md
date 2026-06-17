@@ -63,10 +63,23 @@ WebMCP（Web Model Context Protocol）是 Chrome 146+ 中提出的一个 W3C 标
 
 ### 3.3 对 Agent 的意义
 
-- **最高置信度（0.95）**：WebMCP 工具会优先出现在 distill 的 actions 列表中，优先于 DOM（0.80）、A11y（0.82）和 Vision（0.60）
+- **最高置信度（0.95）**：WebMCP 工具会优先出现在 distill 的 actions 列表中，优先于 DOM/A11y 动作流程（见 §3.4）和 Vision（0.60）
 - **更可靠**：直接调用网站定义的函数，不依赖 CSS selector 或元素可见性
 - **更快**：跳过 DOM 定位 → 等待可见 → 点击/填表 这条链路，一次 `invoke` 即可完成整个操作
-- **向后兼容**：如果页面不支持 WebMCP，会自动回退到原有的 DOM/A11y/Vision 流程，不需要 Agent 额外处理
+- **向后兼容**：如果页面不支持 WebMCP，会自动回退到 DOM/A11y/Vision 流程，不需要 Agent 额外处理
+
+### 3.4 动作来源优先级（非 WebMCP）
+
+在 WebMCP 之下，动作按**无障碍树优先（accessibility-tree-first）**抽取：
+
+| 优先级 | 来源 | 作用 | 置信度 |
+| ------ | ---- | ---- | ------ |
+| 1      | **A11y 树** | **主来源**：始终运行。为每个动作提供稳定的 `role + name + nth` 身份，能抵抗 CSS/标记变动 | 0.82–0.85 |
+| 2      | **DOM**     | 始终运行。为匹配到的动作补充 **css 回退选择器**，并补全 A11y 树未覆盖的元素 | 0.80 |
+| 3      | **Vision（YOLO）** | 最后兜底，仅当树 + DOM 结果过少（`< min_actions_before_fallback`）且 `enable_vision_fallback=true` 时 | 0.60 |
+
+- 每个非 WebMCP 动作都是**双策略**：`role+name+nth` 身份为主定位器，css selector 为回退。`act` 按 身份 → css → 明确报错 的顺序解析（不再静默等待 25 秒超时）。
+- 同名同 role 的多个控件通过 `nth`（DOM 顺序）保持各自可定位；`aid` 在多次 distill 间保持稳定，与 css 回退无关。
 
 ---
 
@@ -103,6 +116,7 @@ WebMCP（Web Model Context Protocol）是 Chrome 146+ 中提出的一个 W3C 标
   - `role=button/link/checkbox/radio` → `act(click)`
   - `role=combobox` → `act(select)`
 - `act` 之后不要读整页，先看返回的 `changed_sids`，再 `read_sections(changed_sids)`
+- **遮挡保护**：当 `click` 目标被遮挡（cookie 横幅、弹窗、吸顶栏）时，会返回 **409** 并指出遮挡元素，而不是干等 25 秒超时。先关闭/滚开遮挡物再重试。
 
 ### 4.4 Scroll-Then-Distill（滚动加载）
 
@@ -198,7 +212,7 @@ If true:
   └─ invoke fails → fall back to DOM act(click/type)
 ↓
 If false:
-  └─ Use original DOM/A11y/Vision pipeline (fully compatible)
+  └─ Use the A11y-first DOM/Vision pipeline (§3.4; fully compatible)
 ```
 
 ---

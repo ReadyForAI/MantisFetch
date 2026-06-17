@@ -63,10 +63,23 @@ Traditional Agents browse by "screenshot + guess DOM" to manipulate elements. We
 
 ### 3.3 Significance for Agents
 
-- **Highest confidence (0.95)**: WebMCP tools appear first in distill's actions list, ahead of DOM (0.80), A11y (0.82), and Vision (0.60)
+- **Highest confidence (0.95)**: WebMCP tools appear first in distill's actions list, ahead of the DOM/A11y action pipeline (see §3.4) and Vision (0.60)
 - **More reliable**: Directly invokes website-defined functions without relying on CSS selectors or element visibility
 - **Faster**: Skips the DOM locate → wait visible → click/fill pipeline; a single `invoke` completes the entire operation
-- **Backward compatible**: When a page doesn't support WebMCP, automatically falls back to the original DOM/A11y/Vision pipeline — no extra Agent logic needed
+- **Backward compatible**: When a page doesn't support WebMCP, automatically falls back to the DOM/A11y/Vision pipeline — no extra Agent logic needed
+
+### 3.4 Action Source Priority (non-WebMCP)
+
+Below WebMCP, actions are extracted **accessibility-tree-first**:
+
+| Priority | Source | Role in the action | Confidence |
+| -------- | ------ | ------------------ | ---------- |
+| 1        | **A11y tree** | **Primary**: always runs. Gives every action a stable `role + name + nth` identity that survives CSS/markup churn | 0.82–0.85 |
+| 2        | **DOM**       | Always runs. Enriches matching actions with a **css fallback** and adds elements the tree didn't surface | 0.80 |
+| 3        | **Vision (YOLO)** | Last resort, only when tree + DOM came up thin (`< min_actions_before_fallback`) and `enable_vision_fallback=true` | 0.60 |
+
+- Each non-WebMCP action is **dual-strategy**: the `role+name+nth` identity is the primary locator, with a css selector as fallback. `act` resolves identity → css → clear error (no silent 25 s timeout).
+- Duplicate `role+name` controls stay individually addressable via `nth` (DOM order) — `aid` is stable across distills regardless of the css fallback.
 
 ---
 
@@ -103,6 +116,7 @@ Traditional Agents browse by "screenshot + guess DOM" to manipulate elements. We
   - `role=button/link/checkbox/radio` → `act(click)`
   - `role=combobox` → `act(select)`
 - After `act`, don't read the whole page: check returned `changed_sids` first, then `read_sections(changed_sids)`
+- **Occlusion guard**: a `click` whose target is covered (cookie banner, modal, sticky header) returns **409** naming the covering element instead of timing out 25 s. Dismiss/scroll the blocker, then retry.
 
 ### 4.4 Scroll-Then-Distill (Scroll Loading)
 
@@ -198,7 +212,7 @@ If true:
   └─ invoke fails → fall back to DOM act(click/type)
 ↓
 If false:
-  └─ Use original DOM/A11y/Vision pipeline (fully compatible)
+  └─ Use the A11y-first DOM/Vision pipeline (§3.4; fully compatible)
 ```
 
 ---

@@ -147,6 +147,9 @@ from .ranking import (
     _make_stable_sid as _make_stable_sid,
 )
 from .ranking import (
+    _merge_actions as _merge_actions,
+)
+from .ranking import (
     _normalize as _normalize,
 )
 from .ranking import (
@@ -688,6 +691,61 @@ MAP_BOX_TO_ELEMENT = r"""
 }
 """
 
+# Pre-click occlusion hit-test. Given the target element, scroll it into the
+# viewport, then ask document.elementFromPoint what would actually receive a
+# click at the target's center. Returns null when the click would land on the
+# target (or something that activates it), else a short description of the
+# covering element. Ported from vercel-labs/agent-browser (blockerAt): handles
+# shadow-DOM ancestry, same-origin iframe descent, and label/control pairing so
+# custom checkboxes and framed targets don't report false occlusion.
+CLICK_OCCLUSION_JS = r"""
+(el) => {
+  if (!el) return null;
+  const rect0 = el.getBoundingClientRect();
+  if (rect0.width === 0 || rect0.height === 0) return null;  // zero-size: let Playwright handle
+  const inView = (r) =>
+    r.bottom > 0 && r.right > 0 &&
+    r.top < (window.innerHeight || document.documentElement.clientHeight) &&
+    r.left < (window.innerWidth || document.documentElement.clientWidth);
+  let rect = rect0;
+  if (!inView(rect)) {
+    el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    rect = el.getBoundingClientRect();
+  }
+  const x = rect.x + rect.width / 2;
+  const y = rect.y + rect.height / 2;
+
+  let d = document, lx = x, ly = y;
+  let hit = d.elementFromPoint(lx, ly);
+  while (hit && (hit.tagName === "IFRAME" || hit.tagName === "FRAME") && hit.contentDocument && hit !== el) {
+    const r = hit.getBoundingClientRect();
+    lx -= r.x + hit.clientLeft;
+    ly -= r.y + hit.clientTop;
+    d = hit.contentDocument;
+    hit = d.elementFromPoint(lx, ly);
+  }
+  if (!hit || hit === el) return null;
+  const up = (n) => n.parentNode || n.host || (n.getRootNode && n.getRootNode().host) || null;
+  for (let n = hit; n; n = up(n)) { if (n === el) return null; }
+  for (let n = el; n; n = up(n)) { if (n === hit) return null; }
+  const hitLabel = hit.closest ? hit.closest("label") : null;
+  if (hitLabel && (hitLabel.control === el || hitLabel.contains(el))) return null;
+  const elLabel = el.closest ? el.closest("label") : null;
+  if (elLabel && elLabel.contains(hit)) return null;
+
+  let desc = hit.tagName.toLowerCase();
+  if (hit.id) desc += "#" + hit.id;
+  else if (typeof hit.className === "string" && hit.className.trim())
+    desc += "." + hit.className.trim().split(/\s+/).slice(0, 2).join(".");
+  if (!hit.id && hit.closest) {
+    const anchored = hit.closest("[id]");
+    if (anchored && anchored !== hit)
+      desc += " inside " + anchored.tagName.toLowerCase() + "#" + anchored.id;
+  }
+  return desc;
+}
+"""
+
 
 # ============================================================
 # ✅ WebMCP Discovery + Invocation JS
@@ -949,6 +1007,7 @@ def _blocks_to_sections_stable(
 async def _extract_actions_dom(page: Page, max_actions: int) -> list[dict[str, Any]]:
     raw = await page.evaluate(ACTIONS_DOM_JS, max_actions)
     actions = []
+    nth_counts: dict[tuple[str, str], int] = {}
     for ra in raw:
         role = (ra.get("role") or "").strip()
         name = (ra.get("name") or "").strip()
@@ -956,11 +1015,20 @@ async def _extract_actions_dom(page: Page, max_actions: int) -> list[dict[str, A
         acts = ra.get("actions") or _pick_action_methods(role)
 
         if name and role in ("button", "link", "checkbox", "radio", "textbox", "combobox"):
-            strategy = {"type": "role", "role": role, "name": name}
+            nth = nth_counts.get((role, name), 0)
+            nth_counts[(role, name)] = nth + 1
+            # role identity is primary; the css path rides along as a fallback so
+            # _locate can recover when the accessible name churns or collides.
+            strategy = {"type": "role", "role": role, "name": name, "nth": nth}
+            if css:
+                strategy["css"] = css
+            # aid keys on the css-free identity so it stays stable across distills
+            # (a volatile css fallback must not churn the diff).
+            aid = _aid({"role": role, "name": name, "nth": nth})
         else:
             strategy = {"type": "css", "selector": css}
+            aid = _aid({"role": role, "name": name, "strategy": strategy})
 
-        aid = _aid({"role": role, "name": name, "strategy": strategy})
         actions.append(
             {
                 "aid": aid,
@@ -972,6 +1040,39 @@ async def _extract_actions_dom(page: Page, max_actions: int) -> list[dict[str, A
                 "source": "dom",
             }
         )
+    return actions
+
+
+def _a11y_actions_from_pairs(
+    pairs: list[tuple[str, str]], max_actions: int, confidence: float
+) -> list[dict[str, Any]]:
+    """Turn ordered (role, name) pairs from the a11y tree into action descriptors.
+
+    Duplicate (role, name) pairs are kept and disambiguated with an ``nth`` index
+    (DOM order) rather than dropped, so a page with several same-named controls
+    stays individually addressable. The aid keys on the (role, name, nth) identity
+    only — stable across distills regardless of any css fallback merged in later.
+    """
+    nth_counts: dict[tuple[str, str], int] = {}
+    actions: list[dict[str, Any]] = []
+    for role, name in pairs:
+        nth = nth_counts.get((role, name), 0)
+        nth_counts[(role, name)] = nth + 1
+        strategy = {"type": "role", "role": role, "name": name, "nth": nth}
+        aid = _aid({"role": role, "name": name, "nth": nth})
+        actions.append(
+            {
+                "aid": aid,
+                "role": role,
+                "name": name,
+                "strategy": strategy,
+                "actions": _pick_action_methods(role),
+                "confidence": confidence,
+                "source": "a11y",
+            }
+        )
+        if len(actions) >= max_actions:
+            break
     return actions
 
 
@@ -994,32 +1095,7 @@ async def _extract_actions_a11y(page: Page, max_actions: int) -> tuple[list[dict
                     walk(ch)
 
             walk(snap)
-
-            seen = set()
-            uniq: list[tuple[str, str]] = []
-            for r, n in out:
-                if (r, n) not in seen:
-                    seen.add((r, n))
-                    uniq.append((r, n))
-                    if len(uniq) >= max_actions:
-                        break
-
-            actions: list[dict[str, Any]] = []
-            for role, name in uniq:
-                strategy = {"type": "role", "role": role, "name": name}
-                aid = _aid({"role": role, "name": name, "strategy": strategy})
-                actions.append(
-                    {
-                        "aid": aid,
-                        "role": role,
-                        "name": name,
-                        "strategy": strategy,
-                        "actions": _pick_action_methods(role),
-                        "confidence": 0.85,
-                        "source": "a11y",
-                    }
-                )
-            return actions, "accessibility.snapshot"
+            return _a11y_actions_from_pairs(out, max_actions, 0.85), "accessibility.snapshot"
     except Exception:
         pass
 
@@ -1041,31 +1117,7 @@ async def _extract_actions_a11y(page: Page, max_actions: int) -> tuple[list[dict
         if len(out2) >= max_actions * 3:
             break
 
-    seen = set()
-    uniq2: list[tuple[str, str]] = []
-    for r, n in out2:
-        if (r, n) not in seen:
-            seen.add((r, n))
-            uniq2.append((r, n))
-            if len(uniq2) >= max_actions:
-                break
-
-    actions2: list[dict[str, Any]] = []
-    for role, name in uniq2:
-        strategy = {"type": "role", "role": role, "name": name}
-        aid = _aid({"role": role, "name": name, "strategy": strategy})
-        actions2.append(
-            {
-                "aid": aid,
-                "role": role,
-                "name": name,
-                "strategy": strategy,
-                "actions": _pick_action_methods(role),
-                "confidence": 0.82,
-                "source": "a11y",
-            }
-        )
-    return actions2, "aria_snapshot"
+    return _a11y_actions_from_pairs(out2, max_actions, 0.82), "aria_snapshot"
 
 
 async def _extract_actions_vision(page: Page, req: DistillRequest) -> list[dict[str, Any]]:
@@ -1326,19 +1378,24 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
                 }
             )
 
-        # Original DOM extraction
-        actions.extend(await _extract_actions_dom(page, max_actions=req.max_actions))
-
-        if req.enable_a11y_fallback and len(actions) < req.min_actions_before_fallback:
+        # a11y-tree-first: role identity is the PRIMARY action source. It always
+        # runs (not just as a thin-page fallback) so role+name+nth locators — which
+        # survive css churn — are the default; DOM only enriches them with a css
+        # fallback and adds elements the tree did not surface.
+        a11y_actions: list[dict[str, Any]] = []
+        if req.enable_a11y_fallback:
             a11y_attempted = True
             try:
                 a11y_actions, a11y_mode = await _extract_actions_a11y(
                     page, max_actions=req.max_actions
                 )
-                actions.extend(a11y_actions)
             except Exception as e:
                 a11y_error = f"{type(e).__name__}: {e}"
 
+        dom_actions = await _extract_actions_dom(page, max_actions=req.max_actions)
+        actions.extend(_merge_actions(a11y_actions, dom_actions))
+
+        # Vision stays the last resort: only when the tree + DOM came up thin.
         if req.enable_vision_fallback and len(actions) < req.min_actions_before_fallback:
             actions.extend(await _extract_actions_vision(page, req))
 
@@ -1411,16 +1468,64 @@ async def _ensure_session(session_id: str) -> Session:
 # ============================================================
 # Action executor
 # ============================================================
+async def _count(locator) -> int:
+    try:
+        return await locator.count()
+    except Exception:
+        return 0
+
+
 async def _locate(page: Page, strategy: dict[str, Any]):
     stype = strategy.get("type")
     if stype == "role":
-        return page.get_by_role(strategy["role"], name=strategy.get("name") or "").first
+        # Primary: the role+name+nth identity. Fall back to the css path only when
+        # the identity resolves to nothing (renamed/removed control); raise a clear
+        # error if neither matches instead of letting the action time out 25s.
+        role = strategy["role"]
+        name = strategy.get("name") or ""
+        nth = strategy.get("nth")
+        loc = page.get_by_role(role, name=name)
+        loc = loc.nth(nth) if isinstance(nth, int) else loc.first
+        if await _count(loc) > 0:
+            return loc
+
+        css = strategy.get("css")
+        if css:
+            css_loc = page.locator(css).first
+            if await _count(css_loc) > 0:
+                return css_loc
+
+        ident = f"role={role!r} name={name!r}"
+        if isinstance(nth, int):
+            ident += f" nth={nth}"
+        if css:
+            ident += f" (css fallback {css!r} also empty)"
+        raise RuntimeError(f"no element matched {ident}")
     if stype == "css":
         sel = strategy.get("selector") or ""
         if not sel:
             raise RuntimeError("empty css selector")
         return page.locator(sel).first
     raise RuntimeError(f"unknown strategy type: {stype}")
+
+
+async def _click_blocker(page: Page, locator) -> str | None:
+    """Pre-click hit-test: return a short description of the element occluding
+    the locator's click point, or None when the click would land on the target.
+
+    Best-effort — returns None on any failure so the click still proceeds and
+    Playwright's own actionability checks remain the source of truth.
+    """
+    try:
+        handle = await locator.element_handle()
+        if handle is None:
+            return None
+        try:
+            return await page.evaluate(CLICK_OCCLUSION_JS, handle)
+        finally:
+            await handle.dispose()
+    except Exception:
+        return None
 
 
 # detect popup/new tab, switch to latest page
@@ -1859,6 +1964,15 @@ async def act(req: ActRequest) -> ActResponse:
                     pass
 
                 if req.action == "click":
+                    blocker = await _click_blocker(sess.page, locator)
+                    if blocker:
+                        raise HTTPException(
+                            409,
+                            f"click target is covered by <{blocker}> at its click "
+                            "point, so the click would land on that element instead. "
+                            "Dismiss or interact with the covering element first "
+                            "(often a dialog, banner, or sticky header).",
+                        )
                     await locator.click(timeout=req.timeout_ms)
                 elif req.action == "type":
                     if req.text is None:
