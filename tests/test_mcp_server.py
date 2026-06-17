@@ -86,6 +86,16 @@ def test_resolve_local_doc_rejects_symlink_escape(tmp_path, monkeypatch) -> None
         mm._resolve_local_doc("link.txt")
 
 
+def test_resolve_local_doc_rejects_oversized(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "resource"
+    root.mkdir()
+    (root / "big.pdf").write_bytes(b"x" * 1024)
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    monkeypatch.setattr(mm._doc_mod, "MAX_UPLOAD_BYTES", 100)  # cap below file size
+    with pytest.raises(mm.ToolError, match="too large"):
+        mm._resolve_local_doc("big.pdf")
+
+
 def test_resolve_local_doc_rejects_absolute(tmp_path, monkeypatch) -> None:
     root = tmp_path / "resource"
     root.mkdir()

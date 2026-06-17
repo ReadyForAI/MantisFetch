@@ -181,6 +181,14 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
         except ValueError:
             continue  # escapes this root — try the next
         if candidate.is_file():
+            # Reject oversized files by stat() *before* reading, so an allowed but
+            # huge resource file can't spike memory ahead of the docreader's own
+            # streaming size enforcement.
+            size = candidate.stat().st_size
+            if size > _doc_mod.MAX_UPLOAD_BYTES:
+                raise ToolError(
+                    f"document too large: {size} bytes (max {_doc_mod.MAX_UPLOAD_BYTES})"
+                )
             return candidate.name, candidate.read_bytes()
     raise ToolError(f"rel_path not found within an allowed doc root: {rel_path!r}")
 
