@@ -149,3 +149,54 @@ def test_unwrap_raises_tool_error_on_4xx() -> None:
     resp = httpx.Response(409, json={"detail": "occluded by div#overlay"})
     with pytest.raises(mm.ToolError, match="occluded by div#overlay"):
         mm._unwrap(resp)
+
+
+# ── MCP access gate (loopback-only by default; bearer for non-loopback) ─────────
+
+
+def _drive_gate(client_addr, headers=None):
+    """Run a request through _McpAuthGate; return (status, inner_reached)."""
+    reached = {"v": False}
+
+    async def inner(scope, receive, send):
+        reached["v"] = True
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    gate = mm._McpAuthGate(inner)
+    scope = {
+        "type": "http", "client": client_addr,
+        "headers": [(k.encode(), v.encode()) for k, v in (headers or {}).items()],
+    }
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    asyncio.run(gate(scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    return status, reached["v"]
+
+
+def test_gate_allows_loopback_peer_without_token(monkeypatch) -> None:
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    status, reached = _drive_gate(("127.0.0.1", 5555))
+    assert status == 200 and reached
+
+
+def test_gate_blocks_remote_peer_without_token(monkeypatch) -> None:
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    # spoofing Host: 127.0.0.1 must NOT help — only the real peer counts
+    status, reached = _drive_gate(("10.0.0.9", 5555), headers={"host": "127.0.0.1:9898"})
+    assert status == 403 and not reached
+
+
+def test_gate_requires_bearer_when_token_set(monkeypatch) -> None:
+    monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
+    bad, reached_bad = _drive_gate(("10.0.0.9", 5555), headers={"authorization": "Bearer nope"})
+    assert bad == 401 and not reached_bad
+    ok, reached_ok = _drive_gate(("10.0.0.9", 5555), headers={"authorization": "Bearer s3cret"})
+    assert ok == 200 and reached_ok

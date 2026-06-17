@@ -24,8 +24,10 @@ Design (per IRP ReadyForAI/SharedSpecs#182):
 - Untrusted web page text returned by the web tools is wrapped in per-response
   nonce + origin boundary markers (in-band, verbatim-passthrough safe) to blunt
   prompt injection from scraped pages.
-- Auth: loopback-only by default. If ``MANTISFETCH_MCP_TOKEN`` is set, a bearer
-  token is required (implemented but off unless configured).
+- Auth: genuinely loopback-only by default — the gate checks the real socket
+  peer (not the spoofable Host header), so /mcp is unreachable off-host even
+  though the server binds 0.0.0.0. Set ``MANTISFETCH_MCP_TOKEN`` to allow
+  non-loopback clients via a bearer token.
 """
 
 from __future__ import annotations
@@ -422,26 +424,52 @@ async def doc_summary(doc_id: str) -> Any:
 # ── ASGI app (mounted at /mcp by the unified server) ───────────────────────────
 
 
-class _BearerAuthASGI:
-    """Pure-ASGI bearer gate (SSE-safe — never buffers the response). Off unless
-    MANTISFETCH_MCP_TOKEN is set; default deployment is loopback-only."""
+class _McpAuthGate:
+    """Pure-ASGI access gate for the MCP surface (SSE-safe — never buffers the
+    response). The MCP tools drive a real browser and read local files, so this
+    surface must not be open to the network by default.
+
+    - With MANTISFETCH_MCP_TOKEN set: require that bearer token (any peer) —
+      this is the cross-host path.
+    - Without a token: require the real socket peer (scope["client"]) to be
+      loopback. The Host header is spoofable and is NOT trusted for this; only
+      the actual peer address is. So even though the unified server binds 0.0.0.0,
+      /mcp stays genuinely loopback-only until a token is configured.
+    """
+
+    _LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 
     def __init__(self, app: Any) -> None:
         self.app = app
 
+    def _deny(self, scope: Any) -> tuple[int, bytes] | None:
+        token = os.environ.get("MANTISFETCH_MCP_TOKEN")
+        if token:
+            headers = dict(scope.get("headers") or [])
+            if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
+                return 401, b'{"error":"unauthorized"}'
+            return None
+        client = scope.get("client")
+        peer = client[0] if client else None
+        if peer not in self._LOOPBACK:
+            return 403, (
+                b'{"error":"forbidden: MCP is loopback-only; '
+                b'set MANTISFETCH_MCP_TOKEN to allow non-loopback clients"}'
+            )
+        return None
+
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "http":
-            token = os.environ.get("MANTISFETCH_MCP_TOKEN")
-            if token:
-                headers = dict(scope.get("headers") or [])
-                if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
-                    await send({
-                        "type": "http.response.start", "status": 401,
-                        "headers": [(b"content-type", b"application/json")],
-                    })
-                    await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
-                    return
+            denied = self._deny(scope)
+            if denied is not None:
+                status, body = denied
+                await send({
+                    "type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json")],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
         await self.app(scope, receive, send)
 
 
-mcp_app = _BearerAuthASGI(mcp.streamable_http_app())
+mcp_app = _McpAuthGate(mcp.streamable_http_app())
