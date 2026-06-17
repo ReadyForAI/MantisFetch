@@ -12,7 +12,7 @@ class TestDocCounterConcurrency:
     """C2: concurrent _next_doc_id must produce unique IDs."""
 
     def test_concurrent_doc_ids_are_unique(self):
-        from larkscout_docreader import _next_doc_id
+        from mantisfetch_docreader import _next_doc_id
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -37,7 +37,7 @@ class TestDocCounterConcurrency:
 
     def test_next_doc_id_skips_existing(self):
         """C8: a counter mint must not reuse an id that already exists on disk."""
-        from larkscout_docreader import _next_doc_id
+        from mantisfetch_docreader import _next_doc_id
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -53,7 +53,7 @@ class TestWebCounterConcurrency:
     """C1: concurrent _next_web_doc_id must produce unique IDs."""
 
     def test_concurrent_web_ids_are_unique(self):
-        from larkscout_browser import _next_web_doc_id
+        from mantisfetch_browser import _next_web_doc_id
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -81,7 +81,7 @@ class TestDocIndexIntegrity:
     """C3+C4: concurrent writes to doc-index.json must not lose entries."""
 
     def test_concurrent_doc_index_writes(self):
-        from larkscout_docreader import _update_doc_index
+        from mantisfetch_docreader import _update_doc_index
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -125,12 +125,12 @@ class TestDocIndexIntegrity:
         (the old _web_index_lock vs _doc_index_lock) allowed lost updates when a
         capture and a parse interleaved.
         """
-        import larkscout_browser
-        import larkscout_docreader.storage as doc_storage
+        import mantisfetch_browser
+        import mantisfetch_docreader.storage as doc_storage
 
-        from larkscout_common.storage import _doc_index_lock as common_lock
+        from mantisfetch_common.storage import _doc_index_lock as common_lock
 
-        assert larkscout_browser._doc_index_lock is common_lock
+        assert mantisfetch_browser._doc_index_lock is common_lock
         assert doc_storage._doc_index_lock is common_lock
 
 
@@ -141,7 +141,7 @@ class TestSessionEviction:
         import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
-        from larkscout_browser import Session, SessionManager
+        from mantisfetch_browser import Session, SessionManager
 
         async def run():
             mgr = SessionManager(ttl=60, maxsize=1)
@@ -164,7 +164,7 @@ class TestSessionClosedFlag:
     def test_closed_session_returns_404(self):
         import asyncio
 
-        from larkscout_browser import Session, SessionManager
+        from mantisfetch_browser import Session, SessionManager
 
         async def run():
             mgr = SessionManager(ttl=60, maxsize=10)

@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 def test_build_table_entries_include_generic_metadata():
-    from larkscout_docreader import PageContent, ParsedDocument, _build_table_entries
+    from mantisfetch_docreader import PageContent, ParsedDocument, _build_table_entries
 
     parsed = ParsedDocument(
         filename="scan.pdf",
@@ -39,7 +39,7 @@ def test_build_table_entries_include_generic_metadata():
 
 
 def test_markdown_table_dimensions_handle_empty_and_uneven_rows():
-    from larkscout_docreader import _markdown_table_dimensions
+    from mantisfetch_docreader import _markdown_table_dimensions
 
     dimensions = _markdown_table_dimensions("| A | B | C |\n|---|---|---|\n| 1 || 3 |\n| 4 | 5 |")
 
@@ -52,7 +52,7 @@ def test_markdown_table_dimensions_handle_empty_and_uneven_rows():
 
 
 def test_markdown_table_dimensions_do_not_count_separator_rows():
-    from larkscout_docreader import _markdown_table_dimensions
+    from mantisfetch_docreader import _markdown_table_dimensions
 
     dimensions = _markdown_table_dimensions(
         "| A | B |\n| :--- | ---: |\n| 1 | 2 |\n| 3 | 4 |"
@@ -65,7 +65,7 @@ def test_markdown_table_dimensions_do_not_count_separator_rows():
 
 
 def test_markdown_table_dimensions_without_separator_has_no_header():
-    from larkscout_docreader import _markdown_table_dimensions
+    from mantisfetch_docreader import _markdown_table_dimensions
 
     dimensions = _markdown_table_dimensions("| 1 | 2 |\n| 3 | 4 |")
 
@@ -78,7 +78,7 @@ def test_markdown_table_dimensions_without_separator_has_no_header():
 
 
 def test_markdown_table_dimensions_separator_only_is_empty_table():
-    from larkscout_docreader import _markdown_table_dimensions
+    from mantisfetch_docreader import _markdown_table_dimensions
 
     dimensions = _markdown_table_dimensions("| --- | --- |")
 
@@ -91,7 +91,7 @@ def test_markdown_table_dimensions_separator_only_is_empty_table():
 
 
 def test_write_tables_preserves_table_endpoint_markdown(tmp_path: Path):
-    from larkscout_docreader import PageContent, ParsedDocument, _write_tables
+    from mantisfetch_docreader import PageContent, ParsedDocument, _write_tables
 
     table_md = "| A | B |\n|---|---|\n| 1 | 2 |"
     parsed = ParsedDocument(
@@ -112,7 +112,12 @@ def test_write_tables_preserves_table_endpoint_markdown(tmp_path: Path):
 
 
 def test_manifest_tables_include_metadata_without_changing_table_api(tmp_path: Path):
-    from larkscout_docreader import PageContent, ParsedDocument, Section, write_output_extract_only
+    from mantisfetch_docreader import (
+        PageContent,
+        ParsedDocument,
+        Section,
+        write_output_extract_only,
+    )
 
     table_md = "| A | B |\n|---|---|\n| 1 | 2 |"
     parsed = ParsedDocument(

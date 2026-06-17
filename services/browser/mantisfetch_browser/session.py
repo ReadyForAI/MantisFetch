@@ -17,7 +17,7 @@ from typing import Any
 
 from playwright.async_api import BrowserContext, Page
 
-logger = logging.getLogger("larkscout_browser")
+logger = logging.getLogger("mantisfetch_browser")
 
 SESSION_TTL_SECONDS = 30 * 60  # 30 min idle
 SESSION_MAXSIZE = 200

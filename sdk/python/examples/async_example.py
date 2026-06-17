@@ -1,11 +1,11 @@
-"""LarkScout SDK — Async parallel document processing example.
+"""MantisFetch SDK — Async parallel document processing example.
 
 Demonstrates fetching digests for multiple documents concurrently with
-AsyncLarkScoutClient.
+AsyncMantisFetchClient.
 
 Usage::
 
-    python larkscout_server.py &
+    python mantisfetch_server.py &
     python sdk/python/examples/async_example.py
 """
 
@@ -15,13 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from larkscout_client import AsyncLarkScoutClient
+from mantisfetch_client import AsyncMantisFetchClient
 
 
 async def main() -> None:
     base_url = "http://localhost:9898"
 
-    async with AsyncLarkScoutClient(base_url) as client:
+    async with AsyncMantisFetchClient(base_url) as client:
         # 1. Health check
         health = await client.health()
         print(f"Service ok={health.get('ok')}, version={health.get('version')}")

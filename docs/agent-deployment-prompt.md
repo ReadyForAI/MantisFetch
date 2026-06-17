@@ -1,4 +1,4 @@
-# LarkScout Agent Deployment Prompt
+# MantisFetch Agent Deployment Prompt
 
 > Copy either version below directly into an Agent's system prompt.
 > The prompt is self-contained and assumes the Agent can run shell commands and HTTP requests.
@@ -7,11 +7,11 @@
 
 ## English Version
 
-You can deploy and operate LarkScout, an Agent-native web collection and document parsing service.
+You can deploy and operate MantisFetch, an Agent-native web collection and document parsing service.
 
 Default service URL: `http://127.0.0.1:9898`
 
-### 1. Check Whether LarkScout Is Already Running
+### 1. Check Whether MantisFetch Is Already Running
 
 Run:
 
@@ -27,15 +27,15 @@ If either returns JSON with `"ok": true`, the service is available. Prefer using
 Use Docker unless the user explicitly asks for a local Python process.
 
 ```bash
-git clone https://github.com/ReadyForAI/LarkScout.git
-cd LarkScout
+git clone https://github.com/ReadyForAI/MantisFetch.git
+cd MantisFetch
 
 # Optional: persist the document library somewhere explicit on the host.
-mkdir -p "$HOME/.larkscout/docs"
+mkdir -p "$HOME/.mantisfetch/docs"
 
 # Gemini is the default LLM provider.
 GEMINI_API_KEY="<your_key>" \
-LARKSCOUT_HOST_DOCS_DIR="$HOME/.larkscout/docs" \
+MANTISFETCH_HOST_DOCS_DIR="$HOME/.mantisfetch/docs" \
 docker compose up -d --build
 ```
 
@@ -50,8 +50,8 @@ docker compose ps
 Docker stores the document library at:
 
 ```text
-host:      ${LARKSCOUT_HOST_DOCS_DIR:-$HOME/.larkscout/docs}
-container: /root/.larkscout/docs
+host:      ${MANTISFETCH_HOST_DOCS_DIR:-$HOME/.mantisfetch/docs}
+container: /root/.mantisfetch/docs
 ```
 
 ### 3. Alternative Deployment: Local Python
@@ -59,8 +59,8 @@ container: /root/.larkscout/docs
 Use this only when Docker is unavailable or the user needs a local Python process.
 
 ```bash
-git clone https://github.com/ReadyForAI/LarkScout.git
-cd LarkScout
+git clone https://github.com/ReadyForAI/MantisFetch.git
+cd MantisFetch
 
 python3 -m venv .venv
 . .venv/bin/activate
@@ -74,7 +74,7 @@ pip install -r requirements-ocr-arm64.txt
 pip install -r requirements-ocr-linux-x86_64.txt
 
 export GEMINI_API_KEY="<your_key>"
-python larkscout_server.py
+python mantisfetch_server.py
 ```
 
 If local OCR dependencies are not installed, document parsing can still work for native-text files and LLM OCR paths, but scanned-PDF local OCR sidecars may be unavailable.
@@ -92,11 +92,11 @@ GEMINI_API_KEY="<your_key>"
 OpenAI or OpenAI-compatible:
 
 ```bash
-LARKSCOUT_LLM_PROVIDER=openai
-LARKSCOUT_LLM_VENDOR=openai
-LARKSCOUT_LLM_API_KEY="<your_key>"
-LARKSCOUT_LLM_BASE_URL="https://api.openai.com/v1"
-LARKSCOUT_LLM_MODEL="<model>"
+MANTISFETCH_LLM_PROVIDER=openai
+MANTISFETCH_LLM_VENDOR=openai
+MANTISFETCH_LLM_API_KEY="<your_key>"
+MANTISFETCH_LLM_BASE_URL="https://api.openai.com/v1"
+MANTISFETCH_LLM_MODEL="<model>"
 ```
 
 Supported vendor profiles include:
@@ -108,10 +108,10 @@ openai, zhipu, kimi, aliyun, volcengine
 Ollama example from Docker:
 
 ```bash
-LARKSCOUT_LLM_PROVIDER=openai \
-LARKSCOUT_LLM_API_KEY=ollama \
-LARKSCOUT_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
-LARKSCOUT_LLM_MODEL=llama3 \
+MANTISFETCH_LLM_PROVIDER=openai \
+MANTISFETCH_LLM_API_KEY=ollama \
+MANTISFETCH_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
+MANTISFETCH_LLM_MODEL=llama3 \
 docker compose up -d
 ```
 
@@ -127,29 +127,29 @@ This keeps parsing/extraction available while skipping LLM summaries.
 ```text
 PORT                                      default: 9898
 LANG                                      en or zh
-LARKSCOUT_DOCS_DIR                        document library directory inside the service
-LARKSCOUT_HOST_DOCS_DIR                   host bind mount for Docker document library
-LARKSCOUT_DOC_ID_STRATEGY                 counter or source_filename
-LARKSCOUT_STORE_SOURCE_FILES              true by default
+MANTISFETCH_DOCS_DIR                        document library directory inside the service
+MANTISFETCH_HOST_DOCS_DIR                   host bind mount for Docker document library
+MANTISFETCH_DOC_ID_STRATEGY                 counter or source_filename
+MANTISFETCH_STORE_SOURCE_FILES              true by default
 
-LARKSCOUT_LLM_PROVIDER                    gemini or openai
-LARKSCOUT_LLM_VENDOR                      openai, zhipu, kimi, aliyun, volcengine
+MANTISFETCH_LLM_PROVIDER                    gemini or openai
+MANTISFETCH_LLM_VENDOR                      openai, zhipu, kimi, aliyun, volcengine
 GEMINI_API_KEY / GOOGLE_API_KEY           Gemini credentials
-LARKSCOUT_LLM_API_KEY                     OpenAI-compatible credentials
-LARKSCOUT_LLM_BASE_URL                    OpenAI-compatible base URL
-LARKSCOUT_LLM_MODEL                       text model override
-LARKSCOUT_OCR_MODEL                       OCR vision model override
-LARKSCOUT_OCR_IMAGE_INPUT_MODE            data_url, plain_base64, remote_url_only
-LARKSCOUT_LLM_EXTRA_BODY_JSON             optional JSON merged into text requests
-LARKSCOUT_OCR_EXTRA_BODY_JSON             optional JSON merged into OCR requests
+MANTISFETCH_LLM_API_KEY                     OpenAI-compatible credentials
+MANTISFETCH_LLM_BASE_URL                    OpenAI-compatible base URL
+MANTISFETCH_LLM_MODEL                       text model override
+MANTISFETCH_OCR_MODEL                       OCR vision model override
+MANTISFETCH_OCR_IMAGE_INPUT_MODE            data_url, plain_base64, remote_url_only
+MANTISFETCH_LLM_EXTRA_BODY_JSON             optional JSON merged into text requests
+MANTISFETCH_OCR_EXTRA_BODY_JSON             optional JSON merged into OCR requests
 
-LARKSCOUT_MAX_CONCURRENT_PARSE            default: 2
-LARKSCOUT_LOCAL_OCR_CONCURRENCY           default: 1
-LARKSCOUT_PREWARM_LOCAL_OCR               default: true
-LARKSCOUT_DEFERRED_SUMMARY_MAX_CONCURRENT default: 1
-LARKSCOUT_SUMMARY_BATCH_CONCURRENCY       default: 1
-LARKSCOUT_SUMMARY_REQUEST_MIN_INTERVAL_SEC default: 2.0
-LARKSCOUT_SUMMARY_SECTION_DETAIL_LIMIT    default: 10
+MANTISFETCH_MAX_CONCURRENT_PARSE            default: 2
+MANTISFETCH_LOCAL_OCR_CONCURRENCY           default: 1
+MANTISFETCH_PREWARM_LOCAL_OCR               default: true
+MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT default: 1
+MANTISFETCH_SUMMARY_BATCH_CONCURRENCY       default: 1
+MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC default: 2.0
+MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT    default: 10
 ```
 
 For very large scanned PDFs, keep OCR concurrency conservative and prefer `generate_summary=false` for initial ingestion.
@@ -237,13 +237,13 @@ extract_tables     true or false
 Storage layout:
 
 ```text
-${LARKSCOUT_DOCS_DIR}/General/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Contract/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Bid/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Knowledge/<doc_id>
+${MANTISFETCH_DOCS_DIR}/General/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Contract/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Bid/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Knowledge/<doc_id>
 ```
 
-Legacy flat documents under `${LARKSCOUT_DOCS_DIR}/<doc_id>` remain readable.
+Legacy flat documents under `${MANTISFETCH_DOCS_DIR}/<doc_id>` remain readable.
 
 ### 8. Document Library
 
@@ -288,7 +288,7 @@ Use sidecar endpoints for OCR evidence, scanned table JSON, layout blocks, and p
 
 ### 9. v0.4.0 OCR and Layout Notes
 
-For scanned PDFs, LarkScout may generate:
+For scanned PDFs, MantisFetch may generate:
 
 ```text
 ocr_blocks.json                 OCR text blocks with bbox, confidence, page size, source, stable IDs
@@ -318,7 +318,7 @@ curl -sS http://127.0.0.1:9898/web/health
 End-to-end tests, when running from the repository with Docker service already up:
 
 ```bash
-docker compose exec larkscout pytest tests/e2e/ -v -m "live and not live_llm"
+docker compose exec mantisfetch pytest tests/e2e/ -v -m "live and not live_llm"
 ```
 
 This covers document parsing and web capture without requiring a real LLM summary test.
@@ -337,7 +337,7 @@ This covers document parsing and web capture without requiring a real LLM summar
 
 ## 中文版
 
-你可以部署并操作 LarkScout。它是一个 Agent 原生的网页采集与文档解析服务。
+你可以部署并操作 MantisFetch。它是一个 Agent 原生的网页采集与文档解析服务。
 
 默认服务地址：`http://127.0.0.1:9898`
 
@@ -357,15 +357,15 @@ curl -sS http://127.0.0.1:9898/doc/health
 除非用户明确要求本地 Python 进程，否则优先使用 Docker。
 
 ```bash
-git clone https://github.com/ReadyForAI/LarkScout.git
-cd LarkScout
+git clone https://github.com/ReadyForAI/MantisFetch.git
+cd MantisFetch
 
 # 可选：显式指定宿主机文档库目录。
-mkdir -p "$HOME/.larkscout/docs"
+mkdir -p "$HOME/.mantisfetch/docs"
 
 # Gemini 是默认 LLM provider。
 GEMINI_API_KEY="<你的密钥>" \
-LARKSCOUT_HOST_DOCS_DIR="$HOME/.larkscout/docs" \
+MANTISFETCH_HOST_DOCS_DIR="$HOME/.mantisfetch/docs" \
 docker compose up -d --build
 ```
 
@@ -380,8 +380,8 @@ docker compose ps
 Docker 文档库路径：
 
 ```text
-宿主机： ${LARKSCOUT_HOST_DOCS_DIR:-$HOME/.larkscout/docs}
-容器内： /root/.larkscout/docs
+宿主机： ${MANTISFETCH_HOST_DOCS_DIR:-$HOME/.mantisfetch/docs}
+容器内： /root/.mantisfetch/docs
 ```
 
 ### 3. 备用部署方式：本地 Python
@@ -389,8 +389,8 @@ Docker 文档库路径：
 仅在 Docker 不可用，或用户明确需要本地 Python 进程时使用。
 
 ```bash
-git clone https://github.com/ReadyForAI/LarkScout.git
-cd LarkScout
+git clone https://github.com/ReadyForAI/MantisFetch.git
+cd MantisFetch
 
 python3 -m venv .venv
 . .venv/bin/activate
@@ -404,7 +404,7 @@ pip install -r requirements-ocr-arm64.txt
 pip install -r requirements-ocr-linux-x86_64.txt
 
 export GEMINI_API_KEY="<你的密钥>"
-python larkscout_server.py
+python mantisfetch_server.py
 ```
 
 如果未安装本地 OCR 依赖，原生文本文件和 LLM OCR 路径仍可工作，但扫描 PDF 的本地 OCR sidecar 可能不可用。
@@ -422,11 +422,11 @@ GEMINI_API_KEY="<你的密钥>"
 OpenAI 或 OpenAI 兼容接口：
 
 ```bash
-LARKSCOUT_LLM_PROVIDER=openai
-LARKSCOUT_LLM_VENDOR=openai
-LARKSCOUT_LLM_API_KEY="<你的密钥>"
-LARKSCOUT_LLM_BASE_URL="https://api.openai.com/v1"
-LARKSCOUT_LLM_MODEL="<模型名>"
+MANTISFETCH_LLM_PROVIDER=openai
+MANTISFETCH_LLM_VENDOR=openai
+MANTISFETCH_LLM_API_KEY="<你的密钥>"
+MANTISFETCH_LLM_BASE_URL="https://api.openai.com/v1"
+MANTISFETCH_LLM_MODEL="<模型名>"
 ```
 
 支持的 vendor profile：
@@ -438,10 +438,10 @@ openai, zhipu, kimi, aliyun, volcengine
 Docker 中使用 Ollama 示例：
 
 ```bash
-LARKSCOUT_LLM_PROVIDER=openai \
-LARKSCOUT_LLM_API_KEY=ollama \
-LARKSCOUT_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
-LARKSCOUT_LLM_MODEL=llama3 \
+MANTISFETCH_LLM_PROVIDER=openai \
+MANTISFETCH_LLM_API_KEY=ollama \
+MANTISFETCH_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
+MANTISFETCH_LLM_MODEL=llama3 \
 docker compose up -d
 ```
 
@@ -457,29 +457,29 @@ docker compose up -d
 ```text
 PORT                                      默认 9898
 LANG                                      en 或 zh
-LARKSCOUT_DOCS_DIR                        服务内部文档库目录
-LARKSCOUT_HOST_DOCS_DIR                   Docker 宿主机文档库挂载目录
-LARKSCOUT_DOC_ID_STRATEGY                 counter 或 source_filename
-LARKSCOUT_STORE_SOURCE_FILES              默认 true
+MANTISFETCH_DOCS_DIR                        服务内部文档库目录
+MANTISFETCH_HOST_DOCS_DIR                   Docker 宿主机文档库挂载目录
+MANTISFETCH_DOC_ID_STRATEGY                 counter 或 source_filename
+MANTISFETCH_STORE_SOURCE_FILES              默认 true
 
-LARKSCOUT_LLM_PROVIDER                    gemini 或 openai
-LARKSCOUT_LLM_VENDOR                      openai, zhipu, kimi, aliyun, volcengine
+MANTISFETCH_LLM_PROVIDER                    gemini 或 openai
+MANTISFETCH_LLM_VENDOR                      openai, zhipu, kimi, aliyun, volcengine
 GEMINI_API_KEY / GOOGLE_API_KEY           Gemini 凭证
-LARKSCOUT_LLM_API_KEY                     OpenAI 兼容接口凭证
-LARKSCOUT_LLM_BASE_URL                    OpenAI 兼容接口 base URL
-LARKSCOUT_LLM_MODEL                       文本模型覆盖
-LARKSCOUT_OCR_MODEL                       OCR 视觉模型覆盖
-LARKSCOUT_OCR_IMAGE_INPUT_MODE            data_url, plain_base64, remote_url_only
-LARKSCOUT_LLM_EXTRA_BODY_JSON             额外合并到文本请求的 JSON
-LARKSCOUT_OCR_EXTRA_BODY_JSON             额外合并到 OCR 请求的 JSON
+MANTISFETCH_LLM_API_KEY                     OpenAI 兼容接口凭证
+MANTISFETCH_LLM_BASE_URL                    OpenAI 兼容接口 base URL
+MANTISFETCH_LLM_MODEL                       文本模型覆盖
+MANTISFETCH_OCR_MODEL                       OCR 视觉模型覆盖
+MANTISFETCH_OCR_IMAGE_INPUT_MODE            data_url, plain_base64, remote_url_only
+MANTISFETCH_LLM_EXTRA_BODY_JSON             额外合并到文本请求的 JSON
+MANTISFETCH_OCR_EXTRA_BODY_JSON             额外合并到 OCR 请求的 JSON
 
-LARKSCOUT_MAX_CONCURRENT_PARSE            默认 2
-LARKSCOUT_LOCAL_OCR_CONCURRENCY           默认 1
-LARKSCOUT_PREWARM_LOCAL_OCR               默认 true
-LARKSCOUT_DEFERRED_SUMMARY_MAX_CONCURRENT 默认 1
-LARKSCOUT_SUMMARY_BATCH_CONCURRENCY       默认 1
-LARKSCOUT_SUMMARY_REQUEST_MIN_INTERVAL_SEC 默认 2.0
-LARKSCOUT_SUMMARY_SECTION_DETAIL_LIMIT    默认 10
+MANTISFETCH_MAX_CONCURRENT_PARSE            默认 2
+MANTISFETCH_LOCAL_OCR_CONCURRENCY           默认 1
+MANTISFETCH_PREWARM_LOCAL_OCR               默认 true
+MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT 默认 1
+MANTISFETCH_SUMMARY_BATCH_CONCURRENCY       默认 1
+MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC 默认 2.0
+MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT    默认 10
 ```
 
 处理大型扫描 PDF 时，保持 OCR 并发保守，并优先用 `generate_summary=false` 做初次入库。
@@ -567,13 +567,13 @@ extract_tables     true 或 false
 存储目录结构：
 
 ```text
-${LARKSCOUT_DOCS_DIR}/General/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Contract/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Bid/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Knowledge/<doc_id>
+${MANTISFETCH_DOCS_DIR}/General/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Contract/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Bid/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Knowledge/<doc_id>
 ```
 
-旧版平铺在 `${LARKSCOUT_DOCS_DIR}/<doc_id>` 下的文档仍可读取。
+旧版平铺在 `${MANTISFETCH_DOCS_DIR}/<doc_id>` 下的文档仍可读取。
 
 ### 8. 文档库
 
@@ -618,7 +618,7 @@ OCR 证据、扫描表格 JSON、layout blocks 和页级几何信息应通过 si
 
 ### 9. v0.4.0 OCR 与 Layout 说明
 
-对于扫描 PDF，LarkScout 可能生成：
+对于扫描 PDF，MantisFetch 可能生成：
 
 ```text
 ocr_blocks.json                 OCR 文本块，包含 bbox、置信度、页尺寸、来源和稳定 ID
@@ -648,7 +648,7 @@ curl -sS http://127.0.0.1:9898/web/health
 仓库内已有 Docker 服务运行时，可执行端到端测试：
 
 ```bash
-docker compose exec larkscout pytest tests/e2e/ -v -m "live and not live_llm"
+docker compose exec mantisfetch pytest tests/e2e/ -v -m "live and not live_llm"
 ```
 
 该命令覆盖文档解析和网页采集，不要求真实 LLM 摘要测试。

@@ -4,7 +4,7 @@ Date: 2026-05-04
 
 ## Purpose
 
-LarkScout layout sidecars store low-level OCR geometry for scanned PDFs and image-like pages. The sidecar is intended for table reconstruction, source evidence lookup, region crop export, and targeted region re-recognition.
+MantisFetch layout sidecars store low-level OCR geometry for scanned PDFs and image-like pages. The sidecar is intended for table reconstruction, source evidence lookup, region crop export, and targeted region re-recognition.
 
 Core must keep this layer generic. It must not add business semantics such as invoice number, contract amount, buyer, seller, payment terms, or material type.
 

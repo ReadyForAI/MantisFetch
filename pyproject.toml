@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.backends.legacy:build"
 
 [project]
-name = "larkscout"
+name = "mantisfetch"
 version = "0.1.0"
 description = "Open-source data collection and document parsing platform"
 readme = "README.md"
@@ -26,12 +26,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ReadyForAI/LarkScout"
-Repository = "https://github.com/ReadyForAI/LarkScout"
+Homepage = "https://github.com/ReadyForAI/MantisFetch"
+Repository = "https://github.com/ReadyForAI/MantisFetch"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["larkscout*", "services*", "providers*"]
+include = ["mantisfetch*", "services*", "providers*"]
 
 [tool.ruff]
 target-version = "py311"
@@ -53,6 +53,6 @@ python_functions = ["test_*"]
 addopts = "-v"
 asyncio_mode = "auto"
 markers = [
-    "live: requires a running LarkScout server (localhost:9898) and network access",
+    "live: requires a running MantisFetch server (localhost:9898) and network access",
     "live_llm: requires a running server AND a configured LLM API key",
 ]

@@ -4,12 +4,12 @@ Works with OpenAI and OpenAI-compatible REST APIs such as local Ollama,
 Together AI, Groq, and similar providers via the official OpenAI SDK.
 
 Environment variables:
-  LARKSCOUT_LLM_VENDOR    — Vendor profile for compatible APIs (openai, zhipu, kimi)
-  LARKSCOUT_LLM_API_KEY   — API key (required; use "ollama" for local Ollama)
-  LARKSCOUT_LLM_BASE_URL  — Base URL override (defaults to vendor profile URL)
-  LARKSCOUT_LLM_MODEL     — Model name override (defaults to vendor profile model)
-  LARKSCOUT_OCR_MODEL     — OCR vision model override (defaults to vendor OCR model or text model)
-  LARKSCOUT_OCR_IMAGE_INPUT_MODE — OCR image serialization mode: data_url, plain_base64, remote_url_only
+  MANTISFETCH_LLM_VENDOR    — Vendor profile for compatible APIs (openai, zhipu, kimi)
+  MANTISFETCH_LLM_API_KEY   — API key (required; use "ollama" for local Ollama)
+  MANTISFETCH_LLM_BASE_URL  — Base URL override (defaults to vendor profile URL)
+  MANTISFETCH_LLM_MODEL     — Model name override (defaults to vendor profile model)
+  MANTISFETCH_OCR_MODEL     — OCR vision model override (defaults to vendor OCR model or text model)
+  MANTISFETCH_OCR_IMAGE_INPUT_MODE — OCR image serialization mode: data_url, plain_base64, remote_url_only
 """
 
 import base64
@@ -33,34 +33,34 @@ class OpenAICompatProvider(LLMProvider):
     def __init__(self) -> None:
         from openai import OpenAI
 
-        self._vendor = get_vendor_profile(os.environ.get("LARKSCOUT_LLM_VENDOR"))
-        self._api_key = os.environ.get("LARKSCOUT_LLM_API_KEY", "")
-        base_url = os.environ.get("LARKSCOUT_LLM_BASE_URL") or self._vendor.base_url
+        self._vendor = get_vendor_profile(os.environ.get("MANTISFETCH_LLM_VENDOR"))
+        self._api_key = os.environ.get("MANTISFETCH_LLM_API_KEY", "")
+        base_url = os.environ.get("MANTISFETCH_LLM_BASE_URL") or self._vendor.base_url
         self._base_url = base_url.rstrip("/")
         self._model = (
-            os.environ.get("LARKSCOUT_LLM_MODEL")
+            os.environ.get("MANTISFETCH_LLM_MODEL")
             or self._vendor.default_text_model
             or "gpt-4o-mini"
         )
         self._ocr_model = (
-            os.environ.get("LARKSCOUT_OCR_MODEL")
+            os.environ.get("MANTISFETCH_OCR_MODEL")
             or self._vendor.default_ocr_model
             or self._model
         )
         self._ocr_image_input_mode = self._resolve_image_input_mode(
-            os.environ.get("LARKSCOUT_OCR_IMAGE_INPUT_MODE") or self._vendor.image_input_mode
+            os.environ.get("MANTISFETCH_OCR_IMAGE_INPUT_MODE") or self._vendor.image_input_mode
         )
         self._chat_extra_body = self._merge_extra_body(
             self._vendor.extra_chat_body,
-            os.environ.get("LARKSCOUT_LLM_EXTRA_BODY_JSON"),
-            env_name="LARKSCOUT_LLM_EXTRA_BODY_JSON",
+            os.environ.get("MANTISFETCH_LLM_EXTRA_BODY_JSON"),
+            env_name="MANTISFETCH_LLM_EXTRA_BODY_JSON",
         )
         self._ocr_extra_body = self._merge_extra_body(
             self._vendor.extra_ocr_body,
-            os.environ.get("LARKSCOUT_OCR_EXTRA_BODY_JSON"),
-            env_name="LARKSCOUT_OCR_EXTRA_BODY_JSON",
+            os.environ.get("MANTISFETCH_OCR_EXTRA_BODY_JSON"),
+            env_name="MANTISFETCH_OCR_EXTRA_BODY_JSON",
         )
-        self._ocr_proofread = os.environ.get("LARKSCOUT_OCR_PROOFREAD", "true").strip().lower() not in {
+        self._ocr_proofread = os.environ.get("MANTISFETCH_OCR_PROOFREAD", "true").strip().lower() not in {
             "0",
             "false",
             "no",
@@ -69,7 +69,7 @@ class OpenAICompatProvider(LLMProvider):
 
         if not self._api_key:
             raise RuntimeError(
-                "LARKSCOUT_LLM_API_KEY is not set. "
+                "MANTISFETCH_LLM_API_KEY is not set. "
                 "Export it before starting the service."
             )
 
@@ -86,7 +86,7 @@ class OpenAICompatProvider(LLMProvider):
         allowed = {"data_url", "plain_base64", "remote_url_only"}
         if mode not in allowed:
             raise RuntimeError(
-                "LARKSCOUT_OCR_IMAGE_INPUT_MODE must be one of: "
+                "MANTISFETCH_OCR_IMAGE_INPUT_MODE must be one of: "
                 "data_url, plain_base64, remote_url_only."
             )
         return mode
@@ -132,7 +132,7 @@ class OpenAICompatProvider(LLMProvider):
             url = b64
         else:
             raise RuntimeError(
-                "LARKSCOUT_OCR_IMAGE_INPUT_MODE=remote_url_only is not supported by the "
+                "MANTISFETCH_OCR_IMAGE_INPUT_MODE=remote_url_only is not supported by the "
                 "current OCR pipeline because it renders pages in-memory and does not have "
                 "a hosted image URL to send upstream."
             )

@@ -55,12 +55,12 @@ class TestLLMProviderInterface:
 class TestGeminiProvider:
     def test_get_provider_returns_gemini_by_default(self, monkeypatch):
         """With no env var, get_provider() returns a GeminiProvider."""
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         p = get_provider()
         assert "gemini" in type(p).__name__.lower()
 
     def test_gemini_provider_is_llm_provider(self, monkeypatch):
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         p = get_provider()
         assert isinstance(p, LLMProvider)
 
@@ -68,7 +68,7 @@ class TestGeminiProvider:
         """C38: concurrent cold get_provider() calls must share one instance."""
         import threading
 
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         reset_provider()
         results: list[LLMProvider] = []
         barrier = threading.Barrier(8)
@@ -88,7 +88,7 @@ class TestGeminiProvider:
 
     def test_gemini_summarize_delegates_to_sdk(self, monkeypatch):
         """GeminiProvider.summarize() calls client.models.generate_content."""
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
         mock_response = MagicMock()
@@ -108,7 +108,7 @@ class TestGeminiProvider:
 
     def test_gemini_ocr_delegates_to_sdk(self, monkeypatch):
         """GeminiProvider.ocr() calls client.models.generate_content with an image."""
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
         mock_response = MagicMock()
@@ -151,29 +151,29 @@ class TestGeminiProvider:
 
 class TestOpenAICompatProvider:
     def test_get_provider_returns_openai_compat(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
         p = get_provider()
         assert "openai" in type(p).__name__.lower()
 
     def test_openai_compat_is_llm_provider(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
         p = get_provider()
         assert isinstance(p, LLMProvider)
 
     def test_openai_compat_missing_api_key_raises(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.delenv("LARKSCOUT_LLM_API_KEY", raising=False)
-        with pytest.raises(RuntimeError, match="LARKSCOUT_LLM_API_KEY"):
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.delenv("MANTISFETCH_LLM_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="MANTISFETCH_LLM_API_KEY"):
             get_provider()
 
     def test_openai_compat_summarize_calls_openai_sdk(self, monkeypatch):
         """OpenAICompatProvider.summarize() uses the official OpenAI SDK."""
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_LLM_BASE_URL", "https://api.example.com/v1")
-        monkeypatch.setenv("LARKSCOUT_LLM_MODEL", "gpt-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_BASE_URL", "https://api.example.com/v1")
+        monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "gpt-test")
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -198,12 +198,12 @@ class TestOpenAICompatProvider:
         assert call_kwargs["model"] == "gpt-test"
 
     def test_openai_compat_uses_vendor_defaults_when_overrides_absent(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_VENDOR", "zhipu")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.delenv("LARKSCOUT_LLM_BASE_URL", raising=False)
-        monkeypatch.delenv("LARKSCOUT_LLM_MODEL", raising=False)
-        monkeypatch.delenv("LARKSCOUT_OCR_MODEL", raising=False)
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_VENDOR", "zhipu")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.delenv("MANTISFETCH_LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_MODEL", raising=False)
+        monkeypatch.delenv("MANTISFETCH_OCR_MODEL", raising=False)
 
         mock_client = MagicMock()
         mock_openai = MagicMock()
@@ -224,8 +224,8 @@ class TestOpenAICompatProvider:
 
     def test_openai_compat_ocr_sends_base64_image(self, monkeypatch):
         """OpenAICompatProvider.ocr() encodes image as base64 and sends multipart content."""
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -248,10 +248,10 @@ class TestOpenAICompatProvider:
         assert mock_client.chat.completions.create.call_count == 2
 
     def test_openai_compat_ocr_uses_dedicated_ocr_model_when_set(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_LLM_MODEL", "glm-5.1")
-        monkeypatch.setenv("LARKSCOUT_OCR_MODEL", "glm-4.6v")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "glm-5.1")
+        monkeypatch.setenv("MANTISFETCH_OCR_MODEL", "glm-4.6v")
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -268,9 +268,9 @@ class TestOpenAICompatProvider:
         assert call_kwargs["model"] == "glm-4.6v"
 
     def test_openai_compat_ocr_proofread_can_be_disabled(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_OCR_PROOFREAD", "false")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_OCR_PROOFREAD", "false")
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -286,9 +286,9 @@ class TestOpenAICompatProvider:
         assert mock_client.chat.completions.create.call_count == 1
 
     def test_openai_compat_ocr_supports_plain_base64_mode(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_OCR_IMAGE_INPUT_MODE", "plain_base64")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_OCR_IMAGE_INPUT_MODE", "plain_base64")
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -305,9 +305,9 @@ class TestOpenAICompatProvider:
         assert image_part["image_url"]["url"] == "iVBORw=="
 
     def test_openai_compat_ocr_rejects_remote_url_only_mode(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_OCR_IMAGE_INPUT_MODE", "remote_url_only")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_OCR_IMAGE_INPUT_MODE", "remote_url_only")
 
         mock_client = MagicMock()
         mock_openai = MagicMock()
@@ -319,20 +319,20 @@ class TestOpenAICompatProvider:
                 p.ocr(b"\x89PNG", page_num=2)
 
     def test_openai_compat_rejects_invalid_image_input_mode(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_OCR_IMAGE_INPUT_MODE", "bad_mode")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_OCR_IMAGE_INPUT_MODE", "bad_mode")
 
         mock_openai = MagicMock()
 
         with patch.dict("sys.modules", {"openai": mock_openai}):
-            with pytest.raises(RuntimeError, match="LARKSCOUT_OCR_IMAGE_INPUT_MODE"):
+            with pytest.raises(RuntimeError, match="MANTISFETCH_OCR_IMAGE_INPUT_MODE"):
                 get_provider()
 
     def test_openai_compat_merges_ocr_extra_body_json(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_OCR_EXTRA_BODY_JSON", '{"image_url_detail":"high"}')
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_OCR_EXTRA_BODY_JSON", '{"image_url_detail":"high"}')
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -349,9 +349,9 @@ class TestOpenAICompatProvider:
         assert call_kwargs["extra_body"]["image_url_detail"] == "high"
 
     def test_openai_compat_merges_text_extra_body_json(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_LLM_EXTRA_BODY_JSON", '{"reasoning_effort":"low"}')
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_EXTRA_BODY_JSON", '{"reasoning_effort":"low"}')
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -368,14 +368,14 @@ class TestOpenAICompatProvider:
         assert call_kwargs["extra_body"]["reasoning_effort"] == "low"
 
     def test_openai_compat_rejects_invalid_extra_body_json(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "openai")
-        monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("LARKSCOUT_OCR_EXTRA_BODY_JSON", "[1,2,3]")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_OCR_EXTRA_BODY_JSON", "[1,2,3]")
 
         mock_openai = MagicMock()
 
         with patch.dict("sys.modules", {"openai": mock_openai}):
-            with pytest.raises(RuntimeError, match="LARKSCOUT_OCR_EXTRA_BODY_JSON"):
+            with pytest.raises(RuntimeError, match="MANTISFETCH_OCR_EXTRA_BODY_JSON"):
                 get_provider()
 
 
@@ -418,13 +418,13 @@ class TestVendorProfiles:
 
 class TestProviderCaching:
     def test_same_instance_returned_on_repeated_calls(self, monkeypatch):
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         p1 = get_provider()
         p2 = get_provider()
         assert p1 is p2
 
     def test_reset_clears_cache(self, monkeypatch):
-        monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         p1 = get_provider()
         reset_provider()
         p2 = get_provider()
@@ -435,6 +435,6 @@ class TestProviderCaching:
 
 class TestUnknownProvider:
     def test_unknown_provider_raises_value_error(self, monkeypatch):
-        monkeypatch.setenv("LARKSCOUT_LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "anthropic")
         with pytest.raises(ValueError, match="anthropic"):
             get_provider()

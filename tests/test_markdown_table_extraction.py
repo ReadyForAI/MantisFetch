@@ -3,7 +3,7 @@ check that anchors it. Covers fence-marker matching, indented code blocks,
 and strict GFM separator semantics — issue #65."""
 
 import pytest
-from larkscout_docreader import _extract_markdown_table_blocks, _is_markdown_table_separator
+from mantisfetch_docreader import _extract_markdown_table_blocks, _is_markdown_table_separator
 
 
 class TestIsMarkdownTableSeparator:

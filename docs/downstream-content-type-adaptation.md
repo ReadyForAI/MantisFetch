@@ -1,4 +1,4 @@
-# LarkScout Content Type Adaptation for Downstream Apps
+# MantisFetch Content Type Adaptation for Downstream Apps
 
 Date: 2026-05-10
 
@@ -8,7 +8,7 @@ Audience:
 
 ## Summary
 
-LarkScout now supports categorized document-library storage. New ingestion calls can specify `content_type`; LarkScout stores the document under a category directory and records the path in `doc-index.json` and `manifest.json`.
+MantisFetch now supports categorized document-library storage. New ingestion calls can specify `content_type`; MantisFetch stores the document under a category directory and records the path in `doc-index.json` and `manifest.json`.
 
 Supported values:
 
@@ -28,16 +28,16 @@ General
 New physical layout:
 
 ```text
-${LARKSCOUT_DOCS_DIR}/General/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Contract/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Bid/<doc_id>
-${LARKSCOUT_DOCS_DIR}/Knowledge/<doc_id>
+${MANTISFETCH_DOCS_DIR}/General/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Contract/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Bid/<doc_id>
+${MANTISFETCH_DOCS_DIR}/Knowledge/<doc_id>
 ```
 
 Legacy flat documents remain readable:
 
 ```text
-${LARKSCOUT_DOCS_DIR}/<doc_id>
+${MANTISFETCH_DOCS_DIR}/<doc_id>
 ```
 
 ## Shared Contract
@@ -95,7 +95,7 @@ Preferred resolution:
 4. Otherwise, try category locations in this order: `General`, `Contract`, `Bid`, `Knowledge`.
 5. Finally fall back to legacy `docs_dir / doc_id`.
 
-Direct LarkScout HTTP reads are unchanged:
+Direct MantisFetch HTTP reads are unchanged:
 
 ```http
 GET /doc/library/{doc_id}/manifest
@@ -126,7 +126,7 @@ Contract
 
 ### Ingestion
 
-When a contract file is uploaded through the contract-management flow, call LarkScout with:
+When a contract file is uploaded through the contract-management flow, call MantisFetch with:
 
 ```bash
 curl -sS --fail-with-body -X POST http://127.0.0.1:9898/doc/parse \
@@ -194,7 +194,7 @@ Bid
 
 ### Ingestion
 
-For tender documents and Word bid files that should become official review inputs, call LarkScout with:
+For tender documents and Word bid files that should become official review inputs, call MantisFetch with:
 
 ```bash
 curl -sS --fail-with-body -X POST http://127.0.0.1:9898/doc/parse \
@@ -226,7 +226,7 @@ Keep the existing PDF bid-file boundary:
 
 ### File Access
 
-Update the Bid Manager LarkScout document loader/path resolver:
+Update the Bid Manager MantisFetch document loader/path resolver:
 
 ```text
 v2-1101-3 -> docs/Bid/v2-1101-3
@@ -285,9 +285,9 @@ GET /doc/library/search_text?q=学历证明&content_type=Bid
 
 - Existing `doc_id` values remain valid.
 - Existing flat document libraries do not require migration.
-- New LarkScout writes go to categorized directories when `content_type` is supplied.
+- New MantisFetch writes go to categorized directories when `content_type` is supplied.
 - If callers omit `content_type`, new documents go to `General`.
 - Business apps should set `content_type` explicitly to avoid mixed libraries:
   - `contract-manage`: `Contract`
   - `bid-manage`: `Bid`
-- Do not encode business semantics into LarkScout metadata beyond caller-owned tags/metadata. LarkScout remains the parsing, OCR, sidecar, and document-library layer.
+- Do not encode business semantics into MantisFetch metadata beyond caller-owned tags/metadata. MantisFetch remains the parsing, OCR, sidecar, and document-library layer.

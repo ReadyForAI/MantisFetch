@@ -1,7 +1,7 @@
-# LarkScout
+# MantisFetch
 
 Open-source data collection and document parsing platform by ReadyForAI.
-MIT License. GitHub: ReadyForAI/LarkScout. Default port: 9898.
+MIT License. GitHub: ReadyForAI/MantisFetch. Default port: 9898.
 
 ## 1. Think Before Coding
 
@@ -75,12 +75,12 @@ Single-process FastAPI application with two mounted sub-apps:
 - `/web/*` — Browser service (Playwright-based web scraping, semantic distillation, WebMCP)
 - `/doc/*` — Document reader (PDF/DOCX parsing, OCR, three-tier summaries)
 
-Unified entry point: `larkscout_server.py` (planned)
+Unified entry point: `mantisfetch_server.py` (planned)
 
 Key source files:
 
-- `larkscout_browser.py` — Web browser service (~2100 lines)
-- `larkscout_docreader.py` — Document parsing service (~1300 lines)
+- `mantisfetch_browser.py` — Web browser service (~2100 lines)
+- `mantisfetch_docreader.py` — Document parsing service (~1300 lines)
 - `i18n.py` — Internationalization (zh/en, default en, LANG env switch)
 
 ## Tech Stack
@@ -103,27 +103,27 @@ Key source files:
 ## Project Structure
 
 ```
-larkscout/
-├── larkscout_server.py          # Unified entry (mounts /web and /doc)
-├── larkscout_browser.py         # Browser service
-├── larkscout_docreader.py       # Document reader service
+mantisfetch/
+├── mantisfetch_server.py          # Unified entry (mounts /web and /doc)
+├── mantisfetch_browser.py         # Browser service
+├── mantisfetch_docreader.py       # Document reader service
 ├── i18n.py                      # Internationalization
 ├── requirements.txt
 ├── tests/
 │   ├── test_browser.py
 │   └── test_docreader.py
 ├── docs/                        # Design documents
-│   └── larkscout_opensource_design.md
+│   └── mantisfetch_opensource_design.md
 └── skills/                      # Agent SKILL files
-    ├── larkscout-browser-SKILL.md
-    └── larkscout-docreader-SKILL.md
+    ├── mantisfetch-browser-SKILL.md
+    └── mantisfetch-docreader-SKILL.md
 ```
 
 ## Commands
 
 ```bash
 # Run the service
-python larkscout_server.py                    # default port 9898
+python mantisfetch_server.py                    # default port 9898
 
 # Lint
 ruff check .
@@ -135,7 +135,7 @@ ruff format .
 pytest tests/ -v
 
 # Type check (optional)
-pyright larkscout_*.py
+pyright mantisfetch_*.py
 ```
 
 ## Key Design Decisions
@@ -149,5 +149,5 @@ pyright larkscout_*.py
 ## Before Making Changes
 
 1. Read relevant SKILL files in `skills/` to understand API contracts
-2. Check `docs/larkscout_opensource_design.md` for feature boundaries (open-source vs commercial)
+2. Check `docs/mantisfetch_opensource_design.md` for feature boundaries (open-source vs commercial)
 3. Run `ruff check .` and `pytest tests/ -v` before committing

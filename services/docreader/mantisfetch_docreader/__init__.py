@@ -26,9 +26,9 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
-from larkscout_common.atomic import _write_json, _write_text
-from larkscout_common.paths import _mask_path
-from larkscout_common.storage import (
+from mantisfetch_common.atomic import _write_json, _write_text
+from mantisfetch_common.paths import _mask_path
+from mantisfetch_common.storage import (
     DEFAULT_DOCS_DIR,
     _doc_storage_dir,
     _doc_storage_rel_path,
@@ -74,7 +74,7 @@ from .models import (
 )
 
 # Profile-domain model classes used by profiles.py, kept on the facade so
-# `from larkscout_docreader import FieldGroup, ...` keeps resolving.
+# `from mantisfetch_docreader import FieldGroup, ...` keeps resolving.
 from .models import (
     CachePolicy as CachePolicy,
 )
@@ -273,7 +273,7 @@ from .pdf_planning import (
 )
 
 # Document-profile loading + profile-driven field extraction. Re-exported so
-# parse_pdf, the /doc/parse endpoint, and `from larkscout_docreader import X`
+# parse_pdf, the /doc/parse endpoint, and `from mantisfetch_docreader import X`
 # tests keep resolving these names off the facade with no behavior change.
 from .profiles import (
     _DOCUMENT_PROFILE_ALIASES as _DOCUMENT_PROFILE_ALIASES,
@@ -458,7 +458,7 @@ from .sectioning import (
 
 # Docreader-side storage: doc_id reservation, doc-index read/write, doc-dir
 # resolution. Re-exported as shared references (locks/WeakValueDictionary are
-# mutated in place) so endpoints and `from larkscout_docreader import X` keep
+# mutated in place) so endpoints and `from mantisfetch_docreader import X` keep
 # working with no behavior change.
 from .storage import (
     _DOC_ID_RE as _DOC_ID_RE,
@@ -679,14 +679,14 @@ from .word import (
 
 init_locale()
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
 # ═══════════════════════════════════════════
 # Config
 # ═══════════════════════════════════════════
-MAX_PARSE_ROWS = int(os.environ.get("LARKSCOUT_MAX_PARSE_ROWS", "100000"))
-_MAX_CONCURRENT_PARSE = int(os.environ.get("LARKSCOUT_MAX_CONCURRENT_PARSE", "2"))
+MAX_PARSE_ROWS = int(os.environ.get("MANTISFETCH_MAX_PARSE_ROWS", "100000"))
+_MAX_CONCURRENT_PARSE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_PARSE", "2"))
 _parse_sem = asyncio.Semaphore(_MAX_CONCURRENT_PARSE)
 
 # Bound concurrent upload reads so a burst of large requests can't allocate
@@ -694,7 +694,7 @@ _parse_sem = asyncio.Semaphore(_MAX_CONCURRENT_PARSE)
 # and `_parse_sem` are deliberately downstream — this gate covers only the
 # upload-buffer footprint.
 _MAX_CONCURRENT_UPLOAD = int(
-    os.environ.get("LARKSCOUT_MAX_CONCURRENT_UPLOAD", str(_MAX_CONCURRENT_PARSE))
+    os.environ.get("MANTISFETCH_MAX_CONCURRENT_UPLOAD", str(_MAX_CONCURRENT_PARSE))
 )
 _upload_sem = asyncio.Semaphore(_MAX_CONCURRENT_UPLOAD)
 
@@ -759,7 +759,7 @@ def _convert_legacy_office(filepath: Path, target_ext: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     user_install = filepath.parent / "libreoffice-profile"
     user_install.mkdir(parents=True, exist_ok=True)
-    timeout = int(os.environ.get("LARKSCOUT_OFFICE_CONVERT_TIMEOUT_SEC", "120"))
+    timeout = int(os.environ.get("MANTISFETCH_OFFICE_CONVERT_TIMEOUT_SEC", "120"))
     cmd = [
         _office_converter_binary(),
         "--headless",
@@ -829,29 +829,29 @@ def _estimate_tokens(text: str) -> int:
 # Smart OCR detection
 # ═══════════════════════════════════════════
 
-OCR_RENDER_SCALE = float(os.environ.get("LARKSCOUT_OCR_RENDER_SCALE", "3.0"))
-LOCAL_OCR_RENDER_SCALE = float(os.environ.get("LARKSCOUT_LOCAL_OCR_RENDER_SCALE", "2.0"))
+OCR_RENDER_SCALE = float(os.environ.get("MANTISFETCH_OCR_RENDER_SCALE", "3.0"))
+LOCAL_OCR_RENDER_SCALE = float(os.environ.get("MANTISFETCH_LOCAL_OCR_RENDER_SCALE", "2.0"))
 DEFERRED_SUMMARY_MAX_CONCURRENT = max(
     1,
-    int(os.environ.get("LARKSCOUT_DEFERRED_SUMMARY_MAX_CONCURRENT", "1")),
+    int(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT", "1")),
 )
 DEFERRED_SUMMARY_TIMEOUT_SEC = max(
     10.0,
-    float(os.environ.get("LARKSCOUT_DEFERRED_SUMMARY_TIMEOUT_SEC", "180")),
+    float(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_TIMEOUT_SEC", "180")),
 )
 DEFERRED_SUMMARY_MAX_ATTEMPTS = max(
     1,
-    int(os.environ.get("LARKSCOUT_DEFERRED_SUMMARY_MAX_ATTEMPTS", "3")),
+    int(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_MAX_ATTEMPTS", "3")),
 )
 WORD_IMAGE_OCR_MAX_IMAGES = max(
     0,
-    int(os.environ.get("LARKSCOUT_WORD_IMAGE_OCR_MAX_IMAGES", "80")),
+    int(os.environ.get("MANTISFETCH_WORD_IMAGE_OCR_MAX_IMAGES", "80")),
 )
 
 
 _deferred_summary_sem = threading.BoundedSemaphore(DEFERRED_SUMMARY_MAX_CONCURRENT)
 DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC = float(
-    os.environ.get("LARKSCOUT_DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC", "30")
+    os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC", "30")
 )
 
 
@@ -1418,9 +1418,9 @@ def _safe_filename(title: str, max_len: int = 40) -> str:
 # HTTP API（FastAPI）
 # ═══════════════════════════════════════════
 
-MAX_UPLOAD_BYTES = int(os.environ.get("LARKSCOUT_MAX_UPLOAD_MB", "200")) * 1024 * 1024
-SEARCH_LIMIT_MAX = int(os.environ.get("LARKSCOUT_SEARCH_LIMIT_MAX", "200"))
-STORE_SOURCE_FILES = os.environ.get("LARKSCOUT_STORE_SOURCE_FILES", "true").lower() not in {
+MAX_UPLOAD_BYTES = int(os.environ.get("MANTISFETCH_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+SEARCH_LIMIT_MAX = int(os.environ.get("MANTISFETCH_SEARCH_LIMIT_MAX", "200"))
+STORE_SOURCE_FILES = os.environ.get("MANTISFETCH_STORE_SOURCE_FILES", "true").lower() not in {
     "0",
     "false",
     "no",
@@ -1544,7 +1544,7 @@ class ChunkRequest(BaseModel):
 # ---- FastAPI app ----
 
 app = FastAPI(title="Doc Reader API", version="3.0.0")
-PREWARM_LOCAL_OCR = os.environ.get("LARKSCOUT_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
+PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
     "0",
     "false",
     "no",
@@ -2465,7 +2465,7 @@ async def api_parse_doc(
     scratch_dir.mkdir(parents=True, exist_ok=True)
     async with _upload_sem:
         scratch_fd, scratch_path_str = tempfile.mkstemp(
-            suffix=suffix, prefix="larkscout-upload-", dir=str(scratch_dir)
+            suffix=suffix, prefix="mantisfetch-upload-", dir=str(scratch_dir)
         )
         scratch_path = Path(scratch_path_str)
         total_size = 0
@@ -2491,7 +2491,7 @@ async def api_parse_doc(
             # The outer try/finally below only catches errors raised after
             # upload completes. Clean up the scratch file here if the upload
             # itself failed (413, read error, etc.) so /tmp doesn't accumulate
-            # `larkscout-upload-*` files from rejected requests.
+            # `mantisfetch-upload-*` files from rejected requests.
             if not upload_ok:
                 try:
                     scratch_path.unlink()
@@ -2586,13 +2586,13 @@ async def api_parse_doc(
             # already rejected with 422 in the early form validation above.
             requested_parse_mode = (
                 str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
-                or os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "").strip()
+                or os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip()
                 or None
             )
             field_ocr_profile = (
                 str(document_profile or parsed_metadata.get("document_profile") or "").strip()
                 or str(parsed_metadata.get("field_ocr_profile") or "").strip()
-                or os.environ.get("LARKSCOUT_FIELD_OCR_PROFILE", "").strip()
+                or os.environ.get("MANTISFETCH_FIELD_OCR_PROFILE", "").strip()
                 or None
             )
             if field_ocr_profile:
@@ -2603,7 +2603,7 @@ async def api_parse_doc(
                         parsed_metadata["document_profile"] = canonical_profile
             requested_field_ocr_config = (
                 str(field_ocr_config or parsed_metadata.get("field_ocr_config") or "").strip()
-                or os.environ.get("LARKSCOUT_FIELD_OCR_CONFIG", "").strip()
+                or os.environ.get("MANTISFETCH_FIELD_OCR_CONFIG", "").strip()
                 or None
             )
             requested_summary_mode = (
@@ -3513,7 +3513,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8090"))
 
     DEFAULT_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info(f"LarkScout DocReader API v3.0 starting: {host}:{port}")
+    logger.info(f"MantisFetch DocReader API v3.0 starting: {host}:{port}")
     logger.info(f"Docs directory: {DEFAULT_DOCS_DIR}")
 
     uvicorn.run(app, host=host, port=port)

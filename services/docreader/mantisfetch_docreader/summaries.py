@@ -31,28 +31,28 @@ from i18n import prompt_for_locale, t
 
 from .models import DocumentProfile, ParsedDocument, Section
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 SUMMARY_MAX_CHARS = 500
 SUMMARY_BATCH_CONCURRENCY = max(
     1,
-    int(os.environ.get("LARKSCOUT_SUMMARY_BATCH_CONCURRENCY", "1")),
+    int(os.environ.get("MANTISFETCH_SUMMARY_BATCH_CONCURRENCY", "1")),
 )
 SUMMARY_REQUEST_MIN_INTERVAL_SEC = max(
     0.0,
-    float(os.environ.get("LARKSCOUT_SUMMARY_REQUEST_MIN_INTERVAL_SEC", "2.0")),
+    float(os.environ.get("MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC", "2.0")),
 )
 SUMMARY_SECTION_DETAIL_LIMIT = max(
     1,
-    int(os.environ.get("LARKSCOUT_SUMMARY_SECTION_DETAIL_LIMIT", "10")),
+    int(os.environ.get("MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT", "10")),
 )
 SUMMARY_BRIEF_SECTION_EXCERPT_CHARS = max(
     200,
-    int(os.environ.get("LARKSCOUT_SUMMARY_BRIEF_SECTION_EXCERPT_CHARS", "1200")),
+    int(os.environ.get("MANTISFETCH_SUMMARY_BRIEF_SECTION_EXCERPT_CHARS", "1200")),
 )
 SUMMARY_BRIEF_MAX_INPUT_CHARS = max(
     4000,
-    int(os.environ.get("LARKSCOUT_SUMMARY_BRIEF_MAX_INPUT_CHARS", "32000")),
+    int(os.environ.get("MANTISFETCH_SUMMARY_BRIEF_MAX_INPUT_CHARS", "32000")),
 )
 
 _summary_llm_lock = threading.Lock()
@@ -319,7 +319,7 @@ def _resolve_summary_mode(
 
     mode = (requested_mode or "").strip().lower()
     if not mode:
-        mode = os.environ.get("LARKSCOUT_SUMMARY_MODE", "").strip().lower()
+        mode = os.environ.get("MANTISFETCH_SUMMARY_MODE", "").strip().lower()
 
     if mode in {"off", "sync", "defer"}:
         return mode

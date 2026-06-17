@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from services.docreader.larkscout_docreader import parse_generic
+from services.docreader.mantisfetch_docreader import parse_generic
 
 
 def test_parse_text_json_jsonl_xml_formats(tmp_path: Path) -> None:

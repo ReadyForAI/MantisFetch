@@ -133,7 +133,7 @@ def _resolve_pdf_parse_mode(profile: DocumentProfile | None, requested_mode: str
     if not mode and profile:
         mode = profile.upgrade_policy.default_mode
     if not mode:
-        mode = os.environ.get("LARKSCOUT_PDF_PARSE_MODE", "accurate").strip().lower()
+        mode = os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "accurate").strip().lower()
     # A bad final mode here means env/profile misconfiguration (client-supplied
     # parse_mode is validated → 422 at the /parse handler before this point), so
     # surface it as a server error.

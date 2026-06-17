@@ -1,6 +1,6 @@
-# Contributing to LarkScout
+# Contributing to MantisFetch
 
-Thank you for your interest in contributing to LarkScout! This guide covers everything you need to get started.
+Thank you for your interest in contributing to MantisFetch! This guide covers everything you need to get started.
 
 ## Table of Contents
 
@@ -20,8 +20,8 @@ Thank you for your interest in contributing to LarkScout! This guide covers ever
 
 ```bash
 # 1. Fork and clone
-git clone https://github.com/<your-fork>/LarkScout.git
-cd LarkScout
+git clone https://github.com/<your-fork>/MantisFetch.git
+cd MantisFetch
 
 # 2. Create a virtual environment
 python -m venv .venv
@@ -35,10 +35,10 @@ pip install ruff pytest       # dev tools
 playwright install chromium
 
 # 5. Set your LLM API key
-export GEMINI_API_KEY=your_key_here   # or LARKSCOUT_LLM_API_KEY for OpenAI-compat
+export GEMINI_API_KEY=your_key_here   # or MANTISFETCH_LLM_API_KEY for OpenAI-compat
 
 # 6. Start the server
-python larkscout_server.py   # http://localhost:9898
+python mantisfetch_server.py   # http://localhost:9898
 ```
 
 ### Docker alternative
@@ -55,13 +55,13 @@ docker compose up --build
 ## Project Structure
 
 ```
-LarkScout/
-├── larkscout_server.py          # Unified entry point (mounts /web and /doc)
+MantisFetch/
+├── mantisfetch_server.py          # Unified entry point (mounts /web and /doc)
 ├── services/
 │   ├── browser/
-│   │   └── larkscout_browser.py # Playwright web capture & distillation
+│   │   └── mantisfetch_browser.py # Playwright web capture & distillation
 │   └── docreader/
-│       └── larkscout_docreader.py # PDF/DOCX/XLSX/CSV parser
+│       └── mantisfetch_docreader.py # PDF/DOCX/XLSX/CSV parser
 ├── providers/                   # LLM provider abstraction
 │   ├── base.py                  # Abstract LLMProvider
 │   ├── gemini.py                # Google Gemini backend
@@ -74,13 +74,13 @@ LarkScout/
 └── requirements.txt
 ```
 
-Key design decisions are documented in `CLAUDE.md` and `docs/larkscout_opensource_design.md`.
+Key design decisions are documented in `CLAUDE.md` and `docs/mantisfetch_opensource_design.md`.
 
 ---
 
 ## Code Conventions
 
-LarkScout follows the conventions in `CLAUDE.md`. The highlights:
+MantisFetch follows the conventions in `CLAUDE.md`. The highlights:
 
 | Rule | Detail |
 |---|---|
@@ -199,7 +199,7 @@ What you expected to happen.
 **Environment**
 - OS:
 - Python version:
-- LarkScout version / commit:
+- MantisFetch version / commit:
 - LLM provider:
 ```
 
@@ -220,7 +220,7 @@ Other approaches you thought about.
 
 ## Code of Conduct
 
-LarkScout is an open, welcoming project. We expect all contributors to:
+MantisFetch is an open, welcoming project. We expect all contributors to:
 
 - Be respectful and constructive in all communications
 - Welcome newcomers and help them get started
@@ -231,4 +231,4 @@ Violations can be reported to opensource@readyfor.ai.
 
 ---
 
-Thank you for helping make LarkScout better!
+Thank you for helping make MantisFetch better!

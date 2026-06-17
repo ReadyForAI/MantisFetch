@@ -1,12 +1,12 @@
 """Shared fixtures and marker configuration for E2E tests.
 
-E2E tests require a running LarkScout server on localhost:9898.
+E2E tests require a running MantisFetch server on localhost:9898.
 They are decorated with ``@pytest.mark.live`` and are skipped by default.
 
 To run them::
 
     # Start the server first
-    python larkscout_server.py &
+    python mantisfetch_server.py &
 
     # Then run with the live marker
     pytest tests/e2e/ -v -m live --timeout=60
@@ -20,7 +20,7 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register the ``live`` marker to suppress PytestUnknownMarkWarning."""
     config.addinivalue_line(
         "markers",
-        "live: requires a running LarkScout server (localhost:9898) and network access",
+        "live: requires a running MantisFetch server (localhost:9898) and network access",
     )
 
 
@@ -40,7 +40,7 @@ def pytest_collection_modifyitems(
 
 @pytest.fixture(scope="session")
 def base_url() -> str:
-    """Base URL of the running LarkScout service."""
+    """Base URL of the running MantisFetch service."""
     return "http://localhost:9898"
 
 

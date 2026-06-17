@@ -3,7 +3,7 @@
 Pure leaf module: dataclasses for parsed-document content, OCR layout sidecars,
 and document-profile policies, plus the two helpers they depend on (the OCR
 sidecar contract constants and the bbox normalizer). Imported by the service
-package's ``__init__`` and re-exported, so ``larkscout_docreader.Section`` etc.
+package's ``__init__`` and re-exported, so ``mantisfetch_docreader.Section`` etc.
 resolve unchanged. Must not import from the package ``__init__`` (would create a
 circular import).
 """

@@ -1,20 +1,20 @@
-"""LarkScout Python SDK.
+"""MantisFetch Python SDK.
 
-Lightweight sync and async clients for the LarkScout API.
+Lightweight sync and async clients for the MantisFetch API.
 
 Basic usage (sync)::
 
-    from larkscout_client import LarkScoutClient
+    from mantisfetch_client import MantisFetchClient
 
-    client = LarkScoutClient("http://localhost:9898")
+    client = MantisFetchClient("http://localhost:9898")
     result = client.capture("https://example.com")
     print(result["doc_id"])
 
 Basic usage (async)::
 
-    from larkscout_client import AsyncLarkScoutClient
+    from mantisfetch_client import AsyncMantisFetchClient
 
-    async with AsyncLarkScoutClient("http://localhost:9898") as client:
+    async with AsyncMantisFetchClient("http://localhost:9898") as client:
         result = await client.capture("https://example.com")
         print(result["doc_id"])
 """
@@ -41,8 +41,8 @@ _CONTENT_TYPE_LOOKUP = {v.lower(): v for v in CONTENT_TYPES}
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 
-class LarkScoutAPIError(Exception):
-    """Raised when the LarkScout API returns an error response.
+class MantisFetchAPIError(Exception):
+    """Raised when the MantisFetch API returns an error response.
 
     Carries the server-provided ``detail`` (e.g. the 409 "already exists" or 422
     validation message) which httpx's ``raise_for_status()`` would otherwise drop.
@@ -65,10 +65,10 @@ def _raise_for_status(resp: Any) -> None:
             detail = body.get("detail")
     except Exception:
         detail = None
-    message = f"LarkScout API {resp.status_code} {resp.reason_phrase}"
+    message = f"MantisFetch API {resp.status_code} {resp.reason_phrase}"
     if detail:
         message += f": {detail}"
-    raise LarkScoutAPIError(message, status_code=resp.status_code, detail=detail)
+    raise MantisFetchAPIError(message, status_code=resp.status_code, detail=detail)
 
 
 def _validate_content_type(value: str) -> str:
@@ -114,14 +114,14 @@ def _doc_id_like(value: str) -> bool:
 # ── sync client ───────────────────────────────────────────────────────────────
 
 
-class LarkScoutClient:
-    """Synchronous LarkScout API client.
+class MantisFetchClient:
+    """Synchronous MantisFetch API client.
 
     Args:
-        base_url: Base URL of the LarkScout service (default: http://localhost:9898).
+        base_url: Base URL of the MantisFetch service (default: http://localhost:9898).
         timeout:  HTTP timeout in seconds (default: 120).
         api_key:  Optional API key passed as ``Authorization: Bearer <key>`` header.
-                  Also read from the ``LARKSCOUT_API_KEY`` environment variable.
+                  Also read from the ``MANTISFETCH_API_KEY`` environment variable.
     """
 
     def __init__(
@@ -134,13 +134,13 @@ class LarkScoutClient:
         import httpx
 
         self._base = _base_url(base_url)
-        key = api_key or os.environ.get("LARKSCOUT_API_KEY", "")
+        key = api_key or os.environ.get("MANTISFETCH_API_KEY", "")
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         self._http = httpx.Client(timeout=timeout, headers=headers)
 
     # ── context-manager support ──────────────────────────────────────────────
 
-    def __enter__(self) -> LarkScoutClient:
+    def __enter__(self) -> MantisFetchClient:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -451,17 +451,17 @@ class LarkScoutClient:
 # ── async client ──────────────────────────────────────────────────────────────
 
 
-class AsyncLarkScoutClient:
-    """Asynchronous LarkScout API client.
+class AsyncMantisFetchClient:
+    """Asynchronous MantisFetch API client.
 
-    Identical API surface to :class:`LarkScoutClient` but all methods are
+    Identical API surface to :class:`MantisFetchClient` but all methods are
     coroutines.  Use as an async context manager or call :meth:`aclose`
     explicitly when done.
 
     Args:
-        base_url: Base URL of the LarkScout service (default: http://localhost:9898).
+        base_url: Base URL of the MantisFetch service (default: http://localhost:9898).
         timeout:  HTTP timeout in seconds (default: 120).
-        api_key:  Optional API key.  Also read from ``LARKSCOUT_API_KEY``.
+        api_key:  Optional API key.  Also read from ``MANTISFETCH_API_KEY``.
     """
 
     def __init__(
@@ -474,13 +474,13 @@ class AsyncLarkScoutClient:
         import httpx
 
         self._base = _base_url(base_url)
-        key = api_key or os.environ.get("LARKSCOUT_API_KEY", "")
+        key = api_key or os.environ.get("MANTISFETCH_API_KEY", "")
         headers = {"Authorization": f"Bearer {key}"} if key else {}
         self._http = httpx.AsyncClient(timeout=timeout, headers=headers)
 
     # ── context-manager support ──────────────────────────────────────────────
 
-    async def __aenter__(self) -> AsyncLarkScoutClient:
+    async def __aenter__(self) -> AsyncMantisFetchClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:

@@ -15,7 +15,7 @@ def _png() -> bytes:
 
 
 def _section(idx: int, summary):
-    from larkscout_docreader.models import Section
+    from mantisfetch_docreader.models import Section
 
     return Section(
         index=idx, title=f"S{idx}", level=1, text="body text",
@@ -24,7 +24,7 @@ def _section(idx: int, summary):
 
 
 def test_compress_brief_excludes_failed_summaries():  # #43
-    from larkscout_docreader.summaries import _compress_sections_for_brief
+    from mantisfetch_docreader.summaries import _compress_sections_for_brief
 
     out = _compress_sections_for_brief(
         [_section(1, "good one"), _section(2, "[summary generation failed]")]
@@ -34,8 +34,8 @@ def test_compress_brief_excludes_failed_summaries():  # #43
 
 
 def test_single_section_summary_raises_on_sentinel(monkeypatch):  # #20
-    import larkscout_docreader as dr
-    from larkscout_docreader.summaries import _summarize_batch
+    import mantisfetch_docreader as dr
+    from mantisfetch_docreader.summaries import _summarize_batch
 
     monkeypatch.setattr(dr, "gemini_summarize", lambda *a, **k: "[summary generation failed]")
     with pytest.raises(RuntimeError):
@@ -44,7 +44,7 @@ def test_single_section_summary_raises_on_sentinel(monkeypatch):  # #20
 
 def test_openai_summarize_and_ocr_return_sentinels(monkeypatch):  # #21
     monkeypatch.setitem(sys.modules, "openai", MagicMock())
-    monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
     from providers.openai_compat import OpenAICompatProvider
 
     p = OpenAICompatProvider()
@@ -61,7 +61,7 @@ def test_gemini_ocr_proofreads_after_transcribe_retry(monkeypatch):  # #22
     import providers.gemini as gem
     from providers import get_provider, reset_provider
 
-    monkeypatch.delenv("LARKSCOUT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
     monkeypatch.setattr(gem.time, "sleep", lambda *_: None)
     reset_provider()

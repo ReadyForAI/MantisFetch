@@ -1,4 +1,4 @@
-# LarkScout Roadmap
+# MantisFetch Roadmap
 
 ## ✅ Completed
 
@@ -17,7 +17,7 @@
 - [x] README and Contributing guide — quick-start, API overview, dev setup, PR process
 
 ### SDK & Ecosystem
-- [x] Python SDK — sync (`LarkScoutClient`) and async (`AsyncLarkScoutClient`) clients with full API coverage
+- [x] Python SDK — sync (`MantisFetchClient`) and async (`AsyncMantisFetchClient`) clients with full API coverage
 
 ### Validation
 - [x] E2E web capture tests — full pipeline: capture → digest → sections
@@ -27,17 +27,17 @@
 - [x] Full pipeline smoke test — single `test_full_pipeline()` covering all components with a pass/fail summary table
 
 ### Housekeeping
-- [x] Default docs directory moved to `~/.larkscout/docs`, configurable via `LARKSCOUT_DOCS_DIR`
+- [x] Default docs directory moved to `~/.mantisfetch/docs`, configurable via `MANTISFETCH_DOCS_DIR`
 
 ---
 
 ## 🔜 Next
 
-- [ ] JavaScript / TypeScript SDK (`npm install larkscout-client`)
+- [ ] JavaScript / TypeScript SDK (`npm install mantisfetch-client`)
 - [ ] Optional API key authentication (`Authorization: Bearer <token>`)
 - [ ] Streaming progress events for long parse and capture operations
 - [ ] GitHub Actions CI pipeline (lint, unit tests, build Docker image)
-- [ ] PyPI package publishing (`pip install larkscout`)
+- [ ] PyPI package publishing (`pip install mantisfetch`)
 
 ---
 

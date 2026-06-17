@@ -32,7 +32,7 @@ class TestDocIndexBrowserEntry:
     """Browser doc-index entries must have all required fields."""
 
     def test_browser_index_entry_has_all_fields(self):
-        from larkscout_browser import _persist_web_capture
+        from mantisfetch_browser import _persist_web_capture
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -56,7 +56,7 @@ class TestDocIndexBrowserEntry:
             assert not missing, f"Browser index entry missing fields: {missing}"
 
     def test_browser_index_entry_values(self):
-        from larkscout_browser import _persist_web_capture
+        from mantisfetch_browser import _persist_web_capture
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -77,7 +77,7 @@ class TestDocIndexDocreaderEntry:
     """Docreader doc-index entries must have all required fields."""
 
     def test_docreader_index_entry_has_all_fields(self):
-        from larkscout_docreader import _update_doc_index
+        from mantisfetch_docreader import _update_doc_index
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -97,7 +97,7 @@ class TestDocIndexDocreaderEntry:
 
     def test_docreader_index_entry_without_optional_args(self):
         """Even without source_url/content_hash args, entry must have all fields."""
-        from larkscout_docreader import _update_doc_index
+        from mantisfetch_docreader import _update_doc_index
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -116,7 +116,7 @@ class TestDocIndexDocreaderEntry:
             assert entry["source_url"] == ""
 
     def test_docreader_index_entry_includes_metadata_and_source_ref(self):
-        from larkscout_docreader import _update_doc_index
+        from mantisfetch_docreader import _update_doc_index
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -143,7 +143,7 @@ class TestManifestBrowserFormat:
     """Browser manifest must have all required fields."""
 
     def test_browser_manifest_has_required_fields(self):
-        from larkscout_browser import _persist_web_capture
+        from mantisfetch_browser import _persist_web_capture
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -162,7 +162,7 @@ class TestManifestBrowserFormat:
             assert not missing, f"Browser manifest missing fields: {missing}"
 
     def test_browser_manifest_provenance_fields(self):
-        from larkscout_browser import _persist_web_capture
+        from mantisfetch_browser import _persist_web_capture
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -184,7 +184,7 @@ class TestManifestBrowserFormat:
             assert "capture_time" not in prov
 
     def test_browser_manifest_section_fields(self):
-        from larkscout_browser import _persist_web_capture
+        from mantisfetch_browser import _persist_web_capture
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -211,7 +211,7 @@ class TestManifestDocreaderFormat:
     """Docreader manifest (both full and extract-only) must have all required fields."""
 
     def _make_parsed(self):
-        from larkscout_docreader import ParsedDocument, Section
+        from mantisfetch_docreader import ParsedDocument, Section
 
         return ParsedDocument(
             filename="test.pdf", file_type="pdf", total_pages=2,
@@ -222,7 +222,7 @@ class TestManifestDocreaderFormat:
         )
 
     def test_full_write_manifest_has_all_fields(self):
-        from larkscout_docreader import write_output
+        from mantisfetch_docreader import write_output
 
         parsed = self._make_parsed()
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,7 +241,7 @@ class TestManifestDocreaderFormat:
             assert "upload_time" not in prov
 
     def test_extract_only_manifest_has_all_fields(self):
-        from larkscout_docreader import write_output_extract_only
+        from mantisfetch_docreader import write_output_extract_only
 
         parsed = self._make_parsed()
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,7 +257,7 @@ class TestManifestDocreaderFormat:
             assert not missing_prov, f"Extract-only provenance missing: {missing_prov}"
 
     def test_extract_only_manifest_has_file_type_and_source(self):
-        from larkscout_docreader import write_output_extract_only
+        from mantisfetch_docreader import write_output_extract_only
 
         parsed = self._make_parsed()
         with tempfile.TemporaryDirectory() as tmp:
@@ -268,7 +268,7 @@ class TestManifestDocreaderFormat:
             assert manifest["source"] == "upload"
 
     def test_rewrite_removes_stale_generated_section_files(self):
-        from larkscout_docreader import ParsedDocument, Section, write_output_extract_only
+        from mantisfetch_docreader import ParsedDocument, Section, write_output_extract_only
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -298,7 +298,7 @@ class TestManifestDocreaderFormat:
             assert section_names == ["01-new-New.md"]
 
     def test_docreader_manifest_includes_metadata_and_source_file(self):
-        from larkscout_docreader import write_output
+        from mantisfetch_docreader import write_output
 
         parsed = self._make_parsed()
         with tempfile.TemporaryDirectory() as tmp:
@@ -321,7 +321,7 @@ class TestManifestDocreaderFormat:
             assert manifest["sections"][0]["page_end"] == 1
 
     def test_docreader_manifest_section_has_type(self):
-        from larkscout_docreader import write_output
+        from mantisfetch_docreader import write_output
 
         parsed = self._make_parsed()
         with tempfile.TemporaryDirectory() as tmp:
@@ -361,7 +361,7 @@ class TestManifestTagsBackfill:
         )
 
     def test_backfill_populates_missing_tags_from_index(self):
-        from larkscout_docreader import _backfill_manifest_tags
+        from mantisfetch_docreader import _backfill_manifest_tags
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -375,7 +375,7 @@ class TestManifestTagsBackfill:
             assert patched["tags"] == ["招标文件"]
 
     def test_backfill_is_idempotent(self):
-        from larkscout_docreader import _backfill_manifest_tags
+        from mantisfetch_docreader import _backfill_manifest_tags
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -391,7 +391,7 @@ class TestManifestTagsBackfill:
             assert patched["tags"] == ["x"]
 
     def test_backfill_writes_empty_when_index_missing_entry(self):
-        from larkscout_docreader import _backfill_manifest_tags
+        from mantisfetch_docreader import _backfill_manifest_tags
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -405,7 +405,7 @@ class TestManifestTagsBackfill:
             assert patched["tags"] == []
 
     def test_backfill_preserves_existing_tags(self):
-        from larkscout_docreader import _backfill_manifest_tags
+        from mantisfetch_docreader import _backfill_manifest_tags
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -433,7 +433,7 @@ class TestDocEntryFromManifestTags:
     """`_doc_entry_from_manifest` fallback must read tags from manifest, not just .meta.json."""
 
     def test_fallback_reads_tags_from_manifest(self):
-        from larkscout_docreader import _doc_entry_from_manifest
+        from mantisfetch_docreader import _doc_entry_from_manifest
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -457,7 +457,7 @@ class TestDocEntryFromManifestTags:
             assert entry["tags"] == ["招标文件"]
 
     def test_fallback_falls_back_to_meta_when_manifest_lacks_tags(self):
-        from larkscout_docreader import _doc_entry_from_manifest
+        from mantisfetch_docreader import _doc_entry_from_manifest
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)

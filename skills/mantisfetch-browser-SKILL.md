@@ -1,6 +1,6 @@
 ---
-name: larkscout-browser
-description: Web browsing via the LarkScout Browser service (Python Playwright). Supports page navigation, semantic distillation of body text and tables, incremental diff (changed_sids), executable actions (click/type/select/scroll/invoke), automatic HTML <table> extraction to Markdown with numeric column statistics, WebMCP structured tool discovery and invocation (Chrome 146+ navigator.modelContext), optional Readability.js reader mode, A11y auto-fallback, SPA-friendly (wait_for_selector + text density detection), and strict length limiting via "body budget + total output budget" to significantly reduce token consumption. Part of the LarkScout open-source data collection platform.
+name: mantisfetch-browser
+description: Web browsing via the MantisFetch Browser service (Python Playwright). Supports page navigation, semantic distillation of body text and tables, incremental diff (changed_sids), executable actions (click/type/select/scroll/invoke), automatic HTML <table> extraction to Markdown with numeric column statistics, WebMCP structured tool discovery and invocation (Chrome 146+ navigator.modelContext), optional Readability.js reader mode, A11y auto-fallback, SPA-friendly (wait_for_selector + text density detection), and strict length limiting via "body budget + total output budget" to significantly reduce token consumption. Part of the MantisFetch open-source data collection platform.
 triggers:
   - "browse web"
   - "open link"
@@ -27,7 +27,7 @@ triggers:
   - "capture page"
 ---
 
-# SKILL: LarkScout Browser (Semantic Distillation Browser + WebMCP)
+# SKILL: MantisFetch Browser (Semantic Distillation Browser + WebMCP)
 
 ## 1. Purpose
 
@@ -37,7 +37,7 @@ Use for: information gathering, research, competitive analysis, news/blog extrac
 
 ## 2. Service Dependency
 
-- External service: LarkScout Browser Service (FastAPI + Playwright)
+- External service: MantisFetch Browser Service (FastAPI + Playwright)
 - Base URL: `http://127.0.0.1:9898/web/`
 
 ---
@@ -225,7 +225,7 @@ Response example:
   "ok": true,
   "sessions": 2,
   "readability_available": true,
-  "readability_js_path": "~/.larkscout/Readability.js",
+  "readability_js_path": "~/.mantisfetch/Readability.js",
   "yolo_enabled": false,
   "yolo_onnx_path": null,
   "yolo_input_size": 640,
@@ -923,12 +923,12 @@ distill(max_table_rows=80) → table truncated=true, rows=500
 ↓
 Option A: stats already contain needed values → use directly
 Option B: need specific rows → scroll to target position → re-distill
-Option C: need full data → prompt user to export CSV/XLSX, hand off to LarkScout DocReader for processing
+Option C: need full data → prompt user to export CSV/XLSX, hand off to MantisFetch DocReader for processing
 ```
 
-### 6.9 LarkScout Document Library Persistence Flow
+### 6.9 MantisFetch Document Library Persistence Flow
 
-Persist collection results (including tables) to the LarkScout document library:
+Persist collection results (including tables) to the MantisFetch document library:
 
 ```
 distill(extract_tables=true, include_actions=false)

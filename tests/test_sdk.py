@@ -1,4 +1,4 @@
-"""Tests for the LarkScout Python SDK (TASK-009)."""
+"""Tests for the MantisFetch Python SDK (TASK-009)."""
 
 import ast
 from pathlib import Path
@@ -14,7 +14,7 @@ SDK_PATH = Path(__file__).parent.parent / "sdk" / "python"
 
 class TestSDKStructure:
     def test_client_file_exists(self):
-        assert (SDK_PATH / "larkscout_client.py").is_file()
+        assert (SDK_PATH / "mantisfetch_client.py").is_file()
 
     def test_pyproject_exists(self):
         assert (SDK_PATH / "pyproject.toml").is_file()
@@ -24,20 +24,20 @@ class TestSDKStructure:
         assert len(examples) >= 1
 
     def test_both_classes_in_ast(self):
-        source = (SDK_PATH / "larkscout_client.py").read_text()
+        source = (SDK_PATH / "mantisfetch_client.py").read_text()
         tree = ast.parse(source)
         classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
-        assert "LarkScoutClient" in classes
-        assert "AsyncLarkScoutClient" in classes
+        assert "MantisFetchClient" in classes
+        assert "AsyncMantisFetchClient" in classes
 
     def test_client_importable(self, monkeypatch):
         import sys
 
         monkeypatch.syspath_prepend(str(SDK_PATH))
-        from larkscout_client import AsyncLarkScoutClient, LarkScoutClient  # noqa: F401
+        from mantisfetch_client import AsyncMantisFetchClient, MantisFetchClient  # noqa: F401
 
-        assert LarkScoutClient is not None
-        assert AsyncLarkScoutClient is not None
+        assert MantisFetchClient is not None
+        assert AsyncMantisFetchClient is not None
 
 
 # ── sync client unit tests ────────────────────────────────────────────────────
@@ -45,11 +45,11 @@ class TestSDKStructure:
 
 @pytest.fixture()
 def sync_client(monkeypatch, tmp_path):
-    """Return a LarkScoutClient with httpx.Client mocked out."""
+    """Return a MantisFetchClient with httpx.Client mocked out."""
     import sys
 
     monkeypatch.syspath_prepend(str(SDK_PATH))
-    from larkscout_client import LarkScoutClient
+    from mantisfetch_client import MantisFetchClient
 
     mock_http = MagicMock()
     mock_resp = MagicMock()
@@ -57,7 +57,7 @@ def sync_client(monkeypatch, tmp_path):
     mock_http.get.return_value = mock_resp
     mock_http.post.return_value = mock_resp
 
-    client = LarkScoutClient.__new__(LarkScoutClient)
+    client = MantisFetchClient.__new__(MantisFetchClient)
     client._base = "http://localhost:9898"
     client._http = mock_http
     return client, mock_http, mock_resp
@@ -67,7 +67,7 @@ def test_api_error_surfaces_server_detail(monkeypatch):
     """C50: the SDK must surface the server's error detail (e.g. 409 message),
     not just the bare status code."""
     monkeypatch.syspath_prepend(str(SDK_PATH))
-    from larkscout_client import LarkScoutAPIError, _raise_for_status
+    from mantisfetch_client import MantisFetchAPIError, _raise_for_status
 
     class FakeResp:
         is_success = False
@@ -77,7 +77,7 @@ def test_api_error_surfaces_server_detail(monkeypatch):
         def json(self):
             return {"detail": "doc_id 'DOC-001' already exists. Pass replace=true"}
 
-    with pytest.raises(LarkScoutAPIError) as exc:
+    with pytest.raises(MantisFetchAPIError) as exc:
         _raise_for_status(FakeResp())
     assert exc.value.status_code == 409
     assert "already exists" in str(exc.value)
@@ -205,9 +205,9 @@ class TestSyncClient:
         mock_httpx.Client.return_value = mock_client_instance
 
         with patch.dict("sys.modules", {"httpx": mock_httpx}):
-            from larkscout_client import LarkScoutClient
+            from mantisfetch_client import MantisFetchClient
 
-            with LarkScoutClient("http://localhost:9898"):
+            with MantisFetchClient("http://localhost:9898"):
                 pass
 
         mock_client_instance.close.assert_called_once()
@@ -218,9 +218,9 @@ class TestSyncClient:
 
 @pytest.fixture()
 def async_client(monkeypatch):
-    """Return an AsyncLarkScoutClient with httpx.AsyncClient mocked out."""
+    """Return an AsyncMantisFetchClient with httpx.AsyncClient mocked out."""
     monkeypatch.syspath_prepend(str(SDK_PATH))
-    from larkscout_client import AsyncLarkScoutClient
+    from mantisfetch_client import AsyncMantisFetchClient
 
     mock_http = AsyncMock()
     mock_resp = MagicMock()
@@ -229,7 +229,7 @@ def async_client(monkeypatch):
     mock_http.post.return_value = mock_resp
     mock_http.aclose = AsyncMock()
 
-    client = AsyncLarkScoutClient.__new__(AsyncLarkScoutClient)
+    client = AsyncMantisFetchClient.__new__(AsyncMantisFetchClient)
     client._base = "http://localhost:9898"
     client._http = mock_http
     return client, mock_http, mock_resp

@@ -1,6 +1,6 @@
 """Tests for cross-page running header/footer stripping (native PDF text)."""
 
-from larkscout_docreader.ocr_text import _strip_repeated_headers_footers
+from mantisfetch_docreader.ocr_text import _strip_repeated_headers_footers
 
 
 def _pages(*texts: str) -> dict[int, str]:

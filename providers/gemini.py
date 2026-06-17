@@ -2,7 +2,7 @@
 
 Reads credentials from the environment:
   GEMINI_API_KEY  or  GOOGLE_API_KEY  — required
-  LARKSCOUT_LLM_MODEL                 — optional; defaults to gemini-2.5-flash
+  MANTISFETCH_LLM_MODEL                 — optional; defaults to gemini-2.5-flash
 """
 
 import io
@@ -24,8 +24,8 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self) -> None:
         self._client = None
-        self._model = os.environ.get("LARKSCOUT_LLM_MODEL") or _DEFAULT_MODEL
-        self._ocr_proofread = os.environ.get("LARKSCOUT_OCR_PROOFREAD", "true").strip().lower() not in {
+        self._model = os.environ.get("MANTISFETCH_LLM_MODEL") or _DEFAULT_MODEL
+        self._ocr_proofread = os.environ.get("MANTISFETCH_OCR_PROOFREAD", "true").strip().lower() not in {
             "0",
             "false",
             "no",

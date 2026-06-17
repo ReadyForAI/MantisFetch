@@ -4,9 +4,9 @@ Date: 2026-05-04
 
 ## Positioning
 
-LarkScout core should stay a low-level document ingestion and reading layer for enterprise customers.
+MantisFetch core should stay a low-level document ingestion and reading layer for enterprise customers.
 
-It should not implement business semantics such as contract amount, invoice number, buyer/seller, or payment terms. Those belong in Skills. LarkScout should provide accurate, structured, low-token document facts that Skills can consume.
+It should not implement business semantics such as contract amount, invoice number, buyer/seller, or payment terms. Those belong in Skills. MantisFetch should provide accurate, structured, low-token document facts that Skills can consume.
 
 The near-term priority is not a broad parse-quality or audit framework. The priority is to improve recognition accuracy and structural fidelity for scanned contracts, invoices, quotations, and similar enterprise documents, especially tables.
 
@@ -24,7 +24,7 @@ Use OpenDataLoader PDF as a reference project for layout-aware PDF extraction:
   - local deterministic mode plus hybrid routing for complex/scanned pages
   - hidden/off-page/invisible text filtering as a later safety reference
 
-Do not treat OpenDataLoader as the immediate production backend. For the next LarkScout pass, borrow the data-model and verification ideas while keeping the current priority on native OCR geometry, table sidecars, and low-token API compatibility.
+Do not treat OpenDataLoader as the immediate production backend. For the next MantisFetch pass, borrow the data-model and verification ideas while keeping the current priority on native OCR geometry, table sidecars, and low-token API compatibility.
 
 ## Priorities
 

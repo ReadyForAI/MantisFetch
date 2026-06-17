@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for LarkScout tests.
+"""Shared pytest fixtures for MantisFetch tests.
 
 Provides a session-scoped TestClient that covers the unified app
 (browser + docreader mounted) without launching real external services.
@@ -14,7 +14,7 @@ from starlette.testclient import TestClient
 
 ROOT = Path(__file__).parent.parent
 
-# Make larkscout_server and service modules importable.
+# Make mantisfetch_server and service modules importable.
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "services" / "browser"))
 sys.path.insert(0, str(ROOT / "services" / "docreader"))
@@ -36,12 +36,12 @@ def _make_playwright_mock() -> MagicMock:
 
 @pytest.fixture(scope="session")
 def client() -> TestClient:
-    """Session-scoped TestClient for the unified LarkScout app.
+    """Session-scoped TestClient for the unified MantisFetch app.
 
     Playwright is mocked so the test suite runs without a real browser.
     """
-    with patch("larkscout_browser.async_playwright", return_value=_make_playwright_mock()):
-        from larkscout_server import app  # noqa: PLC0415
+    with patch("mantisfetch_browser.async_playwright", return_value=_make_playwright_mock()):
+        from mantisfetch_server import app  # noqa: PLC0415
 
         with TestClient(app, raise_server_exceptions=True) as c:
             yield c

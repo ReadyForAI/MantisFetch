@@ -29,7 +29,7 @@ from typing import Any
 from .models import PageContent
 from .text_utils import _cleanup_extracted_text_noise, _normalize_amount_phrases
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 _TABLE_HEADER_TERMS = {
     "序号",

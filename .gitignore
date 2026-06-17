@@ -181,5 +181,5 @@ out/
 site/
 _site/
 .docusaurus/
-docs/larkscout_opensource_design.md
+docs/mantisfetch_opensource_design.md
 ROADMAP_internal.md

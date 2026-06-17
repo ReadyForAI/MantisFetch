@@ -1,4 +1,4 @@
-"""Tests for health endpoints on the unified LarkScout server."""
+"""Tests for health endpoints on the unified MantisFetch server."""
 
 from starlette.testclient import TestClient
 

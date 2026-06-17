@@ -1,4 +1,4 @@
-from services.docreader.larkscout_docreader import (
+from services.docreader.mantisfetch_docreader import (
     PageContent,
     ParsedDocument,
     Section,
@@ -48,7 +48,7 @@ def test_generate_summaries_uses_chinese_prompt_for_chinese_documents(monkeypatc
         prompts.append(summarize_prompt)
         return "中文摘要"
 
-    monkeypatch.setattr("services.docreader.larkscout_docreader.gemini_summarize", fake_summarize)
+    monkeypatch.setattr("services.docreader.mantisfetch_docreader.gemini_summarize", fake_summarize)
     parsed = ParsedDocument(
         filename="中文招标文件.pdf",
         file_type="pdf",

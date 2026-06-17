@@ -41,11 +41,11 @@ from .models import (
 )
 from .ocr.engines import _ocr_cache_key, _ocr_cache_variant_path, gemini_ocr
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 DOCUMENT_PROFILE_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "document_profiles"
 FIELD_OCR_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "field_profiles"
-FIELD_OCR_RENDER_SCALE = float(os.environ.get("LARKSCOUT_FIELD_OCR_RENDER_SCALE", "4.0"))
+FIELD_OCR_RENDER_SCALE = float(os.environ.get("MANTISFETCH_FIELD_OCR_RENDER_SCALE", "4.0"))
 _DOCUMENT_PROFILE_ALIASES = {"tender_cn": "bid_cn"}
 
 

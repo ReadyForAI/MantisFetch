@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "services" / "docreader"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from larkscout_docreader import parse_csv
+from mantisfetch_docreader import parse_csv
 
 
 @pytest.fixture()

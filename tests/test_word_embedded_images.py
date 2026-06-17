@@ -90,8 +90,8 @@ def _make_docx_with_image(path: Path, image_path: Path, image_count: int = 1) ->
 
 
 def test_extract_word_embedded_images_keeps_generic_anchor(tmp_path, monkeypatch):
-    import larkscout_docreader as docreader
-    from larkscout_docreader import Section
+    import mantisfetch_docreader as docreader
+    from mantisfetch_docreader import Section
 
     image_path = tmp_path / "proof.png"
     image_path.write_bytes(_make_png_bytes())
@@ -144,8 +144,8 @@ def test_extract_word_embedded_images_keeps_generic_anchor(tmp_path, monkeypatch
 
 
 def test_extract_word_embedded_images_honors_zero_limit(tmp_path):
-    import larkscout_docreader as docreader
-    from larkscout_docreader import Section
+    import mantisfetch_docreader as docreader
+    from mantisfetch_docreader import Section
 
     image_path = tmp_path / "proof.png"
     image_path.write_bytes(_make_png_bytes())
@@ -174,7 +174,7 @@ def test_extract_word_embedded_images_honors_zero_limit(tmp_path):
 
 
 def test_count_word_embedded_image_references(tmp_path):
-    import larkscout_docreader as docreader
+    import mantisfetch_docreader as docreader
 
     image_path = tmp_path / "proof.png"
     image_path.write_bytes(_make_png_bytes())
@@ -185,7 +185,7 @@ def test_count_word_embedded_image_references(tmp_path):
 
 
 def test_count_word_embedded_image_references_ignores_external_links(tmp_path):
-    import larkscout_docreader as docreader
+    import mantisfetch_docreader as docreader
 
     docx_path = tmp_path / "external.docx"
     _make_docx_with_external_image_link(docx_path, "https://example.com/banner.png")
@@ -202,7 +202,7 @@ def test_parse_rejects_word_image_ocr_over_threshold(tmp_path, client):
     docx_path = tmp_path / "bid.docx"
     _make_docx_with_image(docx_path, image_path, image_count=2)
 
-    with patch("larkscout_docreader._get_docs_dir", return_value=tmp_path / "docs"):
+    with patch("mantisfetch_docreader._get_docs_dir", return_value=tmp_path / "docs"):
         with docx_path.open("rb") as fh:
             resp = client.post(
                 "/doc/parse",
@@ -228,7 +228,7 @@ def test_parse_rejects_word_image_ocr_over_threshold(tmp_path, client):
 def test_parse_allows_word_image_ocr_when_max_images_keeps_request_under_threshold(
     tmp_path, client, monkeypatch
 ):
-    import larkscout_docreader as docreader
+    import mantisfetch_docreader as docreader
 
     image_path = tmp_path / "proof.png"
     image_path.write_bytes(_make_png_bytes())
@@ -245,7 +245,7 @@ def test_parse_allows_word_image_ocr_when_max_images_keeps_request_under_thresho
         lambda image, backend: ("OCR 文本", "local-paddleocr", "ok", ""),
     )
 
-    with patch("larkscout_docreader._get_docs_dir", return_value=tmp_path / "docs"):
+    with patch("mantisfetch_docreader._get_docs_dir", return_value=tmp_path / "docs"):
         with docx_path.open("rb") as fh:
             resp = client.post(
                 "/doc/parse",
@@ -293,7 +293,7 @@ def test_parse_allows_word_image_ocr_when_max_images_keeps_request_under_thresho
 def test_parse_extract_only_does_not_advertise_image_ocr_backend_in_metadata(
     tmp_path, client, monkeypatch
 ):
-    import larkscout_docreader as docreader
+    import mantisfetch_docreader as docreader
 
     image_path = tmp_path / "proof.png"
     image_path.write_bytes(_make_png_bytes())
@@ -305,7 +305,7 @@ def test_parse_extract_only_does_not_advertise_image_ocr_backend_in_metadata(
         lambda _path: "# 学历证明\n\n以下图片为证明材料。",
     )
 
-    with patch("larkscout_docreader._get_docs_dir", return_value=tmp_path / "docs"):
+    with patch("mantisfetch_docreader._get_docs_dir", return_value=tmp_path / "docs"):
         with docx_path.open("rb") as fh:
             resp = client.post(
                 "/doc/parse",
@@ -337,7 +337,7 @@ def test_parse_extract_only_does_not_advertise_image_ocr_backend_in_metadata(
 
 
 def test_write_output_extract_only_writes_image_artifacts(tmp_path):
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         EmbeddedImage,
         PageContent,
         ParsedDocument,

@@ -9,7 +9,7 @@ package.
 Three package helpers are pulled in via function-level relative imports to
 avoid an import cycle and to honour test monkeypatches on the facade:
 _resolve_doc_dir, _validate_doc_id (storage/validation, shared), and
-local_ocr_with_layout (tests patch it at larkscout_docreader.*).
+local_ocr_with_layout (tests patch it at mantisfetch_docreader.*).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from i18n import t
-from larkscout_common.atomic import _write_bytes, _write_json, _write_text
+from mantisfetch_common.atomic import _write_bytes, _write_json, _write_text
 
 from .models import (
     OCR_BLOCKS_COORDINATE_SYSTEM,
