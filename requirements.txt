@@ -24,5 +24,8 @@ numpy>=1.26.0,<2.0.0
 # HTTP client
 httpx>=0.27.0
 
+# MCP server (Model Context Protocol, official Python SDK)
+mcp>=1.28.0
+
 # Test support
 pytest-asyncio>=0.24.0

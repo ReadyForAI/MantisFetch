@@ -27,17 +27,21 @@ from fastapi import FastAPI
 _ROOT = Path(__file__).parent
 sys.path.insert(0, str(_ROOT / "services" / "browser"))
 sys.path.insert(0, str(_ROOT / "services" / "docreader"))
+sys.path.insert(0, str(_ROOT / "services" / "mcp"))
 
 from mantisfetch_browser import app as browser_app  # noqa: E402
 from mantisfetch_docreader import app as doc_app  # noqa: E402
+from mantisfetch_mcp import mcp, mcp_app  # noqa: E402
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Start sub-application lifespans (browser Playwright init, docreader startup tasks)."""
+    """Start sub-application lifespans (browser Playwright init, docreader startup
+    tasks) plus the MCP server's streamable-HTTP session manager."""
     async with browser_app.router.lifespan_context(browser_app):
         async with doc_app.router.lifespan_context(doc_app):
-            yield
+            async with mcp.session_manager.run():
+                yield
 
 
 app = FastAPI(
@@ -67,6 +71,10 @@ app.mount("/web", browser_app)
 # Docreader routes are clean (no /doc prefix internally after the fix to
 # /doc/parse → /parse) — mount directly.
 app.mount("/doc", doc_app)
+
+# MCP server (streamable-HTTP) — a thin front-end exposing /web + /doc as Model
+# Context Protocol tools. Its session manager is started in the lifespan above.
+app.mount("/mcp", mcp_app)
 
 
 if __name__ == "__main__":

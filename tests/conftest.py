@@ -18,6 +18,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "services" / "browser"))
 sys.path.insert(0, str(ROOT / "services" / "docreader"))
+sys.path.insert(0, str(ROOT / "services" / "mcp"))
 
 
 def _make_playwright_mock() -> MagicMock:

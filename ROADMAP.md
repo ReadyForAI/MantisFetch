@@ -43,7 +43,7 @@
 
 ## 🔭 Future
 
-- [ ] MCP server — expose the document library as a [Model Context Protocol](https://modelcontextprotocol.io) tool for agents
+- [x] MCP server — expose the `/web` browsing loop **and** `/doc` document library as [Model Context Protocol](https://modelcontextprotocol.io) tools for agents (streamable-HTTP at `/mcp`; per IRP with NodalOS)
 - [ ] Semantic / vector search — embedding-based retrieval alongside keyword search
 - [ ] Additional LLM providers — Anthropic Claude, built-in Ollama auto-detection
 - [ ] Plugin system — register custom parsers for proprietary document formats
