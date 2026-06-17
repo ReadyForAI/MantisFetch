@@ -7,7 +7,7 @@ import pytest
 
 
 def test_ocr_blocks_sidecar_contract_shape(tmp_path: Path):
-    from larkscout_docreader import OCRBlocksSidecar, OCRPageBlocks, OCRTextBlock
+    from mantisfetch_docreader import OCRBlocksSidecar, OCRPageBlocks, OCRTextBlock
 
     sidecar = OCRBlocksSidecar(
         doc_id="DOC-001",
@@ -54,7 +54,7 @@ def test_ocr_blocks_sidecar_contract_shape(tmp_path: Path):
 
 
 def test_layout_manifest_entry_is_low_token_metadata_only():
-    from larkscout_docreader import _build_layout_manifest_entry
+    from mantisfetch_docreader import _build_layout_manifest_entry
 
     layout = _build_layout_manifest_entry(available=True)
 
@@ -69,7 +69,7 @@ def test_layout_manifest_entry_is_low_token_metadata_only():
 
 
 def test_unavailable_layout_manifest_entry_has_no_sidecar_path():
-    from larkscout_docreader import _build_layout_manifest_entry
+    from mantisfetch_docreader import _build_layout_manifest_entry
 
     layout = _build_layout_manifest_entry(available=False)
 
@@ -80,7 +80,7 @@ def test_unavailable_layout_manifest_entry_has_no_sidecar_path():
 
 
 def test_write_ocr_blocks_sidecar_returns_manifest_metadata(tmp_path: Path):
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         OCRTextBlock,
@@ -110,7 +110,7 @@ def test_write_ocr_blocks_sidecar_returns_manifest_metadata(tmp_path: Path):
 
 
 def test_ocr_block_rejects_malformed_bbox():
-    from larkscout_docreader import OCRTextBlock
+    from mantisfetch_docreader import OCRTextBlock
 
     with pytest.raises(ValueError, match="exactly four"):
         OCRTextBlock(block_id="bad", text="A", bbox=(1, 2, 3)).to_dict()  # type: ignore[arg-type]
@@ -206,7 +206,7 @@ def test_paddle_worker_handles_array_like_v3_geometry_without_truthiness():
 
 
 def test_local_ocr_with_layout_reads_worker_blocks(tmp_path: Path, monkeypatch):
-    import larkscout_docreader
+    import mantisfetch_docreader
 
     worker = tmp_path / "worker.py"
     worker.write_text(
@@ -228,19 +228,19 @@ def test_local_ocr_with_layout_reads_worker_blocks(tmp_path: Path, monkeypatch):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("LARKSCOUT_LOCAL_OCR_WORKER_CMD", f"{sys.executable} {worker}")
-    monkeypatch.setattr(larkscout_docreader.ocr.engines, "_local_ocr_disabled_until", 0.0)
-    monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", 3.0)
-    monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", 3.0)
+    monkeypatch.setenv("MANTISFETCH_LOCAL_OCR_WORKER_CMD", f"{sys.executable} {worker}")
+    monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "_local_ocr_disabled_until", 0.0)
+    monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", 3.0)
+    monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", 3.0)
 
     try:
-        text, page_blocks = larkscout_docreader.local_ocr_with_layout(
+        text, page_blocks = mantisfetch_docreader.local_ocr_with_layout(
             b"not-an-image",
             3,
             "paddleocr",
         )
     finally:
-        larkscout_docreader._stop_local_ocr_worker()
+        mantisfetch_docreader._stop_local_ocr_worker()
 
     assert text == "甲方：测试公司"
     assert page_blocks is not None
@@ -252,7 +252,7 @@ def test_local_ocr_with_layout_reads_worker_blocks(tmp_path: Path, monkeypatch):
 
 
 def test_write_output_extract_only_writes_ocr_blocks_and_manifest_layout(tmp_path: Path):
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         OCRTextBlock,
@@ -316,7 +316,7 @@ def test_write_output_extract_only_writes_ocr_blocks_and_manifest_layout(tmp_pat
 
 
 def test_write_output_extract_only_marks_layout_unavailable_without_ocr_blocks(tmp_path: Path):
-    from larkscout_docreader import ParsedDocument, Section, write_output_extract_only
+    from mantisfetch_docreader import ParsedDocument, Section, write_output_extract_only
 
     parsed = ParsedDocument(
         filename="text.pdf",

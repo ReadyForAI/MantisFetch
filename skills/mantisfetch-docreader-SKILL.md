@@ -1,6 +1,6 @@
 ---
-name: larkscout-docreader
-description: Long document parsing and reading HTTP API. Use when you need to read, analyze, or summarize PDF, Office, HTML, CSV, text/JSON/XML files. Supports file upload parsing, three-tier summaries (digest/brief/full), on-demand section loading, table extraction, metadata persistence, source file references, and document library search via HTTP API. Outputs doc-index v2 format, sharing a unified index with larkscout-browser web capture results. Serves as the document parsing engine for the LarkScout open-source data collection platform.
+name: mantisfetch-docreader
+description: Long document parsing and reading HTTP API. Use when you need to read, analyze, or summarize PDF, Office, HTML, CSV, text/JSON/XML files. Supports file upload parsing, three-tier summaries (digest/brief/full), on-demand section loading, table extraction, metadata persistence, source file references, and document library search via HTTP API. Outputs doc-index v2 format, sharing a unified index with mantisfetch-browser web capture results. Serves as the document parsing engine for the MantisFetch open-source data collection platform.
 triggers:
   - "read document"
   - "parse document"
@@ -27,7 +27,7 @@ triggers:
   - ".xml"
 ---
 
-# SKILL: LarkScout DocReader (Document Parsing HTTP API)
+# SKILL: MantisFetch DocReader (Document Parsing HTTP API)
 
 ## 1. Purpose
 
@@ -121,7 +121,7 @@ Response example:
 {
   "ok": true,
   "version": "3.0.0",
-  "docs_dir": "~/.larkscout/docs",
+  "docs_dir": "~/.mantisfetch/docs",
   "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"]
 }
 ```
@@ -173,7 +173,7 @@ curl -X POST http://localhost:9898/doc/parse \
   -F 'tags=["Q3","financial"]'
 ```
 
-Callers do not need the Python SDK; they can call LarkScout directly with `curl`. LarkScout provides lower-level parsing, indexing, and source retention only. Business scenarios, business metadata fields, naming rules, and follow-up operations are owned by the upper-level caller.
+Callers do not need the Python SDK; they can call MantisFetch directly with `curl`. MantisFetch provides lower-level parsing, indexing, and source retention only. Business scenarios, business metadata fields, naming rules, and follow-up operations are owned by the upper-level caller.
 
 Recommended ingestion for embedded Word images is to create a lightweight image inventory first, without OCR for every image. `images.json` includes image files, anchors, dimensions, hashes, context keywords, and candidate hints so downstream tools can select candidate evidence by business requirements:
 
@@ -250,7 +250,7 @@ Response example:
 - `generate_summary=false` extracts text and tables only without calling LLM — faster but no summary
 - `content_type` defaults to `General` when omitted; pass `Contract`, `Bid`, or `Knowledge` when the caller already knows the business category
 - `metadata` should be a JSON object; nested objects are preserved in manifest, while shallow scalar fields are available for filtering in `/doc/library/search`
-- `source_ref` points to the stored upload inside the document directory when `LARKSCOUT_STORE_SOURCE_FILES=true`
+- `source_ref` points to the stored upload inside the document directory when `MANTISFETCH_STORE_SOURCE_FILES=true`
 - Large files (100+ page PDFs) may take 30–60 seconds to parse — Agents should set a longer timeout
 
 ### 4.3 Search Document Library
@@ -291,7 +291,7 @@ Response example:
 }
 ```
 
-**Search matches both documents uploaded via DocReader and web pages captured via LarkScout Browser.** The `source` field distinguishes origin: `"upload"` = file upload, `"web_capture"` = web capture.
+**Search matches both documents uploaded via DocReader and web pages captured via MantisFetch Browser.** The `source` field distinguishes origin: `"upload"` = file upload, `"web_capture"` = web capture.
 
 ### 4.4 Search Full Text / Sections
 
@@ -427,7 +427,7 @@ All parsed results are stored under `DOCS_DIR`:
 
 ```text
 docs/
-  ├─ doc-index.json              ← Global index (v2 format, shared with LarkScout Browser)
+  ├─ doc-index.json              ← Global index (v2 format, shared with MantisFetch Browser)
   │
   ├─ General/
   │   └─ DOC-001/                ← Default categorized parsed results
@@ -470,7 +470,7 @@ docs/
       └─ ...
 ```
 
-New ingested content is stored under `General/`, `Contract/`, `Bid/`, or `Knowledge/`. Direct reads still use `doc_id`; the service resolves the directory by checking `storage_path` (then `content_type`) in `doc-index.json`, scanning the category subdirectories, and finally falling back to the legacy flat `${LARKSCOUT_DOCS_DIR}/<doc_id>` layout.
+New ingested content is stored under `General/`, `Contract/`, `Bid/`, or `Knowledge/`. Direct reads still use `doc_id`; the service resolves the directory by checking `storage_path` (then `content_type`) in `doc-index.json`, scanning the category subdirectories, and finally falling back to the legacy flat `${MANTISFETCH_DOCS_DIR}/<doc_id>` layout.
 
 **doc-index.json v2 Key Fields:**
 
@@ -597,4 +597,4 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 - Temporary copies of uploaded files are automatically cleaned up after parsing
 - Document library is physically isolated by `DOCS_DIR` directory
 - Provenance tracking: Each document's manifest contains provenance (created_at, content_hash, source_ref when available)
-- If `LARKSCOUT_STORE_SOURCE_FILES=true` (default), the original uploaded file is stored under each document's `source/` directory for later reference
+- If `MANTISFETCH_STORE_SOURCE_FILES=true` (default), the original uploaded file is stored under each document's `source/` directory for later reference

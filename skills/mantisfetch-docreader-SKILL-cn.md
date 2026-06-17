@@ -1,6 +1,6 @@
 ---
-name: larkscout-docreader
-description: 长文档解析与阅读 HTTP API。适用于需要读取、分析或总结 PDF、Office、HTML、CSV、文本/JSON/XML 等文件的场景。支持文件上传解析、三级摘要（digest/brief/full）、按需加载 section、表格提取、metadata 持久化、source 文件引用，以及通过 HTTP API 访问文档库搜索。输出 doc-index v2 格式，并与 larkscout-browser 的网页抓取结果共享统一索引。它是 LarkScout 开源数据采集平台中的文档解析引擎。
+name: mantisfetch-docreader
+description: 长文档解析与阅读 HTTP API。适用于需要读取、分析或总结 PDF、Office、HTML、CSV、文本/JSON/XML 等文件的场景。支持文件上传解析、三级摘要（digest/brief/full）、按需加载 section、表格提取、metadata 持久化、source 文件引用，以及通过 HTTP API 访问文档库搜索。输出 doc-index v2 格式，并与 mantisfetch-browser 的网页抓取结果共享统一索引。它是 MantisFetch 开源数据采集平台中的文档解析引擎。
 triggers:
   - "读取文档"
   - "解析文档"
@@ -27,7 +27,7 @@ triggers:
   - ".xml"
 ---
 
-# SKILL: LarkScout DocReader（文档解析 HTTP API）
+# SKILL: MantisFetch DocReader（文档解析 HTTP API）
 
 ## 1. 用途
 
@@ -121,7 +121,7 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
 {
   "ok": true,
   "version": "3.0.0",
-  "docs_dir": "~/.larkscout/docs",
+  "docs_dir": "~/.mantisfetch/docs",
   "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"]
 }
 ```
@@ -173,7 +173,7 @@ curl -X POST http://localhost:9898/doc/parse \
   -F 'tags=["Q3","financial"]'
 ```
 
-调用方不需要依赖 Python SDK；可以直接用 `curl` 调 LarkScout 入库。LarkScout 只负责底层解析、索引和来源保留；具体业务场景、业务字段、命名规则和后续操作由上层调用方自行定义。
+调用方不需要依赖 Python SDK；可以直接用 `curl` 调 MantisFetch 入库。MantisFetch 只负责底层解析、索引和来源保留；具体业务场景、业务字段、命名规则和后续操作由上层调用方自行定义。
 
 Word 内嵌图片的推荐入库方式是先抽轻量图片清单，不默认 OCR 全部图片。`images.json` 会包含图片文件、锚点、尺寸、hash、上下文关键词和候选 hints，供下游工具按业务要求筛选候选图片：
 
@@ -250,7 +250,7 @@ curl -X POST http://localhost:9898/doc/parse \
 - `generate_summary=false` 只提取文本和表格，不调用 LLM，速度更快但没有摘要
 - 未传 `content_type` 时默认入库到 `General`；调用方已明确业务类别时传 `Contract`、`Bid` 或 `Knowledge`
 - `metadata` 必须是 JSON object；嵌套对象会保留在 manifest 中，而浅层标量字段可用于 `/doc/library/search` 过滤
-- `source_ref` 指向文档目录内保存的上传原件，前提是 `LARKSCOUT_STORE_SOURCE_FILES=true`
+- `source_ref` 指向文档目录内保存的上传原件，前提是 `MANTISFETCH_STORE_SOURCE_FILES=true`
 - 大文件（100+ 页 PDF）解析可能需要 30–60 秒，Agent 应设置更长的超时
 
 ### 4.3 搜索文档库
@@ -291,7 +291,7 @@ curl -X POST http://localhost:9898/doc/parse \
 }
 ```
 
-**该搜索同时覆盖 DocReader 上传的文档和 LarkScout Browser 抓取的网页。** `source` 字段用于区分来源：`"upload"` 表示文件上传，`"web_capture"` 表示网页抓取。
+**该搜索同时覆盖 DocReader 上传的文档和 MantisFetch Browser 抓取的网页。** `source` 字段用于区分来源：`"upload"` 表示文件上传，`"web_capture"` 表示网页抓取。
 
 ### 4.4 全文 / Section 搜索
 
@@ -427,7 +427,7 @@ table_id 格式：`"01"` 或 `"table-01"`。
 
 ```text
 docs/
-  ├─ doc-index.json              ← 全局索引（v2 格式，与 LarkScout Browser 共享）
+  ├─ doc-index.json              ← 全局索引（v2 格式，与 MantisFetch Browser 共享）
   │
   ├─ General/
   │   └─ DOC-001/                ← 默认分类下的解析结果
@@ -470,7 +470,7 @@ docs/
       └─ ...
 ```
 
-新入库内容会写入 `General/`、`Contract/`、`Bid/` 或 `Knowledge/`。直接读取仍使用 `doc_id`，服务依次查找 `doc-index.json` 里的 `storage_path`（其次 `content_type`），扫描各分类子目录，最后回退到旧的平铺布局 `${LARKSCOUT_DOCS_DIR}/<doc_id>`。
+新入库内容会写入 `General/`、`Contract/`、`Bid/` 或 `Knowledge/`。直接读取仍使用 `doc_id`，服务依次查找 `doc-index.json` 里的 `storage_path`（其次 `content_type`），扫描各分类子目录，最后回退到旧的平铺布局 `${MANTISFETCH_DOCS_DIR}/<doc_id>`。
 
 **doc-index.json v2 关键字段：**
 
@@ -597,4 +597,4 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 - 上传文件的临时副本在解析后会自动清理
 - 文档库通过 `DOCS_DIR` 目录物理隔离
 - provenance 跟踪：每份文档的 manifest 都会包含 provenance 信息（`created_at`、`content_hash`，以及可用时的 `source_ref`）
-- 如果 `LARKSCOUT_STORE_SOURCE_FILES=true`（默认），原始上传文件会保存在各文档目录下的 `source/` 子目录中，供后续引用
+- 如果 `MANTISFETCH_STORE_SOURCE_FILES=true`（默认），原始上传文件会保存在各文档目录下的 `source/` 子目录中，供后续引用

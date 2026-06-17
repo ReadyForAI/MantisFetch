@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect payload-size and sidecar metrics for LarkScout document outputs."""
+"""Collect payload-size and sidecar metrics for MantisFetch document outputs."""
 
 from __future__ import annotations
 

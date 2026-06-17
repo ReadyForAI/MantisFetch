@@ -17,7 +17,7 @@ class TestCSVParse:
     """CSV parsing via MarkItDown produces valid results."""
 
     def test_csv_small_file(self):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         with tempfile.NamedTemporaryFile(suffix=".csv", mode="w", delete=False, newline="") as f:
             writer = csv.writer(f)
@@ -27,7 +27,7 @@ class TestCSVParse:
             path = Path(f.name)
 
         try:
-            result = larkscout_docreader.parse_csv(path)
+            result = mantisfetch_docreader.parse_csv(path)
             assert result.file_type == "csv"
             assert result.total_pages == 1
         finally:
@@ -39,7 +39,7 @@ class TestXLSXParse:
 
     def test_xlsx_basic_parse(self):
         openpyxl = pytest.importorskip("openpyxl")
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
             path = Path(f.name)
@@ -53,7 +53,7 @@ class TestXLSXParse:
             wb.save(path)
             wb.close()
 
-            result = larkscout_docreader.parse_xlsx(path)
+            result = mantisfetch_docreader.parse_xlsx(path)
             assert result.file_type == "xlsx"
             assert result.total_pages >= 1
         finally:
@@ -90,7 +90,7 @@ class TestPDFParse:
         assert text == "甲方：测试公司"
 
     def test_local_ocr_uses_isolated_worker(self, tmp_path, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         worker = tmp_path / "worker.py"
         worker.write_text(
@@ -105,20 +105,20 @@ class TestPDFParse:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setenv("LARKSCOUT_LOCAL_OCR_WORKER_CMD", f"{sys.executable} {worker}")
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "_local_ocr_disabled_until", 0.0)
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", 3.0)
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", 3.0)
+        monkeypatch.setenv("MANTISFETCH_LOCAL_OCR_WORKER_CMD", f"{sys.executable} {worker}")
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "_local_ocr_disabled_until", 0.0)
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", 3.0)
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", 3.0)
 
         try:
-            text = larkscout_docreader.local_ocr(b"not-an-image", 1, "paddleocr")
+            text = mantisfetch_docreader.local_ocr(b"not-an-image", 1, "paddleocr")
         finally:
-            larkscout_docreader._stop_local_ocr_worker()
+            mantisfetch_docreader._stop_local_ocr_worker()
 
         assert text == "甲方：测试公司"
 
     def test_local_ocr_worker_crash_does_not_crash_parent(self, tmp_path, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         worker = tmp_path / "worker_crash.py"
         worker.write_text(
@@ -132,32 +132,32 @@ class TestPDFParse:
             ),
             encoding="utf-8",
         )
-        monkeypatch.setenv("LARKSCOUT_LOCAL_OCR_WORKER_CMD", f"{sys.executable} {worker}")
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "_local_ocr_disabled_until", 0.0)
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", 3.0)
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", 3.0)
-        monkeypatch.setattr(larkscout_docreader.ocr.engines, "LOCAL_OCR_CIRCUIT_BREAKER_SEC", 0.0)
+        monkeypatch.setenv("MANTISFETCH_LOCAL_OCR_WORKER_CMD", f"{sys.executable} {worker}")
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "_local_ocr_disabled_until", 0.0)
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", 3.0)
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", 3.0)
+        monkeypatch.setattr(mantisfetch_docreader.ocr.engines, "LOCAL_OCR_CIRCUIT_BREAKER_SEC", 0.0)
 
         try:
-            text = larkscout_docreader.local_ocr(b"not-an-image", 1, "paddleocr")
+            text = mantisfetch_docreader.local_ocr(b"not-an-image", 1, "paddleocr")
         finally:
-            larkscout_docreader._stop_local_ocr_worker()
+            mantisfetch_docreader._stop_local_ocr_worker()
 
         assert text.startswith("[OCR failed")
 
     def test_local_ocr_worker_default_command_points_at_real_worker(self, monkeypatch):
         # No env override: the default must resolve to the on-disk worker script.
         # Regression guard for the __file__-relative path after the ocr/ package move.
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        monkeypatch.delenv("LARKSCOUT_LOCAL_OCR_WORKER_CMD", raising=False)
-        cmd = larkscout_docreader.ocr.engines._local_ocr_worker_command()
+        monkeypatch.delenv("MANTISFETCH_LOCAL_OCR_WORKER_CMD", raising=False)
+        cmd = mantisfetch_docreader.ocr.engines._local_ocr_worker_command()
         worker_path = Path(cmd[-1])
         assert worker_path.name == "paddle_ocr_worker.py"
         assert worker_path.exists(), f"default worker path does not exist: {worker_path}"
 
     def test_load_document_profile_contract_cn(self):
-        from larkscout_docreader import _load_document_profile
+        from mantisfetch_docreader import _load_document_profile
 
         profile = _load_document_profile("contract_cn", None)
 
@@ -170,7 +170,7 @@ class TestPDFParse:
         assert profile.classification.required_terms
 
     def test_resolve_ocr_render_scale_caps_large_pages(self):
-        from larkscout_docreader import _resolve_ocr_render_scale
+        from mantisfetch_docreader import _resolve_ocr_render_scale
 
         class Rect:
             width = 1500
@@ -191,7 +191,7 @@ class TestPDFParse:
         assert pixels <= 4_000_000
 
     def test_assess_contract_quality_detects_scan_only_pdf(self):
-        from larkscout_docreader import _assess_contract_quality, _load_document_profile
+        from mantisfetch_docreader import _assess_contract_quality, _load_document_profile
 
         profile = _load_document_profile("contract_cn", None)
         assessment = _assess_contract_quality(
@@ -208,7 +208,7 @@ class TestPDFParse:
         assert assessment["is_contract"] is True
 
     def test_classify_contract_text_matches_required_terms(self):
-        from larkscout_docreader import _classify_contract_text, _load_document_profile
+        from mantisfetch_docreader import _classify_contract_text, _load_document_profile
 
         profile = _load_document_profile("contract_cn", None)
         is_contract, matched_terms = _classify_contract_text(
@@ -220,7 +220,7 @@ class TestPDFParse:
         assert matched_terms == ["合同", "甲方", "乙方"]
 
     def test_plan_pdf_ocr_uses_local_backend_for_scan_only_accurate_mode(self):
-        from larkscout_docreader import _load_document_profile, _plan_pdf_ocr
+        from mantisfetch_docreader import _load_document_profile, _plan_pdf_ocr
 
         profile = _load_document_profile("contract_cn", None)
         plan = _plan_pdf_ocr(
@@ -247,7 +247,7 @@ class TestPDFParse:
         assert plan["region_llm"] is True
 
     def test_plan_pdf_ocr_force_ocr_uses_llm_full_path(self):
-        from larkscout_docreader import _load_document_profile, _plan_pdf_ocr
+        from mantisfetch_docreader import _load_document_profile, _plan_pdf_ocr
 
         profile = _load_document_profile("contract_cn", None)
         plan = _plan_pdf_ocr(
@@ -268,7 +268,7 @@ class TestPDFParse:
         assert plan["proofread"] is True
 
     def test_plan_pdf_ocr_explicit_pages_upgrade_only_selected_pages(self):
-        from larkscout_docreader import _load_document_profile, _plan_pdf_ocr
+        from mantisfetch_docreader import _load_document_profile, _plan_pdf_ocr
 
         profile = _load_document_profile("contract_cn", None)
         plan = _plan_pdf_ocr(
@@ -295,7 +295,7 @@ class TestPDFParse:
         heuristics or would be suppressed as an arabic-clause heading), while deeper
         ### markers stay inside the parent section.
         """
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         body = "段落正文" * 30  # 120 chars, defeats _merge_short_sections
         text = "\n".join(
@@ -336,7 +336,7 @@ class TestPDFParse:
         source docx. They must not become section boundaries; their content
         stays in the parent section body.
         """
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         body = "段落正文" * 30
         text = "\n".join(
@@ -366,7 +366,7 @@ class TestPDFParse:
         """A short ``## 6.2 ... 内容:`` style heading (<=30 chars) is legitimate
         even though it ends in 冒号, and must not be demoted.
         """
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         body = "段落正文" * 30
         text = "\n".join(
@@ -389,7 +389,7 @@ class TestPDFParse:
 
     def test_markdown_heading_h3_only_doc_still_cuts_sections(self):
         """When a doc uses only H3 markers (no H1/H2), H3 becomes the section level."""
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         body = "段落正文" * 30
         text = "\n".join(
@@ -407,7 +407,7 @@ class TestPDFParse:
         assert [s.title for s in sections] == ["第一章 引言", "第二章 方法", "第三章 结论"]
 
     def test_tender_section_split_keeps_third_level_under_second_level(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -437,7 +437,7 @@ class TestPDFParse:
         assert "3.1.2 智能故障发现与定位" in sections[0].text
 
     def test_dense_pdf_toc_compacts_same_page_entries_without_duplicates(self):
-        from larkscout_docreader import PageContent, _split_sections_from_toc
+        from mantisfetch_docreader import PageContent, _split_sections_from_toc
 
         pages = [
             PageContent(
@@ -472,8 +472,8 @@ class TestPDFParse:
         assert len({section.text for section in sections}) == len(sections)
 
     def test_long_document_summary_skips_per_section_llm_calls(self, monkeypatch):
-        import larkscout_docreader
-        from larkscout_docreader import ParsedDocument, Section
+        import mantisfetch_docreader
+        from mantisfetch_docreader import ParsedDocument, Section
 
         calls = []
 
@@ -483,8 +483,8 @@ class TestPDFParse:
                 return "digest"
             return "brief"
 
-        monkeypatch.setattr(larkscout_docreader, "SUMMARY_SECTION_DETAIL_LIMIT", 2)
-        monkeypatch.setattr(larkscout_docreader, "gemini_summarize", fake_summarize)
+        monkeypatch.setattr(mantisfetch_docreader, "SUMMARY_SECTION_DETAIL_LIMIT", 2)
+        monkeypatch.setattr(mantisfetch_docreader, "gemini_summarize", fake_summarize)
         parsed = ParsedDocument(
             filename="tender.pdf",
             file_type="pdf",
@@ -496,7 +496,7 @@ class TestPDFParse:
             ],
         )
 
-        digest, brief, sections = larkscout_docreader.generate_summaries(parsed, concurrency=3)
+        digest, brief, sections = mantisfetch_docreader.generate_summaries(parsed, concurrency=3)
 
         assert digest == "digest"
         assert brief == "brief"
@@ -505,7 +505,7 @@ class TestPDFParse:
         assert all(not section.summary for section in parsed.sections)
 
     def test_plan_pdf_ocr_skips_detected_blank_scan_pages(self):
-        from larkscout_docreader import _load_document_profile, _plan_pdf_ocr
+        from mantisfetch_docreader import _load_document_profile, _plan_pdf_ocr
 
         profile = _load_document_profile("contract_cn", None)
         plan = _plan_pdf_ocr(
@@ -527,12 +527,12 @@ class TestPDFParse:
         assert plan["llm_ocr_pages"] == []
 
     def test_metadata_page_range_spec_accepts_list_values(self):
-        from larkscout_docreader import _metadata_page_range_spec
+        from mantisfetch_docreader import _metadata_page_range_spec
 
         assert _metadata_page_range_spec([20, 28, "32-34"]) == "20,28,32-34"
 
     def test_resolve_summary_mode_uses_contract_profile_async_for_accurate(self):
-        from larkscout_docreader import _load_document_profile, _resolve_summary_mode
+        from mantisfetch_docreader import _load_document_profile, _resolve_summary_mode
 
         profile = _load_document_profile("contract_cn", None)
         mode = _resolve_summary_mode(
@@ -545,7 +545,7 @@ class TestPDFParse:
         assert mode == "defer"
 
     def test_classify_summary_error_maps_rate_limit(self):
-        from larkscout_docreader import _classify_summary_error
+        from mantisfetch_docreader import _classify_summary_error
 
         code, message = _classify_summary_error(RuntimeError("Error code: 429 - 速率限制"))
 
@@ -553,7 +553,7 @@ class TestPDFParse:
         assert message == "upstream rate limit"
 
     def test_strip_section_storage_wrapper_removes_summary_prefix(self):
-        from larkscout_docreader import _strip_section_storage_wrapper
+        from mantisfetch_docreader import _strip_section_storage_wrapper
 
         raw = (
             "# 合同条款\n\n"
@@ -565,7 +565,7 @@ class TestPDFParse:
         assert _strip_section_storage_wrapper(raw) == "正文内容"
 
     def test_pdf_page_ranges_are_not_collapsed_to_page_one(self):
-        from larkscout_docreader import _page_bounds, parse_pdf
+        from mantisfetch_docreader import _page_bounds, parse_pdf
 
         from tests.e2e.fixtures.generate_fixtures import generate_pdf
 
@@ -579,7 +579,7 @@ class TestPDFParse:
         assert any((start == 2 or end == 2) for start, end in page_ranges), page_ranges
 
     def test_extract_tables_from_ocr_text_strips_footer_page_number(self):
-        from larkscout_docreader import _extract_tables_from_ocr_text
+        from mantisfetch_docreader import _extract_tables_from_ocr_text
 
         text, tables = _extract_tables_from_ocr_text(
             "合同正文\n甲方：测试公司\n2",
@@ -591,7 +591,7 @@ class TestPDFParse:
         assert tables == []
 
     def test_cleanup_ocr_text_removes_watermark_noise_and_footer(self):
-        from larkscout_docreader import _cleanup_ocr_text
+        from mantisfetch_docreader import _cleanup_ocr_text
 
         cleaned = _cleanup_ocr_text(
             "\n".join(
@@ -618,7 +618,7 @@ class TestPDFParse:
         assert "括其雇员、工作员或代理" in cleaned
 
     def test_cleanup_ocr_text_removes_stray_dingzuo_after_sign_place(self):
-        from larkscout_docreader import _cleanup_ocr_text
+        from mantisfetch_docreader import _cleanup_ocr_text
 
         cleaned = _cleanup_ocr_text(
             "\n".join(
@@ -638,7 +638,7 @@ class TestPDFParse:
         assert "上海市浦东新区" in cleaned
 
     def test_cleanup_ocr_text_uses_source_filename_for_leading_doc_id(self):
-        from larkscout_docreader import _cleanup_ocr_text
+        from mantisfetch_docreader import _cleanup_ocr_text
 
         cleaned = _cleanup_ocr_text(
             "NBS220752\n甲方（委托方）：华夏基金管理有限公司\n第1页 / 共25页",
@@ -649,7 +649,7 @@ class TestPDFParse:
         assert "第1页" not in cleaned
 
     def test_cleanup_ocr_text_removes_generic_llm_preface(self):
-        from larkscout_docreader import _cleanup_ocr_text
+        from mantisfetch_docreader import _cleanup_ocr_text
 
         cleaned = _cleanup_ocr_text(
             "Preface\n兴业数字金融服务（上海）股份有限公司\n合同编号： CFT-JT-FZ-202205-0018"
@@ -658,7 +658,7 @@ class TestPDFParse:
         assert cleaned.splitlines()[0] == "兴业数字金融服务（上海）股份有限公司"
 
     def test_cleanup_ocr_text_normalizes_product_and_numeric_noise(self):
-        from larkscout_docreader import _cleanup_ocr_text
+        from mantisfetch_docreader import _cleanup_ocr_text
 
         cleaned = _cleanup_ocr_text(
             "基调研云APM监测268个探针\n"
@@ -674,7 +674,11 @@ class TestPDFParse:
         assert "其他语言探针" in cleaned
 
     def test_extract_profile_fields_rejects_bad_cover_values_and_uses_filename(self):
-        from larkscout_docreader import PageContent, _extract_profile_fields, _load_document_profile
+        from mantisfetch_docreader import (
+            PageContent,
+            _extract_profile_fields,
+            _load_document_profile,
+        )
 
         profile = _load_document_profile("contract_cn", None)
         fields = _extract_profile_fields(
@@ -703,7 +707,11 @@ class TestPDFParse:
         assert fields["sign_place"]["value"] == "上海市浦东新区"
 
     def test_extract_profile_fields_supports_cover_party_labels(self):
-        from larkscout_docreader import PageContent, _extract_profile_fields, _load_document_profile
+        from mantisfetch_docreader import (
+            PageContent,
+            _extract_profile_fields,
+            _load_document_profile,
+        )
 
         profile = _load_document_profile("contract_cn", None)
         fields = _extract_profile_fields(
@@ -728,7 +736,7 @@ class TestPDFParse:
         assert fields["sign_place"]["value"] == "北京市顺义区后沙峪镇空港B区安庆大街甲3号"
 
     def test_extract_tables_from_ocr_text_keeps_table_complete(self):
-        from larkscout_docreader import _extract_tables_from_ocr_text
+        from mantisfetch_docreader import _extract_tables_from_ocr_text
 
         text, tables = _extract_tables_from_ocr_text(
             "\n".join(
@@ -758,7 +766,7 @@ class TestPDFParse:
         ]
 
     def test_extract_tables_from_ocr_text_ignores_header_only_markdown_table(self):
-        from larkscout_docreader import _extract_tables_from_ocr_text
+        from mantisfetch_docreader import _extract_tables_from_ocr_text
 
         text, tables = _extract_tables_from_ocr_text(
             "\n".join(
@@ -777,7 +785,7 @@ class TestPDFParse:
         assert tables == []
 
     def test_split_sections_does_not_treat_table_rows_as_headings(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -808,7 +816,7 @@ class TestPDFParse:
         assert "1 平台A 1 13% ¥29,800.00" in sections[0].text
 
     def test_split_sections_does_not_treat_price_table_values_as_headings(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -842,7 +850,7 @@ class TestPDFParse:
         assert "75 月/个" in sections[0].text
 
     def test_split_sections_ocr_mode_ignores_logo_and_nested_clauses(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -874,7 +882,7 @@ class TestPDFParse:
         )
 
     def test_source_contract_no_is_prepended_to_region_ocr(self):
-        from larkscout_docreader import _prepend_source_contract_no_if_missing
+        from mantisfetch_docreader import _prepend_source_contract_no_if_missing
 
         text = _prepend_source_contract_no_if_missing(
             "北京基调网络股份有限公司\n技术服务合同",
@@ -884,7 +892,7 @@ class TestPDFParse:
         assert text.splitlines()[0] == "NBS250961"
 
     def test_split_sections_ocr_mode_merges_tiny_sections(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -907,13 +915,13 @@ class TestPDFParse:
         assert "2.碎片标题" in sections[0].text
 
     def test_is_ocr_failed_text_accepts_chinese_placeholder(self):
-        from larkscout_docreader import _is_ocr_failed_text
+        from mantisfetch_docreader import _is_ocr_failed_text
 
         assert _is_ocr_failed_text("[OCR failed: page 1]")
         assert _is_ocr_failed_text("[OCR 失败: 第 1 页]")
 
     def test_split_sections_does_not_treat_account_number_as_heading(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -941,7 +949,7 @@ class TestPDFParse:
         assert "626 526 390" in sections[0].text
 
     def test_split_sections_supports_dash_numbered_contract_headings(self):
-        from larkscout_docreader import PageContent, _split_sections
+        from mantisfetch_docreader import PageContent, _split_sections
 
         pages = [
             PageContent(
@@ -971,7 +979,7 @@ class TestPDFParse:
         assert "400-898-9580" in sections[1].text
 
     def test_replace_blob_segment_falls_back_to_matching_alias(self):
-        from larkscout_docreader import FieldGroup, _replace_blob_segment
+        from mantisfetch_docreader import FieldGroup, _replace_blob_segment
 
         group = FieldGroup(
             id="quotation_block",
@@ -987,7 +995,7 @@ class TestPDFParse:
         assert replaced == "页眉\n\n客户名称：联想（北京）有限公司\n小计 ¥711,016.00"
 
     def test_normalize_document_text_removes_signature_watermark_lines(self):
-        from larkscout_docreader import PageContent, _normalize_document_text
+        from mantisfetch_docreader import PageContent, _normalize_document_text
 
         pages = [
             PageContent(
@@ -1017,22 +1025,22 @@ class TestDocIdStrategy:
     """doc_id generation can derive a safe directory name from the source filename."""
 
     def test_source_filename_strategy_uses_stem(self, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        monkeypatch.setenv("LARKSCOUT_DOC_ID_STRATEGY", "source_filename")
+        monkeypatch.setenv("MANTISFETCH_DOC_ID_STRATEGY", "source_filename")
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            assert larkscout_docreader._resolve_doc_id(docs_dir, "NBS250321.pdf", None) == "NBS250321"
+            assert mantisfetch_docreader._resolve_doc_id(docs_dir, "NBS250321.pdf", None) == "NBS250321"
 
     def test_source_filename_strategy_filters_unsupported_chars(self, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        monkeypatch.setenv("LARKSCOUT_DOC_ID_STRATEGY", "source_filename")
+        monkeypatch.setenv("MANTISFETCH_DOC_ID_STRATEGY", "source_filename")
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            result = larkscout_docreader._resolve_doc_id(
+            result = mantisfetch_docreader._resolve_doc_id(
                 docs_dir,
                 "合同/NBS_250321（终版）.pdf",
                 None,
@@ -1040,13 +1048,13 @@ class TestDocIdStrategy:
             assert result == "NBS-250321"
 
     def test_source_filename_strategy_falls_back_when_nothing_usable_remains(self, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        monkeypatch.setenv("LARKSCOUT_DOC_ID_STRATEGY", "source_filename")
+        monkeypatch.setenv("MANTISFETCH_DOC_ID_STRATEGY", "source_filename")
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            result = larkscout_docreader._resolve_doc_id(docs_dir, "合同终版.pdf", None)
+            result = mantisfetch_docreader._resolve_doc_id(docs_dir, "合同终版.pdf", None)
             assert result == "DOC-001"
 
 
@@ -1076,7 +1084,7 @@ class TestAtomicWriteText:
     """M9: _write_text must use atomic write pattern."""
 
     def test_write_text_is_atomic(self):
-        from larkscout_docreader import _write_text
+        from mantisfetch_docreader import _write_text
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "test.md"
@@ -1090,13 +1098,13 @@ class TestGeminiOCRRetry:
     """M6: OCR must retry on failure like summarize()."""
 
     def test_docreader_ocr_wrapper_handles_provider_init_failure(self, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         import providers
 
         monkeypatch.setattr(providers, "get_provider", lambda: (_ for _ in ()).throw(RuntimeError("missing key")))
 
-        result = larkscout_docreader.gemini_ocr(b"png-bytes", page_num=2)
+        result = mantisfetch_docreader.gemini_ocr(b"png-bytes", page_num=2)
 
         assert result == "[OCR failed: page 2]"
 

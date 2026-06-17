@@ -36,7 +36,7 @@ def generate_pdf(dest: Path | None = None) -> Path:
     page1 = doc.new_page(width=595, height=842)  # A4
     page1.insert_text(
         (50, 80),
-        "LarkScout E2E Test Document",
+        "MantisFetch E2E Test Document",
         fontsize=18,
         fontname="helv",
     )
@@ -50,7 +50,7 @@ def generate_pdf(dest: Path | None = None) -> Path:
         (50, 145),
         (
             "This document is a programmatically generated fixture used\n"
-            "by the LarkScout E2E test suite to verify PDF parsing,\n"
+            "by the MantisFetch E2E test suite to verify PDF parsing,\n"
             "section extraction, and digest generation.\n"
             "It contains two pages with structured content."
         ),
@@ -66,7 +66,7 @@ def generate_pdf(dest: Path | None = None) -> Path:
     page1.insert_text(
         (50, 285),
         (
-            "LarkScout is an open-source data collection and document\n"
+            "MantisFetch is an open-source data collection and document\n"
             "parsing platform. It supports PDF, DOCX, XLSX, and CSV\n"
             "formats with OCR fallback for scanned documents.\n\n"
             "The three-tier loading strategy (digest / brief / section)\n"
@@ -128,7 +128,7 @@ def generate_pdf(dest: Path | None = None) -> Path:
     page2.insert_text(
         (50, 345),
         (
-            "LarkScout delivers efficient document processing with\n"
+            "MantisFetch delivers efficient document processing with\n"
             "minimal resource usage. The provider abstraction layer\n"
             "enables seamless switching between LLM backends."
         ),
@@ -153,18 +153,18 @@ def generate_docx(dest: Path | None = None) -> Path:
     out = dest or FIXTURES_DIR / "sample.docx"
     doc = Document()
 
-    doc.add_heading("LarkScout E2E Test Document", level=1)
+    doc.add_heading("MantisFetch E2E Test Document", level=1)
 
     doc.add_heading("Abstract", level=2)
     doc.add_paragraph(
         "This document is a programmatically generated fixture used "
-        "by the LarkScout E2E test suite to verify DOCX parsing, "
+        "by the MantisFetch E2E test suite to verify DOCX parsing, "
         "section extraction, and digest generation."
     )
 
     doc.add_heading("Introduction", level=2)
     doc.add_paragraph(
-        "LarkScout is an open-source data collection and document "
+        "MantisFetch is an open-source data collection and document "
         "parsing platform by ReadyForAI. It provides a unified API "
         "for web capture and document parsing with LLM-powered summaries."
     )
@@ -202,7 +202,7 @@ def generate_docx(dest: Path | None = None) -> Path:
 
     doc.add_heading("Conclusion", level=2)
     doc.add_paragraph(
-        "LarkScout delivers efficient document processing with minimal "
+        "MantisFetch delivers efficient document processing with minimal "
         "resource usage. The multi-LLM provider abstraction enables "
         "seamless switching between Gemini, OpenAI, Ollama, and other backends."
     )

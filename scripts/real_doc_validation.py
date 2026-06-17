@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate real LarkScout document outputs for scanned-PDF sidecar rollout."""
+"""Validate real MantisFetch document outputs for scanned-PDF sidecar rollout."""
 
 from __future__ import annotations
 

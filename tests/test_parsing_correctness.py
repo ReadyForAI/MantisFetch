@@ -2,7 +2,7 @@
 
 
 def test_rmb_amount_overflow_returns_none_not_indexerror():  # #37
-    from larkscout_docreader.text_utils import _amount_to_uppercase_rmb
+    from mantisfetch_docreader.text_utils import _amount_to_uppercase_rmb
 
     # >= 1e16 has more 10^4 groups than the unit table; must return None, not raise.
     assert _amount_to_uppercase_rmb("10000000000000000") is None
@@ -13,8 +13,8 @@ def test_rmb_amount_overflow_returns_none_not_indexerror():  # #37
 
 
 def test_replace_blob_segment_end_alias_without_start_alias():  # #25
-    from larkscout_docreader.models import FieldGroup
-    from larkscout_docreader.profiles import _replace_blob_segment
+    from mantisfetch_docreader.models import FieldGroup
+    from mantisfetch_docreader.profiles import _replace_blob_segment
 
     # start_alias is None; start is found via `aliases`, end via end_alias.
     group = FieldGroup(
@@ -29,7 +29,7 @@ def test_replace_blob_segment_end_alias_without_start_alias():  # #25
 
 
 def test_markdown_table_dimensions_ignores_all_empty_rows():  # #41
-    from larkscout_docreader.ocr.tables import _markdown_table_dimensions
+    from mantisfetch_docreader.ocr.tables import _markdown_table_dimensions
 
     table = "| A | B |\n|---|---|\n| 1 | 2 |\n|   |   |\n"
     dims = _markdown_table_dimensions(table)
@@ -41,7 +41,7 @@ def test_markdown_table_dimensions_ignores_all_empty_rows():  # #41
 
 
 def test_trim_action_fields_never_truncates_css_selector():  # #24
-    from larkscout_browser import _trim_action_fields
+    from mantisfetch_browser import _trim_action_fields
 
     short = {"strategy": {"type": "css", "selector": "div.foo > span.bar"}, "name": "x"}
     out = _trim_action_fields(short, name_max=50, selector_max=100)

@@ -1,4 +1,4 @@
-# LarkScout runtime dependencies
+# MantisFetch runtime dependencies
 # Python >= 3.11 required
 
 # Web framework

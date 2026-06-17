@@ -20,8 +20,8 @@ _doc_index_lock = threading.Lock()
 
 DEFAULT_DOCS_DIR = Path(
     os.environ.get(
-        "LARKSCOUT_DOCS_DIR",
-        os.path.expanduser("~/.larkscout/docs"),
+        "MANTISFETCH_DOCS_DIR",
+        os.path.expanduser("~/.mantisfetch/docs"),
     )
 )
 

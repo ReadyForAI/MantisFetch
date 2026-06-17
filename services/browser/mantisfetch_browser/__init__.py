@@ -15,10 +15,10 @@ from fastapi import FastAPI, HTTPException
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from i18n import t
-from larkscout_common.atomic import _write_json
-from larkscout_common.atomic import _write_text as _write_text_atomic
-from larkscout_common.paths import _mask_path
-from larkscout_common.storage import (
+from mantisfetch_common.atomic import _write_json
+from mantisfetch_common.atomic import _write_text as _write_text_atomic
+from mantisfetch_common.paths import _mask_path
+from mantisfetch_common.storage import (
     _doc_index_lock,
     _doc_storage_rel_path,
     _get_docs_dir,
@@ -207,15 +207,15 @@ from .vision import (
     yolo_detect_ui_components as yolo_detect_ui_components,
 )
 
-logger = logging.getLogger("larkscout_browser")
+logger = logging.getLogger("mantisfetch_browser")
 
 # ============================================================
 # Config
 # ============================================================
 
 # ---- Rate limiting (in-memory semaphores) ----
-_MAX_CONCURRENT_CAPTURE = int(os.environ.get("LARKSCOUT_MAX_CONCURRENT_CAPTURE", "10"))
-_MAX_CONCURRENT_SESSIONS = int(os.environ.get("LARKSCOUT_MAX_CONCURRENT_SESSIONS", "20"))
+_MAX_CONCURRENT_CAPTURE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_CAPTURE", "10"))
+_MAX_CONCURRENT_SESSIONS = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_SESSIONS", "20"))
 _capture_sem = asyncio.Semaphore(_MAX_CONCURRENT_CAPTURE)
 _session_sem = asyncio.Semaphore(_MAX_CONCURRENT_SESSIONS)
 
@@ -1444,7 +1444,7 @@ _browser: Browser | None = None
 
 
 _web_counter_lock = threading.Lock()
-# doc-index.json writes serialize on the shared larkscout_common lock
+# doc-index.json writes serialize on the shared mantisfetch_common lock
 # (_doc_index_lock, imported above) so they can't race docreader's parse writes.
 
 

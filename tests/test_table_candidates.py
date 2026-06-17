@@ -1,5 +1,5 @@
 def _block(block_id, text, bbox, confidence=0.9):
-    from larkscout_docreader import OCRTextBlock
+    from mantisfetch_docreader import OCRTextBlock
 
     return OCRTextBlock(
         block_id=block_id,
@@ -10,7 +10,7 @@ def _block(block_id, text, bbox, confidence=0.9):
 
 
 def test_detect_table_candidates_from_ocr_grid():
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         _detect_table_candidates_from_ocr_blocks,
@@ -52,7 +52,7 @@ def test_detect_table_candidates_from_ocr_grid():
 
 
 def test_detect_table_candidates_ignores_paragraph_like_blocks():
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         _detect_table_candidates_from_ocr_blocks,
@@ -80,7 +80,7 @@ def test_detect_table_candidates_ignores_paragraph_like_blocks():
 
 
 def test_detect_table_candidates_requires_multiple_rows():
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         _detect_table_candidates_from_ocr_blocks,
@@ -108,7 +108,7 @@ def test_detect_table_candidates_requires_multiple_rows():
 
 
 def test_reconstruct_table_from_candidate_preserves_cell_refs():
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         _detect_table_candidates_from_ocr_blocks,
@@ -149,7 +149,7 @@ def test_reconstruct_table_from_candidate_preserves_cell_refs():
 def test_write_tables_emits_structured_table_sidecar(tmp_path):
     import json
 
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         ParsedDocument,
@@ -196,7 +196,7 @@ def test_write_tables_emits_structured_table_sidecar(tmp_path):
 def test_write_tables_links_cross_page_continuation(tmp_path):
     import json
 
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         ParsedDocument,
@@ -251,7 +251,7 @@ def test_write_tables_links_cross_page_continuation(tmp_path):
 
 
 def test_write_tables_does_not_link_unrelated_adjacent_tables(tmp_path):
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         ParsedDocument,
@@ -302,7 +302,7 @@ def test_write_tables_does_not_link_unrelated_adjacent_tables(tmp_path):
 
 
 def test_write_tables_skips_when_extract_tables_false(tmp_path):
-    from larkscout_docreader import (
+    from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
         PageContent,

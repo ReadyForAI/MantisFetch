@@ -26,7 +26,7 @@ from .models import DocumentProfile, PageContent, ParsedDocument, Section
 from .ocr.tables import _count_markdown_tables
 from .sectioning import _split_sections
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 
 def parse_xlsx(filepath: Path) -> ParsedDocument:

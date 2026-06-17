@@ -4,7 +4,7 @@ Owns the long-lived local OCR worker subprocess and its module-level state
 (the singleton handle, its lock/ready/initializing events, and the
 circuit-breaker timestamp) plus the worker timeout/breaker config. These
 globals are mutated in place, so they must live in exactly one module: tests
-patch them at ``larkscout_docreader.ocr.engines`` (not the package facade),
+patch them at ``mantisfetch_docreader.ocr.engines`` (not the package facade),
 since a re-exported copy would not track reassignment.
 
 Depends only on stdlib, i18n, the LLM provider factory (imported lazily inside
@@ -33,17 +33,17 @@ from i18n import t
 
 from ..models import OCRPageBlocks, OCRTextBlock, _normalize_layout_bbox
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 # ── Local OCR worker config (worker-only; tests patch these here) ──
 LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC = float(
-    os.environ.get("LARKSCOUT_LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", "180")
+    os.environ.get("MANTISFETCH_LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", "180")
 )
 LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC = float(
-    os.environ.get("LARKSCOUT_LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", "180")
+    os.environ.get("MANTISFETCH_LOCAL_OCR_WORKER_REQUEST_TIMEOUT_SEC", "180")
 )
 LOCAL_OCR_CIRCUIT_BREAKER_SEC = float(
-    os.environ.get("LARKSCOUT_LOCAL_OCR_CIRCUIT_BREAKER_SEC", "120")
+    os.environ.get("MANTISFETCH_LOCAL_OCR_CIRCUIT_BREAKER_SEC", "120")
 )
 
 # ── Local OCR worker state (mutated in place; single owner) ──
@@ -92,10 +92,10 @@ def _ocr_cache_key(image_bytes: bytes) -> str:
 
 
 def _local_ocr_worker_command() -> list[str]:
-    raw = os.environ.get("LARKSCOUT_LOCAL_OCR_WORKER_CMD", "").strip()
+    raw = os.environ.get("MANTISFETCH_LOCAL_OCR_WORKER_CMD", "").strip()
     if raw:
         return shlex.split(raw)
-    # engines.py lives at services/docreader/larkscout_docreader/ocr/; the
+    # engines.py lives at services/docreader/mantisfetch_docreader/ocr/; the
     # worker script sits at services/docreader/ — parents[2].
     worker = Path(__file__).resolve().parents[2] / "paddle_ocr_worker.py"
     return [sys.executable, str(worker)]

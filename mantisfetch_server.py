@@ -1,4 +1,4 @@
-"""LarkScout unified server entry point.
+"""MantisFetch unified server entry point.
 
 Mounts the browser service at /web and the document reader at /doc on a
 single FastAPI instance, served on port 9898 by default.
@@ -28,8 +28,8 @@ _ROOT = Path(__file__).parent
 sys.path.insert(0, str(_ROOT / "services" / "browser"))
 sys.path.insert(0, str(_ROOT / "services" / "docreader"))
 
-from larkscout_browser import app as browser_app  # noqa: E402
-from larkscout_docreader import app as doc_app  # noqa: E402
+from mantisfetch_browser import app as browser_app  # noqa: E402
+from mantisfetch_docreader import app as doc_app  # noqa: E402
 
 
 @asynccontextmanager
@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="LarkScout",
+    title="MantisFetch",
     version="0.1.0",
     description="Open-source data collection and document parsing platform by ReadyForAI.",
     lifespan=lifespan,

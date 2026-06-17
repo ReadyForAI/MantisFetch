@@ -36,7 +36,7 @@ from .sectioning import (
     _strip_heading_markup,
 )
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 WORD_XML_NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",

@@ -1,4 +1,4 @@
-"""Shared utilities across LarkScout services (browser + docreader).
+"""Shared utilities across MantisFetch services (browser + docreader).
 
 Houses code that must stay byte-identical between the /web and /doc services —
 chiefly the document-library storage layout that doc-index v2 shares across

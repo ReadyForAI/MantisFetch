@@ -1,6 +1,6 @@
 ---
-name: larkscout-browser
-description: 通过 LarkScout Browser 服务（Python Playwright）进行网页浏览。支持页面导航、正文与表格的语义蒸馏、增量 diff（changed_sids）、可执行动作（click/type/select/scroll/invoke）、自动将 HTML <table> 提取为 Markdown 并附带数值列统计、WebMCP 结构化工具发现与调用（Chrome 146+ navigator.modelContext）、可选 Readability.js 阅读模式、A11y 自动回退、对 SPA 友好（wait_for_selector + 文本密度检测），以及通过“body budget + total output budget”严格限制输出长度，从而显著降低 token 消耗。它是 LarkScout 开源数据采集平台的一部分。
+name: mantisfetch-browser
+description: 通过 MantisFetch Browser 服务（Python Playwright）进行网页浏览。支持页面导航、正文与表格的语义蒸馏、增量 diff（changed_sids）、可执行动作（click/type/select/scroll/invoke）、自动将 HTML <table> 提取为 Markdown 并附带数值列统计、WebMCP 结构化工具发现与调用（Chrome 146+ navigator.modelContext）、可选 Readability.js 阅读模式、A11y 自动回退、对 SPA 友好（wait_for_selector + 文本密度检测），以及通过“body budget + total output budget”严格限制输出长度，从而显著降低 token 消耗。它是 MantisFetch 开源数据采集平台的一部分。
 triggers:
   - "浏览网页"
   - "打开链接"
@@ -27,7 +27,7 @@ triggers:
   - "保存页面"
 ---
 
-# SKILL: LarkScout Browser（语义蒸馏浏览器 + WebMCP）
+# SKILL: MantisFetch Browser（语义蒸馏浏览器 + WebMCP）
 
 ## 1. 用途
 
@@ -37,7 +37,7 @@ triggers:
 
 ## 2. 服务依赖
 
-- 外部服务：LarkScout Browser Service（FastAPI + Playwright）
+- 外部服务：MantisFetch Browser Service（FastAPI + Playwright）
 - Base URL: `http://127.0.0.1:9898/web/`
 
 ---
@@ -225,7 +225,7 @@ If false:
   "ok": true,
   "sessions": 2,
   "readability_available": true,
-  "readability_js_path": "~/.larkscout/Readability.js",
+  "readability_js_path": "~/.mantisfetch/Readability.js",
   "yolo_enabled": false,
   "yolo_onnx_path": null,
   "yolo_input_size": 640,
@@ -923,12 +923,12 @@ distill(max_table_rows=80) → table truncated=true, rows=500
 ↓
 Option A: stats already contain needed values → use directly
 Option B: need specific rows → scroll to target position → re-distill
-Option C: need full data → prompt user to export CSV/XLSX, hand off to LarkScout DocReader for processing
+Option C: need full data → prompt user to export CSV/XLSX, hand off to MantisFetch DocReader for processing
 ```
 
-### 6.9 LarkScout 文档库持久化流程
+### 6.9 MantisFetch 文档库持久化流程
 
-将采集结果（包括表格）写入 LarkScout 文档库：
+将采集结果（包括表格）写入 MantisFetch 文档库：
 
 ```
 distill(extract_tables=true, include_actions=false)

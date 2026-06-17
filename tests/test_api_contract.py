@@ -49,7 +49,7 @@ def test_search_total_is_true_match_count(client: TestClient):  # #28
         for i, f in docs:
             _seed_doc(docs_dir, i, f)
         _seed_index(docs_dir, docs)
-        with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+        with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
             resp = client.get("/doc/library/search", params={"q": "report", "limit": 2})
         assert resp.status_code == 200
         data = resp.json()
@@ -64,7 +64,7 @@ def test_search_negative_limit_is_clamped(client: TestClient):  # #40
         for i, f in docs:
             _seed_doc(docs_dir, i, f)
         _seed_index(docs_dir, docs)
-        with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+        with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
             resp = client.get("/doc/library/search", params={"q": "report", "limit": -1})
         assert resp.status_code == 200
         assert len(resp.json()["results"]) >= 1  # negative used to drop results
@@ -75,7 +75,7 @@ def test_get_section_matches_sid_exactly(client: TestClient):  # #39
         docs_dir = Path(tmp)
         _seed_doc(docs_dir, "DOC-001", "x.pdf")
         _seed_index(docs_dir, [("DOC-001", "x.pdf")])
-        with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+        with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
             ok = client.get("/doc/library/DOC-001/section/abc123")
             by_index = client.get("/doc/library/DOC-001/section/01")  # filename substring, not a sid
             by_title = client.get("/doc/library/DOC-001/section/Intro")
@@ -87,7 +87,7 @@ def test_get_section_matches_sid_exactly(client: TestClient):  # #39
 
 def test_parse_page_range_raises_422():  # #26 (ocr_pages / skip_ocr_pages)
     from fastapi import HTTPException
-    from larkscout_docreader.pdf_planning import _parse_page_range
+    from mantisfetch_docreader.pdf_planning import _parse_page_range
 
     with pytest.raises(HTTPException) as e1:
         _parse_page_range("not-a-range", 10)

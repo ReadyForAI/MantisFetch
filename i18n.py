@@ -1,5 +1,5 @@
 """
-LarkScout i18n — lightweight internationalization, zero dependencies.
+MantisFetch i18n — lightweight internationalization, zero dependencies.
 
 Usage:
     from i18n import t, prompt, tmpl, get_locale, set_locale

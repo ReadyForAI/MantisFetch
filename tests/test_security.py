@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def doc_client():
     """TestClient for the docreader sub-app."""
-    from larkscout_docreader import app
+    from mantisfetch_docreader import app
 
     return TestClient(app, raise_server_exceptions=False)
 
@@ -82,9 +82,9 @@ class TestUploadSizeLimit:
     """H3: oversized file uploads must return 413."""
 
     def test_oversized_upload(self, doc_client, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        monkeypatch.setattr(larkscout_docreader, "MAX_UPLOAD_BYTES", 1024)
+        monkeypatch.setattr(mantisfetch_docreader, "MAX_UPLOAD_BYTES", 1024)
         big_content = b"%PDF-1.4 " + b"x" * 2048
         resp = doc_client.post(
             "/parse",
@@ -93,9 +93,9 @@ class TestUploadSizeLimit:
         assert resp.status_code == 413
 
     def test_small_upload_passes_size_check(self, doc_client, monkeypatch):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        monkeypatch.setattr(larkscout_docreader, "MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
+        monkeypatch.setattr(mantisfetch_docreader, "MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
         small_content = b"%PDF-1.4 small file"
         resp = doc_client.post(
             "/parse",
@@ -119,7 +119,7 @@ class TestUploadFilenameTraversal:
         ],
     )
     def test_safe_source_filename_cannot_escape(self, evil, tmp_path):
-        from larkscout_docreader import _safe_source_filename
+        from mantisfetch_docreader import _safe_source_filename
 
         safe = _safe_source_filename(evil)
         assert "/" not in safe and "\\" not in safe
@@ -127,7 +127,7 @@ class TestUploadFilenameTraversal:
         assert (tmp_path / safe).resolve().parent == tmp_path.resolve()
 
     def test_parse_filename_cannot_escape_scratch_dir(self, doc_client, monkeypatch, tmp_path):
-        import larkscout_common.storage as common_storage
+        import mantisfetch_common.storage as common_storage
 
         docs_dir = tmp_path / "docs"
         monkeypatch.setattr(common_storage, "DEFAULT_DOCS_DIR", docs_dir)
@@ -156,14 +156,14 @@ class TestProfileConfigLFI:
         ],
     )
     def test_profile_name_cannot_escape(self, evil):
-        from larkscout_docreader.profiles import _load_document_profile
+        from mantisfetch_docreader.profiles import _load_document_profile
 
         # Must NOT read the target — raises "not found", never loads the file.
         with pytest.raises(RuntimeError, match="not found"):
             _load_document_profile(evil, None)
 
     def test_traversal_basename_collision_loads_in_dir_profile(self):
-        from larkscout_docreader.profiles import _load_document_profile
+        from mantisfetch_docreader.profiles import _load_document_profile
 
         # The directory part is stripped, so this can only ever load the
         # in-config-dir bid_cn profile — never the targeted path.
@@ -171,7 +171,7 @@ class TestProfileConfigLFI:
         assert prof is not None
 
     def test_field_ocr_config_absolute_path_blocked(self, tmp_path):
-        from larkscout_docreader.profiles import _load_document_profile
+        from mantisfetch_docreader.profiles import _load_document_profile
 
         # A valid JSON file outside the config dirs must not be loadable.
         leak = tmp_path / "leak.json"
@@ -180,7 +180,7 @@ class TestProfileConfigLFI:
             _load_document_profile(None, str(leak))
 
     def test_known_profile_still_loads(self):
-        from larkscout_docreader.profiles import _load_document_profile
+        from mantisfetch_docreader.profiles import _load_document_profile
 
         prof = _load_document_profile("bid_cn", None)
         assert prof is not None
@@ -193,60 +193,60 @@ class TestSSRF:
     """C6: SSRF via goto and capture must be blocked."""
 
     def test_file_scheme_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="scheme not allowed"):
             _validate_url("file:///etc/passwd")
 
     def test_ftp_scheme_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="scheme not allowed"):
             _validate_url("ftp://evil.com/malware")
 
     def test_metadata_ip_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="private/reserved"):
             _validate_url("http://169.254.169.254/latest/meta-data")
 
     def test_loopback_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="private/reserved"):
             _validate_url("http://127.0.0.1:9898/health")
 
     def test_private_10_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="private/reserved"):
             _validate_url("http://10.0.0.1/admin")
 
     def test_private_192_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="private/reserved"):
             _validate_url("http://192.168.1.1/")
 
     def test_localhost_name_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="not allowed"):
             _validate_url("http://localhost:8080/secret")
 
     def test_ipv6_loopback_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="private/reserved"):
             _validate_url("http://[::1]/")
 
     def test_valid_https_passes(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         _validate_url("https://example.com/page")
 
     def test_valid_http_passes(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         _validate_url("http://example.com:8080/api")
 
@@ -260,25 +260,25 @@ class TestSSRF:
         ],
     )
     def test_encoded_ip_forms_blocked(self, url):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="private/reserved"):
             _validate_url(url)
 
     def test_trailing_dot_localhost_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="not allowed"):
             _validate_url("http://localhost./")
 
     def test_metadata_fqdn_blocked(self):
-        from larkscout_browser import _validate_url
+        from mantisfetch_browser import _validate_url
 
         with pytest.raises(Exception, match="not allowed"):
             _validate_url("http://metadata.google.internal/computeMetadata/v1/")
 
     def test_url_allowed_blocks_domain_resolving_to_private(self, monkeypatch):
-        import larkscout_browser.security as sec
+        import mantisfetch_browser.security as sec
 
         def fake_getaddrinfo(host, *a, **k):
             return [(2, 1, 6, "", ("169.254.169.254", 0))]
@@ -287,7 +287,7 @@ class TestSSRF:
         assert sec._url_allowed("http://rebind.attacker.example/") is False
 
     def test_url_allowed_passes_domain_resolving_to_public(self, monkeypatch):
-        import larkscout_browser.security as sec
+        import mantisfetch_browser.security as sec
 
         def fake_getaddrinfo(host, *a, **k):
             return [(2, 1, 6, "", ("93.184.216.34", 0))]
@@ -296,7 +296,7 @@ class TestSSRF:
         assert sec._url_allowed("http://public.example/") is True
 
     def test_url_allowed_blocks_unresolvable(self, monkeypatch):
-        import larkscout_browser.security as sec
+        import mantisfetch_browser.security as sec
 
         def boom(host, *a, **k):
             raise OSError("nxdomain")
@@ -307,7 +307,7 @@ class TestSSRF:
         assert sec._url_allowed("http://nonexistent.invalid/") is False
 
     def test_validate_url_prechecks_domain_without_dns(self, monkeypatch):
-        import larkscout_browser.security as sec
+        import mantisfetch_browser.security as sec
 
         def boom(host, *a, **k):
             raise AssertionError("pre-check must not resolve DNS")

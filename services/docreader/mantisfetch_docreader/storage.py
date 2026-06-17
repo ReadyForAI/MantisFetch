@@ -7,7 +7,7 @@ This module owns the on-disk bookkeeping for parsed documents:
 - the doc-index.json read/write layer (`_load_doc_index`, `_update_doc_index`),
 - doc directory resolution from index/manifest (`_resolve_doc_dir` and friends).
 
-The cross-service path/content-type primitives live in `larkscout_common.storage`;
+The cross-service path/content-type primitives live in `mantisfetch_common.storage`;
 this layer is docreader-specific (DOC-prefixed ids, doc-index schema, locks).
 Locks and the WeakValueDictionary are process-local state and stay here — they
 are re-exported from the package facade as shared references, not duplicated.
@@ -29,8 +29,8 @@ from typing import Any
 from fastapi import HTTPException
 
 from i18n import t
-from larkscout_common.atomic import _write_json
-from larkscout_common.storage import (
+from mantisfetch_common.atomic import _write_json
+from mantisfetch_common.storage import (
     CONTENT_TYPE_DIRS,
     _doc_index_lock,
     _doc_storage_dir,
@@ -74,7 +74,7 @@ async def _optional_doc_id_lock(doc_id: str | None):
 # ═══════════════════════════════════════════
 
 _doc_counter_lock = threading.Lock()
-# _doc_index_lock is the process-wide shared lock from larkscout_common.storage
+# _doc_index_lock is the process-wide shared lock from mantisfetch_common.storage
 # (imported above) so /web and /doc serialize on the same doc-index.json.
 
 
@@ -232,7 +232,7 @@ def _next_doc_id(docs_dir: Path) -> str:
 
 
 def _doc_id_strategy(requested_strategy: str | None = None) -> str:
-    strategy = (requested_strategy or os.environ.get("LARKSCOUT_DOC_ID_STRATEGY", "counter")).strip().lower()
+    strategy = (requested_strategy or os.environ.get("MANTISFETCH_DOC_ID_STRATEGY", "counter")).strip().lower()
     return strategy if strategy in {"counter", "source_filename"} else "counter"
 
 

@@ -51,11 +51,11 @@ from .ocr_text import (
 from .profiles import _apply_field_focused_ocr, _load_document_profile
 from .sectioning import _split_sections, _split_sections_from_toc
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 # PDF-only OCR config (kept here, re-exported from the facade for the endpoint).
 OCR_THRESHOLD = 50
-LOCAL_OCR_CONCURRENCY = max(1, int(os.environ.get("LARKSCOUT_LOCAL_OCR_CONCURRENCY", "1")))
+LOCAL_OCR_CONCURRENCY = max(1, int(os.environ.get("MANTISFETCH_LOCAL_OCR_CONCURRENCY", "1")))
 
 
 def parse_pdf(

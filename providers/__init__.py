@@ -1,6 +1,6 @@
 """LLM provider factory.
 
-Selects the active provider via LARKSCOUT_LLM_PROVIDER env var (default: gemini).
+Selects the active provider via MANTISFETCH_LLM_PROVIDER env var (default: gemini).
 Supported values: "gemini", "openai" (any OpenAI-compatible REST API).
 
 The resolved provider is cached as a module-level singleton so callers share one
@@ -21,7 +21,7 @@ _provider_lock = threading.Lock()
 def get_provider() -> LLMProvider:
     """Return the cached LLM provider, creating it on first call.
 
-    The provider is selected by the LARKSCOUT_LLM_PROVIDER environment variable:
+    The provider is selected by the MANTISFETCH_LLM_PROVIDER environment variable:
       - "gemini"  (default) → GeminiProvider
       - "openai"            → OpenAICompatProvider
     """
@@ -34,7 +34,7 @@ def get_provider() -> LLMProvider:
         if _provider is not None:
             return _provider
 
-        name = os.environ.get("LARKSCOUT_LLM_PROVIDER", "gemini").lower().strip()
+        name = os.environ.get("MANTISFETCH_LLM_PROVIDER", "gemini").lower().strip()
 
         if name == "gemini":
             from providers.gemini import GeminiProvider
@@ -46,7 +46,7 @@ def get_provider() -> LLMProvider:
             provider = OpenAICompatProvider()
         else:
             raise ValueError(
-                f"Unknown LARKSCOUT_LLM_PROVIDER={name!r}. "
+                f"Unknown MANTISFETCH_LLM_PROVIDER={name!r}. "
                 "Supported values: 'gemini', 'openai'."
             )
 

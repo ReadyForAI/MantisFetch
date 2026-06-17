@@ -1,4 +1,4 @@
-Fix the following bug in the LarkScout project.
+Fix the following bug in the MantisFetch project.
 
 Before making changes:
 1. Reproduce or locate the issue in the codebase

@@ -5,7 +5,7 @@ import sys
 import time
 
 import pytest
-from larkscout_docreader.ocr.engines import _read_local_ocr_worker_message
+from mantisfetch_docreader.ocr.engines import _read_local_ocr_worker_message
 
 
 def _proc(script: str) -> subprocess.Popen:

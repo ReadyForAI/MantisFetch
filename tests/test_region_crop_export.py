@@ -46,7 +46,7 @@ def _write_doc_fixture(tmp_path, *, with_ocr_blocks=False):
 
 
 def test_export_pdf_region_crop_writes_derived_artifacts(tmp_path):
-    from larkscout_docreader import export_pdf_region_crop
+    from mantisfetch_docreader import export_pdf_region_crop
 
     docs_dir, doc_dir = _write_doc_fixture(tmp_path)
 
@@ -72,7 +72,7 @@ def test_export_pdf_region_crop_writes_derived_artifacts(tmp_path):
 
 
 def test_export_pdf_region_crop_converts_image_pixel_bbox(tmp_path):
-    from larkscout_docreader import export_pdf_region_crop
+    from mantisfetch_docreader import export_pdf_region_crop
 
     docs_dir, _doc_dir = _write_doc_fixture(tmp_path, with_ocr_blocks=True)
 
@@ -90,7 +90,7 @@ def test_export_pdf_region_crop_converts_image_pixel_bbox(tmp_path):
 
 
 def test_export_pdf_region_crop_rejects_invalid_page(tmp_path):
-    from larkscout_docreader import export_pdf_region_crop
+    from mantisfetch_docreader import export_pdf_region_crop
 
     docs_dir, _doc_dir = _write_doc_fixture(tmp_path)
 
@@ -108,7 +108,7 @@ def test_export_pdf_region_crop_rejects_invalid_page(tmp_path):
 
 
 def test_export_pdf_region_crop_rejects_invalid_bbox(tmp_path):
-    from larkscout_docreader import export_pdf_region_crop
+    from mantisfetch_docreader import export_pdf_region_crop
 
     docs_dir, _doc_dir = _write_doc_fixture(tmp_path)
 
@@ -126,8 +126,8 @@ def test_export_pdf_region_crop_rejects_invalid_bbox(tmp_path):
 
 
 def test_rerun_region_ocr_writes_separate_artifact(tmp_path, monkeypatch):
-    import larkscout_docreader
-    from larkscout_docreader import OCRPageBlocks, OCRTextBlock, rerun_region_ocr
+    import mantisfetch_docreader
+    from mantisfetch_docreader import OCRPageBlocks, OCRTextBlock, rerun_region_ocr
 
     docs_dir, doc_dir = _write_doc_fixture(tmp_path)
     canonical = doc_dir / "full.md"
@@ -155,7 +155,7 @@ def test_rerun_region_ocr_writes_separate_artifact(tmp_path, monkeypatch):
             ),
         )
 
-    monkeypatch.setattr(larkscout_docreader, "local_ocr_with_layout", fake_local_ocr)
+    monkeypatch.setattr(mantisfetch_docreader, "local_ocr_with_layout", fake_local_ocr)
 
     result = rerun_region_ocr(
         docs_dir,
@@ -186,7 +186,7 @@ def test_rerun_region_ocr_writes_separate_artifact(tmp_path, monkeypatch):
 
 
 def test_rerun_region_ocr_rejects_invalid_region(tmp_path):
-    from larkscout_docreader import rerun_region_ocr
+    from mantisfetch_docreader import rerun_region_ocr
 
     docs_dir, _doc_dir = _write_doc_fixture(tmp_path)
 
@@ -205,7 +205,7 @@ def test_rerun_region_ocr_rejects_invalid_region(tmp_path):
 
 
 def test_generate_visual_debug_artifacts_is_opt_in_and_annotates_overlays(tmp_path):
-    from larkscout_docreader import generate_visual_debug_artifacts
+    from mantisfetch_docreader import generate_visual_debug_artifacts
 
     docs_dir, doc_dir = _write_doc_fixture(tmp_path, with_ocr_blocks=True)
     ocr_sidecar = {
@@ -264,7 +264,7 @@ def test_generate_visual_debug_artifacts_is_opt_in_and_annotates_overlays(tmp_pa
 def test_visual_debug_tables_render_without_ocr_blocks(tmp_path):  # #23
     """Table overlays must still scale (against OCR-sidecar pixel dims) and
     render when include_ocr_blocks=False — they don't fall back to PDF points."""
-    from larkscout_docreader import generate_visual_debug_artifacts
+    from mantisfetch_docreader import generate_visual_debug_artifacts
 
     docs_dir, doc_dir = _write_doc_fixture(tmp_path, with_ocr_blocks=True)
     (doc_dir / "ocr_blocks.json").write_text(

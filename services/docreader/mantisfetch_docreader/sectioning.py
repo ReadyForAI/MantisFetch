@@ -23,7 +23,7 @@ from i18n import tmpl_for_locale
 
 from .models import PageContent, Section, SectionPolicy
 
-logger = logging.getLogger("larkscout_docreader")
+logger = logging.getLogger("mantisfetch_docreader")
 
 HEADING_PATTERNS = [
     re.compile(r"^第[一二三四五六七八九十\d]+[章节部分篇]\s*[、:：]?\s*.+"),

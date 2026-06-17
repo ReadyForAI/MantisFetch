@@ -148,7 +148,7 @@ class TestLibraryDigest:
     def test_digest_returns_content(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/digest")
         assert resp.status_code == 200
         data = resp.json()
@@ -157,7 +157,7 @@ class TestLibraryDigest:
 
     def test_digest_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-999/digest")
         assert resp.status_code == 404
 
@@ -166,7 +166,7 @@ class TestLibraryBrief:
     def test_brief_returns_content(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/brief")
         assert resp.status_code == 200
         data = resp.json()
@@ -175,7 +175,7 @@ class TestLibraryBrief:
 
     def test_brief_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-999/brief")
         assert resp.status_code == 404
 
@@ -184,7 +184,7 @@ class TestLibraryFull:
     def test_full_returns_content(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/full")
         assert resp.status_code == 200
         data = resp.json()
@@ -193,7 +193,7 @@ class TestLibraryFull:
 
     def test_full_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-999/full")
         assert resp.status_code == 404
 
@@ -207,7 +207,7 @@ class TestLibrarySections:
     def test_list_sections(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/sections")
         assert resp.status_code == 200
         data = resp.json()
@@ -219,7 +219,7 @@ class TestLibrarySections:
     def test_read_section_by_sid(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/section/abc123")
         assert resp.status_code == 200
         data = resp.json()
@@ -229,14 +229,14 @@ class TestLibrarySections:
     def test_section_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/section/nonexistent")
         assert resp.status_code == 404
 
     def test_read_table(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/table/01")
         assert resp.status_code == 200
         assert "Table 1" in resp.json()["content"]
@@ -244,7 +244,7 @@ class TestLibrarySections:
     def test_table_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/table/99")
         assert resp.status_code == 404
 
@@ -258,7 +258,7 @@ class TestLibrarySearch:
     def test_search_by_keyword(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search?q=test")
         assert resp.status_code == 200
         data = resp.json()
@@ -268,7 +268,7 @@ class TestLibrarySearch:
     def test_search_by_tag(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search?tags=Q3")
         assert resp.status_code == 200
         assert resp.json()["total"] >= 1
@@ -276,7 +276,7 @@ class TestLibrarySearch:
     def test_search_by_file_type(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search?file_type=pdf")
         assert resp.status_code == 200
         assert resp.json()["total"] >= 1
@@ -284,7 +284,7 @@ class TestLibrarySearch:
     def test_search_no_match(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search?q=zzz_no_match")
         assert resp.status_code == 200
         assert resp.json()["total"] == 0
@@ -292,7 +292,7 @@ class TestLibrarySearch:
     def test_search_by_metadata_filter(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search?metadata.customer=ACME")
         assert resp.status_code == 200
         data = resp.json()
@@ -301,7 +301,7 @@ class TestLibrarySearch:
 
     def test_search_empty_index(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search?q=anything")
         assert resp.status_code == 200
         assert resp.json()["total"] == 0
@@ -316,7 +316,7 @@ class TestLibraryManifest:
     def test_manifest_returns_json(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/manifest")
         assert resp.status_code == 200
         data = resp.json()
@@ -328,7 +328,7 @@ class TestLibraryManifest:
 
     def test_manifest_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-999/manifest")
         assert resp.status_code == 404
 
@@ -336,7 +336,7 @@ class TestLibraryManifest:
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
             _setup_doc(docs_dir, doc_id="DOC-777", content_type="Contract")
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 manifest = client.get("/doc/library/DOC-777/manifest")
                 digest = client.get("/doc/library/DOC-777/digest")
                 search = client.get("/doc/library/search?content_type=Contract")
@@ -397,7 +397,7 @@ class TestLibrarySidecars:
                 json.dumps({"table_id": "table-01", "rows": []}), encoding="utf-8"
             )
 
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 discovery = client.get("/doc/library/DOC-001/sidecars")
                 pages = client.get("/doc/library/DOC-001/layout/pages")
                 page = client.get("/doc/library/DOC-001/layout/page/1")
@@ -429,7 +429,7 @@ class TestLibrarySidecars:
     def test_table_json_requires_structured_sidecar(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/table/01/json")
 
         assert resp.status_code == 404
@@ -439,7 +439,7 @@ class TestLibrarySearchText:
     def test_search_text_returns_section_match_and_page_hint(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/search_text?q=payment&scope=section")
         assert resp.status_code == 200
         data = resp.json()
@@ -455,7 +455,7 @@ class TestLibrarySearchText:
             docs_dir = Path(tmp)
             _setup_doc(docs_dir)
             (docs_dir / "doc-index.json").unlink()
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.get(
                     "/doc/library/search_text?q=payment&scope=section&doc_id=DOC-001"
                 )
@@ -477,7 +477,7 @@ class TestLibrarySearchText:
             manifest["sections"][0]["file"] = "../leak.md"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.get("/doc/library/search_text?q=needle&scope=section")
         assert resp.status_code == 200
         assert resp.json()["total"] == 0
@@ -512,7 +512,7 @@ class TestLibrarySearchText:
                 encoding="utf-8",
             )
 
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.get("/doc/library/search_text?q=needle&scope=full")
         assert resp.status_code == 200
         assert resp.json()["total"] == 0
@@ -522,7 +522,7 @@ class TestLibrarySectionSearchAndChunks:
     def test_search_sections_returns_section_provenance(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.post(
                     "/doc/library/DOC-001/search_sections",
                     json={"q": "payment", "include_content": True},
@@ -539,7 +539,7 @@ class TestLibrarySectionSearchAndChunks:
     def test_chunk_document_uses_section_boundaries(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.post(
                     "/doc/library/DOC-001/chunks",
                     json={"max_tokens_per_chunk": 4000, "include_text": False},
@@ -563,14 +563,14 @@ class TestLibrarySectionSearchAndChunks:
 class TestRateLimiting:
     def test_parse_sem_locked_returns_429(self, client: TestClient):
         """When _parse_sem is fully acquired, parse should return 429."""
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        original_sem = larkscout_docreader._parse_sem
+        original_sem = mantisfetch_docreader._parse_sem
         # Replace with a semaphore of size 0 (always locked)
         import asyncio
 
         locked_sem = asyncio.Semaphore(0)
-        larkscout_docreader._parse_sem = locked_sem
+        mantisfetch_docreader._parse_sem = locked_sem
         try:
             resp = client.post(
                 "/doc/parse",
@@ -578,17 +578,17 @@ class TestRateLimiting:
             )
             assert resp.status_code == 429
         finally:
-            larkscout_docreader._parse_sem = original_sem
+            mantisfetch_docreader._parse_sem = original_sem
 
     def test_capture_sem_locked_returns_429(self, client: TestClient):
         """When _capture_sem is fully acquired, capture should return 429."""
-        import larkscout_browser
+        import mantisfetch_browser
 
-        original_sem = larkscout_browser._capture_sem
+        original_sem = mantisfetch_browser._capture_sem
         import asyncio
 
         locked_sem = asyncio.Semaphore(0)
-        larkscout_browser._capture_sem = locked_sem
+        mantisfetch_browser._capture_sem = locked_sem
         try:
             resp = client.post(
                 "/web/capture",
@@ -596,22 +596,22 @@ class TestRateLimiting:
             )
             assert resp.status_code == 429
         finally:
-            larkscout_browser._capture_sem = original_sem
+            mantisfetch_browser._capture_sem = original_sem
 
     def test_session_sem_locked_returns_429(self, client: TestClient):
         """When _session_sem is fully acquired, new session should return 429."""
-        import larkscout_browser
+        import mantisfetch_browser
 
-        original_sem = larkscout_browser._session_sem
+        original_sem = mantisfetch_browser._session_sem
         import asyncio
 
         locked_sem = asyncio.Semaphore(0)
-        larkscout_browser._session_sem = locked_sem
+        mantisfetch_browser._session_sem = locked_sem
         try:
             resp = client.post("/web/session/new", json={})
             assert resp.status_code == 429
         finally:
-            larkscout_browser._session_sem = original_sem
+            mantisfetch_browser._session_sem = original_sem
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +638,7 @@ class TestInputValidation:
     def test_table_id_traversal_blocked(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))
-            with patch("larkscout_docreader._get_docs_dir", return_value=Path(tmp)):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
                 resp = client.get("/doc/library/DOC-001/table/../../etc/passwd")
         assert resp.status_code in (400, 404, 422)
 
@@ -685,9 +685,9 @@ class TestRetrySummaryPreservesExtracted:
         return d
 
     def test_summary_rewrite_keeps_tables_images_ocr(self, monkeypatch, tmp_path):
-        import larkscout_docreader as dr
+        import mantisfetch_docreader as dr
 
-        import larkscout_common.storage as cs
+        import mantisfetch_common.storage as cs
 
         docs_dir = tmp_path / "docs"
         docs_dir.mkdir()
@@ -713,9 +713,9 @@ class TestRetrySummaryPreservesExtracted:
 
     def test_full_rewrite_without_preserve_resets_extracted(self, monkeypatch, tmp_path):
         # Control: the default (parse) path still regenerates from parsed.
-        import larkscout_docreader as dr
+        import mantisfetch_docreader as dr
 
-        import larkscout_common.storage as cs
+        import mantisfetch_common.storage as cs
 
         docs_dir = tmp_path / "docs"
         docs_dir.mkdir()
@@ -740,7 +740,7 @@ class TestParseReplaceProtection:
             docs_dir = Path(tmp)
             existing_id = "REPLACE-TEST-001"
             _setup_doc(docs_dir, existing_id, content_type="Contract")
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.post(
                     "/doc/parse",
                     files={"file": ("test.pdf", b"%PDF-1.4 minimal", "application/pdf")},
@@ -761,7 +761,7 @@ class TestParseReplaceProtection:
             docs_dir = Path(tmp)
             existing_id = "REPLACE-TEST-002"
             _setup_doc(docs_dir, existing_id, content_type="Contract")
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.post(
                     "/doc/parse",
                     files={"file": ("test.pdf", b"%PDF-1.4 minimal", "application/pdf")},
@@ -770,9 +770,9 @@ class TestParseReplaceProtection:
         assert resp.status_code != 409
 
     def test_parse_response_model_defaults_dedup_to_miss(self):
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        fields = larkscout_docreader.ParseResponse.model_fields
+        fields = mantisfetch_docreader.ParseResponse.model_fields
         assert "dedup" in fields
         assert fields["dedup"].default == "miss"
 
@@ -787,7 +787,7 @@ class TestParseReplaceProtection:
             docs_dir = Path(tmp)
             existing_id = "REPLACE-TEST-003"
             _setup_doc(docs_dir, existing_id, content_type="Contract")
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.post(
                     "/doc/parse",
                     files={
@@ -811,14 +811,14 @@ class TestParseReplaceProtection:
         """While a request is inside `async with _optional_doc_id_lock(id)`,
         any concurrent same-id lookup must see the same Lock instance —
         that's how concurrent same-explicit-id parses serialize."""
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        async with larkscout_docreader._optional_doc_id_lock("LOCK-A"):
-            lock_a = larkscout_docreader._doc_id_parse_locks["LOCK-A"]
-            lock_a_again = larkscout_docreader._doc_id_parse_locks["LOCK-A"]
+        async with mantisfetch_docreader._optional_doc_id_lock("LOCK-A"):
+            lock_a = mantisfetch_docreader._doc_id_parse_locks["LOCK-A"]
+            lock_a_again = mantisfetch_docreader._doc_id_parse_locks["LOCK-A"]
             assert lock_a is lock_a_again
-            async with larkscout_docreader._optional_doc_id_lock("LOCK-B"):
-                lock_b = larkscout_docreader._doc_id_parse_locks["LOCK-B"]
+            async with mantisfetch_docreader._optional_doc_id_lock("LOCK-B"):
+                lock_b = mantisfetch_docreader._doc_id_parse_locks["LOCK-B"]
                 assert lock_b is not lock_a
 
     @pytest.mark.asyncio
@@ -828,13 +828,13 @@ class TestParseReplaceProtection:
         when callers churn through high-cardinality explicit doc_ids."""
         import gc
 
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        larkscout_docreader._doc_id_parse_locks.pop("LOCK-EPHEMERAL", None)
-        async with larkscout_docreader._optional_doc_id_lock("LOCK-EPHEMERAL"):
-            assert "LOCK-EPHEMERAL" in larkscout_docreader._doc_id_parse_locks
+        mantisfetch_docreader._doc_id_parse_locks.pop("LOCK-EPHEMERAL", None)
+        async with mantisfetch_docreader._optional_doc_id_lock("LOCK-EPHEMERAL"):
+            assert "LOCK-EPHEMERAL" in mantisfetch_docreader._doc_id_parse_locks
         gc.collect()
-        assert "LOCK-EPHEMERAL" not in larkscout_docreader._doc_id_parse_locks
+        assert "LOCK-EPHEMERAL" not in mantisfetch_docreader._doc_id_parse_locks
 
     @pytest.mark.asyncio
     async def test_retry_summary_serializes_on_doc_lock(self, monkeypatch, tmp_path):
@@ -842,8 +842,8 @@ class TestParseReplaceProtection:
         a concurrent parse/retry — and it must use the (formerly dead) helper."""
         import asyncio
 
-        import larkscout_docreader as dr
-        from larkscout_docreader.models import ParsedDocument
+        import mantisfetch_docreader as dr
+        from mantisfetch_docreader.models import ParsedDocument
 
         parsed = ParsedDocument(
             filename="f", file_type="pdf", total_pages=0, pages=[], sections=[], metadata={}
@@ -869,8 +869,8 @@ class TestParseReplaceProtection:
     async def test_retry_summary_claims_running_then_rejects_concurrent(self, monkeypatch, tmp_path):
         """C13: a retry claims the slot by marking running; a second retry then
         409s (no duplicate worker), but force overrides."""
-        import larkscout_docreader as dr
-        from larkscout_docreader.models import ParsedDocument
+        import mantisfetch_docreader as dr
+        from mantisfetch_docreader.models import ParsedDocument
 
         parsed = ParsedDocument(
             filename="f", file_type="pdf", total_pages=0, pages=[], sections=[], metadata={}
@@ -895,8 +895,8 @@ class TestParseReplaceProtection:
     async def test_retry_summary_allows_stale_pending(self, monkeypatch, tmp_path):
         """C13: a doc left 'pending' by the parse path (worker never ran) must
         still be retryable without force — pending is not treated as in-flight."""
-        import larkscout_docreader as dr
-        from larkscout_docreader.models import ParsedDocument
+        import mantisfetch_docreader as dr
+        from mantisfetch_docreader.models import ParsedDocument
 
         parsed = ParsedDocument(
             filename="f", file_type="pdf", total_pages=0, pages=[], sections=[],
@@ -920,17 +920,17 @@ class TestParseReplaceProtection:
         concurrent same-filename uploads don't both pick the same id."""
         import asyncio
 
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
             held_lock = asyncio.Lock()
-            larkscout_docreader._doc_id_parse_locks["report1"] = held_lock
+            mantisfetch_docreader._doc_id_parse_locks["report1"] = held_lock
             try:
-                picked = larkscout_docreader._next_filename_doc_id(docs_dir, "report1.pdf")
+                picked = mantisfetch_docreader._next_filename_doc_id(docs_dir, "report1.pdf")
                 assert picked == "report1-2"
             finally:
-                larkscout_docreader._doc_id_parse_locks.pop("report1", None)
+                mantisfetch_docreader._doc_id_parse_locks.pop("report1", None)
                 del held_lock
 
     @pytest.mark.asyncio
@@ -940,7 +940,7 @@ class TestParseReplaceProtection:
         must reserve room for the suffix and produce a distinct candidate."""
         import asyncio
 
-        import larkscout_docreader
+        import mantisfetch_docreader
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -948,25 +948,25 @@ class TestParseReplaceProtection:
             base = ("a" * 79) + "1"
             assert len(base) == 80
             held_lock = asyncio.Lock()
-            larkscout_docreader._doc_id_parse_locks[base] = held_lock
+            mantisfetch_docreader._doc_id_parse_locks[base] = held_lock
             try:
-                picked = larkscout_docreader._next_filename_doc_id(docs_dir, f"{base}.pdf")
+                picked = mantisfetch_docreader._next_filename_doc_id(docs_dir, f"{base}.pdf")
                 assert picked != base
                 assert picked is not None and picked.endswith("-2")
                 assert len(picked) <= 80
             finally:
-                larkscout_docreader._doc_id_parse_locks.pop(base, None)
+                mantisfetch_docreader._doc_id_parse_locks.pop(base, None)
                 del held_lock
 
     def test_oversized_upload_does_not_advance_counter(self, client: TestClient):
         """413 on oversized upload must not burn a counter slot — the next
         well-sized upload should still get DOC-001."""
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        oversize = b"x" * (larkscout_docreader.MAX_UPLOAD_BYTES + 1)
+        oversize = b"x" * (mantisfetch_docreader.MAX_UPLOAD_BYTES + 1)
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp_big = client.post(
                     "/doc/parse",
                     files={"file": ("huge.pdf", oversize, "application/pdf")},
@@ -978,21 +978,21 @@ class TestParseReplaceProtection:
 
     def test_oversized_upload_cleans_scratch_file(self, client: TestClient):
         """413 must remove the streamed scratch tempfile — repeated rejected
-        uploads would otherwise accumulate large `larkscout-upload-*` files
+        uploads would otherwise accumulate large `mantisfetch-upload-*` files
         in the system tmp dir."""
-        import larkscout_docreader
+        import mantisfetch_docreader
 
-        before = {p.name for p in Path(tempfile.gettempdir()).glob("larkscout-upload-*")}
-        oversize = b"x" * (larkscout_docreader.MAX_UPLOAD_BYTES + 1)
+        before = {p.name for p in Path(tempfile.gettempdir()).glob("mantisfetch-upload-*")}
+        oversize = b"x" * (mantisfetch_docreader.MAX_UPLOAD_BYTES + 1)
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.post(
                     "/doc/parse",
                     files={"file": ("huge.pdf", oversize, "application/pdf")},
                 )
                 assert resp.status_code == 413
-        after = {p.name for p in Path(tempfile.gettempdir()).glob("larkscout-upload-*")}
+        after = {p.name for p in Path(tempfile.gettempdir()).glob("mantisfetch-upload-*")}
         leaked = after - before
         assert leaked == set(), f"scratch files leaked after 413: {leaked}"
 
@@ -1017,7 +1017,7 @@ class TestParseReplaceProtection:
         """
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.post(
                     "/doc/parse",
                     files={"file": ("ok.pdf", b"%PDF-1.4 minimal", "application/pdf")},
@@ -1084,7 +1084,7 @@ class TestParseReplaceProtection:
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir):
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir):
                 resp = client.post(
                     "/doc/parse",
                     files={"file": ("with-images.docx", buf.getvalue(), "application/octet-stream")},
@@ -1125,8 +1125,8 @@ class TestParseReplaceProtection:
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
-            with patch("larkscout_docreader._get_docs_dir", return_value=docs_dir), patch(
-                "larkscout_docreader._count_word_embedded_image_references", return_value=1001
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs_dir), patch(
+                "mantisfetch_docreader._count_word_embedded_image_references", return_value=1001
             ):
                 resp = client.post(
                     "/doc/parse",

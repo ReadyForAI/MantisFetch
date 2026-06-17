@@ -152,7 +152,7 @@ def _build_engine():
 
     v2_kwargs: dict[str, Any] = {
         "use_angle_cls": False,
-        "lang": os.environ.get("LARKSCOUT_LOCAL_OCR_LANG", "ch"),
+        "lang": os.environ.get("MANTISFETCH_LOCAL_OCR_LANG", "ch"),
         "show_log": False,
     }
     try:
@@ -167,20 +167,20 @@ def _build_engine():
         "use_doc_unwarping": False,
         "use_textline_orientation": False,
         "text_detection_model_name": os.environ.get(
-            "LARKSCOUT_LOCAL_OCR_DET_MODEL", "PP-OCRv5_mobile_det"
+            "MANTISFETCH_LOCAL_OCR_DET_MODEL", "PP-OCRv5_mobile_det"
         ),
         "text_recognition_model_name": os.environ.get(
-            "LARKSCOUT_LOCAL_OCR_REC_MODEL", "PP-OCRv5_mobile_rec"
+            "MANTISFETCH_LOCAL_OCR_REC_MODEL", "PP-OCRv5_mobile_rec"
         ),
     }
-    if os.environ.get("LARKSCOUT_LOCAL_OCR_ENABLE_HPI", "").strip().lower() in {
+    if os.environ.get("MANTISFETCH_LOCAL_OCR_ENABLE_HPI", "").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }:
         v3_kwargs["enable_hpi"] = True
-    device = os.environ.get("LARKSCOUT_LOCAL_OCR_DEVICE", "").strip()
+    device = os.environ.get("MANTISFETCH_LOCAL_OCR_DEVICE", "").strip()
     if device:
         v3_kwargs["device"] = device
     try:

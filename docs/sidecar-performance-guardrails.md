@@ -4,14 +4,14 @@ Date: 2026-05-04
 
 ## Goal
 
-OCR geometry and table sidecars can become large. Default LarkScout responses must stay low-token: `manifest`, `sections`, `digest`, `brief`, and Markdown table endpoints should not inline OCR block lists.
+OCR geometry and table sidecars can become large. Default MantisFetch responses must stay low-token: `manifest`, `sections`, `digest`, `brief`, and Markdown table endpoints should not inline OCR block lists.
 
 ## Guardrail Script
 
 Use:
 
 ```bash
-python3 scripts/sidecar_metrics.py /Users/grace/.larkscout/docs NBS250932 NBS260336 DOC-020
+python3 scripts/sidecar_metrics.py /Users/grace/.mantisfetch/docs NBS250932 NBS260336 DOC-020
 ```
 
 The script reports:
@@ -47,7 +47,7 @@ The selected local documents were parsed before the OCR geometry sidecar work an
 Command:
 
 ```bash
-python3 scripts/sidecar_metrics.py /private/tmp/larkscout-sidecar-metrics METRIC-NBS260336-P1
+python3 scripts/sidecar_metrics.py /private/tmp/mantisfetch-sidecar-metrics METRIC-NBS260336-P1
 ```
 
 The measured document was generated from `NBS260336.pdf` on 2026-05-04 with local OCR geometry enabled. The parser ran in 68.118 seconds. One page attempted LLM OCR and fell back after a network connection error; four pages produced local PaddleOCR geometry.

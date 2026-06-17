@@ -40,7 +40,7 @@ def test_capture_empty_body_returns_422(client: TestClient) -> None:
 def test_capture_closes_context_when_setup_fails(client: TestClient) -> None:
     """C12: if setup raises before the session manager takes ownership, the
     BrowserContext must be closed (not leaked)."""
-    import larkscout_browser as lb
+    import mantisfetch_browser as lb
 
     mock_context = AsyncMock()
     mock_context.close = AsyncMock()
@@ -49,7 +49,7 @@ def test_capture_closes_context_when_setup_fails(client: TestClient) -> None:
     lb._browser.new_context = AsyncMock(return_value=mock_context)
     try:
         with (
-            patch("larkscout_browser._setup_routing", new=AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("mantisfetch_browser._setup_routing", new=AsyncMock(side_effect=RuntimeError("boom"))),
             pytest.raises(RuntimeError),
         ):
             client.post("/web/capture", json={"url": "https://example.com"})
@@ -67,10 +67,10 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
         docs_dir = Path(tmp_dir)
 
         with (
-            patch("larkscout_browser._get_docs_dir", return_value=docs_dir),
-            patch("larkscout_browser._distill", new=AsyncMock(return_value=distill_result)),
-            patch("larkscout_browser._browser", new=MagicMock()),
-            patch("larkscout_browser._setup_routing", new=AsyncMock()),
+            patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
+            patch("mantisfetch_browser._distill", new=AsyncMock(return_value=distill_result)),
+            patch("mantisfetch_browser._browser", new=MagicMock()),
+            patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
         ):
             # Mock the browser context/page creation chain
             mock_page = AsyncMock()
@@ -78,7 +78,7 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
 
-            import larkscout_browser as lb
+            import mantisfetch_browser as lb
             orig_browser = lb._browser
             lb._browser = MagicMock()
             lb._browser.new_context = AsyncMock(return_value=mock_context)
@@ -127,7 +127,7 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
 
 def test_capture_browser_not_ready(client: TestClient) -> None:
     """POST /web/capture returns 500 when the browser is not initialised."""
-    import larkscout_browser as lb
+    import mantisfetch_browser as lb
 
     orig_browser = lb._browser
     lb._browser = None

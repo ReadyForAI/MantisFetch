@@ -4,13 +4,13 @@ Date: 2026-05-04
 
 ## Scope
 
-Suggested IDs in the plan were `NBS220667`, `NBS220952`, `NBS230310`, and `NBS250523`. Only `NBS250523` exists in the local `/Users/grace/.larkscout/docs` library during this run. Available substitutes used for validation:
+Suggested IDs in the plan were `NBS220667`, `NBS220952`, `NBS230310`, and `NBS250523`. Only `NBS250523` exists in the local `/Users/grace/.mantisfetch/docs` library during this run. Available substitutes used for validation:
 
 - `NBS250523`: scanned contract sample, 9 pages
 - `NBS260336`: scanned table/invoice-like sample, 5 pages
 - `NBS250932`: existing scanned contract baseline, 18 pages, not reparsed in this bounded pass
 
-All new validation outputs were written to `/private/tmp/larkscout-real-validation` or `/private/tmp/larkscout-sidecar-metrics`; the production docs library was not mutated.
+All new validation outputs were written to `/private/tmp/mantisfetch-real-validation` or `/private/tmp/mantisfetch-sidecar-metrics`; the production docs library was not mutated.
 
 ## Commands
 
@@ -18,14 +18,14 @@ Focused checks:
 
 ```bash
 .venv/bin/pytest tests/test_real_doc_validation.py -q
-python3 scripts/real_doc_validation.py /private/tmp/larkscout-real-validation VAL-NBS250523 VAL-NBS260336-BLANK5 --expect-table VAL-NBS260336-BLANK5
-python3 scripts/sidecar_metrics.py /private/tmp/larkscout-real-validation VAL-NBS250523 VAL-NBS260336-BLANK5
+python3 scripts/real_doc_validation.py /private/tmp/mantisfetch-real-validation VAL-NBS250523 VAL-NBS260336-BLANK5 --expect-table VAL-NBS260336-BLANK5
+python3 scripts/sidecar_metrics.py /private/tmp/mantisfetch-real-validation VAL-NBS250523 VAL-NBS260336-BLANK5
 ```
 
 Baseline library check:
 
 ```bash
-python3 scripts/real_doc_validation.py /Users/grace/.larkscout/docs NBS250523 NBS250932 NBS260336 --expect-table NBS260336
+python3 scripts/real_doc_validation.py /Users/grace/.mantisfetch/docs NBS250523 NBS250932 NBS260336 --expect-table NBS260336
 ```
 
 ## Reparse Results

@@ -1,8 +1,8 @@
-"""LarkScout SDK — Quick Start Examples.
+"""MantisFetch SDK — Quick Start Examples.
 
-Run with a LarkScout service already started on http://localhost:9898:
+Run with a MantisFetch service already started on http://localhost:9898:
 
-    python larkscout_server.py &
+    python mantisfetch_server.py &
     python sdk/python/examples/quickstart.py
 """
 
@@ -12,7 +12,7 @@ from pathlib import Path
 # Allow running directly from the repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from larkscout_client import AsyncLarkScoutClient, LarkScoutClient
+from mantisfetch_client import AsyncMantisFetchClient, MantisFetchClient
 
 BASE_URL = "http://localhost:9898"
 
@@ -22,14 +22,14 @@ BASE_URL = "http://localhost:9898"
 
 def example_health_check() -> None:
     """Verify the service is running."""
-    with LarkScoutClient(BASE_URL) as client:
+    with MantisFetchClient(BASE_URL) as client:
         status = client.health()
         print(f"Service health: ok={status.get('ok')}, version={status.get('version')}")
 
 
 def example_web_capture() -> None:
     """Capture a web page and save it to the document library."""
-    with LarkScoutClient(BASE_URL) as client:
+    with MantisFetchClient(BASE_URL) as client:
         result = client.capture(
             "https://en.wikipedia.org/wiki/Python_(programming_language)",
             tags=["wikipedia", "python"],
@@ -44,7 +44,7 @@ def example_web_capture() -> None:
 
 def example_parse_document(file_path: str) -> None:
     """Parse a local PDF or DOCX file."""
-    with LarkScoutClient(BASE_URL) as client:
+    with MantisFetchClient(BASE_URL) as client:
         result = client.parse(
             file_path,
             generate_summary=True,
@@ -60,7 +60,7 @@ def example_parse_document(file_path: str) -> None:
 
 def example_search_and_read(query: str) -> None:
     """Search the document library and read a digest."""
-    with LarkScoutClient(BASE_URL) as client:
+    with MantisFetchClient(BASE_URL) as client:
         results = client.search(query, limit=5)
         print(f"Search '{query}' → {results['total']} results")
         for item in results["results"]:
@@ -74,7 +74,7 @@ def example_search_and_read(query: str) -> None:
 
 def example_read_section(doc_id: str) -> None:
     """List sections and read the first one."""
-    with LarkScoutClient(BASE_URL) as client:
+    with MantisFetchClient(BASE_URL) as client:
         sections_resp = client.list_sections(doc_id)
         sections = sections_resp.get("sections", [])
         if not sections:
@@ -94,7 +94,7 @@ async def example_async_capture() -> None:
     """Async version of web capture."""
     import asyncio  # noqa: F401 — import only needed in async context
 
-    async with AsyncLarkScoutClient(BASE_URL) as client:
+    async with AsyncMantisFetchClient(BASE_URL) as client:
         result = await client.capture(
             "https://en.wikipedia.org/wiki/FastAPI",
             tags=["wikipedia", "fastapi"],
@@ -107,7 +107,7 @@ async def example_async_parallel_digests(doc_ids: list[str]) -> None:
     """Fetch multiple digests concurrently."""
     import asyncio
 
-    async with AsyncLarkScoutClient(BASE_URL) as client:
+    async with AsyncMantisFetchClient(BASE_URL) as client:
         digests = await asyncio.gather(*[client.get_digest(d) for d in doc_ids])
         for d in digests:
             print(f"{d['doc_id']}: {d['content'][:80]}...")
@@ -117,7 +117,7 @@ async def example_async_parallel_digests(doc_ids: list[str]) -> None:
 
 
 def main() -> None:
-    print("=== LarkScout SDK Quick Start ===\n")
+    print("=== MantisFetch SDK Quick Start ===\n")
 
     print("-- Health check --")
     example_health_check()

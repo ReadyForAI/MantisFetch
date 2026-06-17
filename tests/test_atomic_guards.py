@@ -12,7 +12,7 @@ class TestBrowserWriteTextAtomic:
     """_write_text_atomic must write via temp + os.replace."""
 
     def test_basic_write(self):
-        from larkscout_browser import _write_text_atomic
+        from mantisfetch_browser import _write_text_atomic
 
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "test.txt"
@@ -21,7 +21,7 @@ class TestBrowserWriteTextAtomic:
             assert not p.with_suffix(".tmp").exists()
 
     def test_unicode_content(self):
-        from larkscout_browser import _write_text_atomic
+        from mantisfetch_browser import _write_text_atomic
 
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "uni.txt"
@@ -33,7 +33,7 @@ class TestBrowserCounterAtomic:
     """_next_web_doc_id must use atomic write with encoding."""
 
     def test_counter_uses_utf8(self):
-        from larkscout_browser import _next_web_doc_id
+        from mantisfetch_browser import _next_web_doc_id
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -48,7 +48,7 @@ class TestDocreaderCounterAtomic:
     """_next_doc_id must use atomic write with encoding."""
 
     def test_counter_uses_utf8(self):
-        from larkscout_docreader import _next_doc_id
+        from mantisfetch_docreader import _next_doc_id
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -63,7 +63,7 @@ class TestDocIndexDocumentsKeyValidation:
     """doc-index must handle missing or corrupt 'documents' key."""
 
     def test_docreader_handles_missing_documents_key(self):
-        from larkscout_docreader import _update_doc_index
+        from mantisfetch_docreader import _update_doc_index
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -88,7 +88,7 @@ class TestDocIndexDocumentsKeyValidation:
             assert index["documents"][0]["id"] == "DOC-001"
 
     def test_docreader_handles_non_list_documents(self):
-        from larkscout_docreader import _update_doc_index
+        from mantisfetch_docreader import _update_doc_index
 
         with tempfile.TemporaryDirectory() as tmp:
             docs_dir = Path(tmp)
@@ -122,7 +122,7 @@ class TestWebMCPToolNameGuard:
         import ast
         import inspect
 
-        from larkscout_browser import act
+        from mantisfetch_browser import act
 
         source = inspect.getsource(act)
         tree = ast.parse(source)

@@ -74,4 +74,4 @@ COPY . .
 
 EXPOSE 9898
 
-CMD ["python", "larkscout_server.py"]
+CMD ["python", "mantisfetch_server.py"]

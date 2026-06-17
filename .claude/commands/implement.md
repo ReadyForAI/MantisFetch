@@ -1,9 +1,9 @@
-Implement the following requirement for the LarkScout project.
+Implement the following requirement for the MantisFetch project.
 
 Before writing any code:
 1. Read CLAUDE.md for project context
 2. Read relevant SKILL files in `skills/` to understand API contracts
-3. Check `docs/larkscout_opensource_design.md` if the feature touches open-source vs commercial boundaries
+3. Check `docs/mantisfetch_opensource_design.md` if the feature touches open-source vs commercial boundaries
 4. List all files you plan to create or modify, with a one-line summary of each change
 5. Wait for my confirmation before proceeding
 

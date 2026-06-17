@@ -57,7 +57,7 @@ def _convert_vector_image_to_png(image_bytes: bytes, original_ext: str) -> tuple
     binary = shutil.which("soffice") or shutil.which("libreoffice")
     if not binary:
         raise RuntimeError("office converter is not available for vector image conversion")
-    with tempfile.TemporaryDirectory(prefix="larkscout-word-image-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="mantisfetch-word-image-") as tmp:
         tmp_dir = Path(tmp)
         src = tmp_dir / f"image{original_ext}"
         src.write_bytes(image_bytes)
