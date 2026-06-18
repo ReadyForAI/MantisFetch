@@ -56,15 +56,22 @@ _MAX_INLINE_DOC_BYTES = 8 * 1024 * 1024
 def _transport_security() -> TransportSecuritySettings:
     """Keep DNS-rebinding protection on, but allow the intended loopback host:port
     (NodalOS connects to http://127.0.0.1:9898/mcp). Extra hosts/origins for other
-    deployments come from MANTISFETCH_MCP_ALLOWED_HOSTS (comma-separated)."""
+    deployments come from MANTISFETCH_MCP_ALLOWED_HOSTS (comma-separated).
+
+    Origins cover both http and https: a browser/Electron MCP client sends
+    Origin: https://<host> once the server is run with TLS, and FastMCP rejects
+    an unlisted Origin before bearer auth.
+    """
     port = os.environ.get("PORT", "9898")
     hosts = [f"127.0.0.1:{port}", f"localhost:{port}", "127.0.0.1", "localhost"]
-    origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+    origins: list[str] = []
+    for h in (f"127.0.0.1:{port}", f"localhost:{port}"):
+        origins += [f"http://{h}", f"https://{h}"]
     for extra in os.environ.get("MANTISFETCH_MCP_ALLOWED_HOSTS", "").split(","):
         extra = extra.strip()
         if extra:
             hosts.append(extra)
-            origins.append(f"http://{extra}")
+            origins += [f"http://{extra}", f"https://{extra}"]
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
     )
