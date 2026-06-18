@@ -146,6 +146,108 @@ def test_reconstruct_table_from_candidate_preserves_cell_refs():
     assert _markdown_from_structured_table(table) == "| 品名 | 金额 |\n| --- | --- |\n| 软件 | 100 |"
 
 
+def test_colspan_for_bbox_counts_covered_columns():
+    from mantisfetch_docreader.ocr.tables import _colspan_for_bbox
+
+    centers = [100.0, 300.0, 500.0]
+    assert _colspan_for_bbox([100, 0, 560, 20], centers, 20.0) == 3  # spans all three
+    assert _colspan_for_bbox([300, 0, 560, 20], centers, 20.0) == 2  # columns 2-3
+    assert _colspan_for_bbox([100, 0, 180, 20], centers, 20.0) == 1  # single column
+    assert _colspan_for_bbox([100, 0, 110, 20], centers, 20.0) == 1  # never below 1
+
+
+def test_detect_and_reconstruct_recovers_merged_header_colspan():
+    # End-to-end through the real detector: a full-width merged header (a single
+    # cell row) used to be dropped by candidate detection; it must now survive and
+    # carry colspan once reconstructed.
+    from mantisfetch_docreader import (
+        OCRBlocksSidecar,
+        OCRPageBlocks,
+        _detect_table_candidates_from_ocr_blocks,
+        _markdown_from_structured_table,
+        _reconstruct_table_from_candidate,
+    )
+
+    sidecar = OCRBlocksSidecar(
+        doc_id="DOC-006",
+        pages=(
+            OCRPageBlocks(
+                page=1,
+                width=1000,
+                height=1000,
+                blocks=(
+                    _block("p1-b0001", "买方信息", (100, 100, 560, 120)),  # merged header, 3 cols
+                    _block("p1-b0002", "品名", (100, 140, 180, 160)),
+                    _block("p1-b0003", "数量", (300, 140, 360, 160)),
+                    _block("p1-b0004", "金额", (500, 140, 560, 160)),
+                    _block("p1-b0005", "软件", (100, 180, 180, 200)),
+                    _block("p1-b0006", "1", (300, 180, 330, 200)),
+                    _block("p1-b0007", "100", (500, 180, 560, 200)),
+                ),
+            ),
+        ),
+    )
+
+    candidate = _detect_table_candidates_from_ocr_blocks(sidecar)[0]
+    # the merged header is no longer dropped before reconstruction
+    assert "p1-b0001" in candidate["ocr_block_refs"]
+
+    table = _reconstruct_table_from_candidate(sidecar, candidate, "table-01")
+
+    assert table["column_count"] == 3
+    header_cells = table["rows"][0]["cells"]
+    assert len(header_cells) == 1
+    assert header_cells[0]["column"] == 1
+    assert header_cells[0]["colspan"] == 3  # recovered; was hard-coded 1 before
+    assert header_cells[0]["text"] == "买方信息"
+    # data rows stay 1x1
+    data_cells = [c for row in table["rows"][1:] for c in row["cells"]]
+    assert data_cells and all(c["colspan"] == 1 for c in data_cells)
+    # markdown view: merged value in its start column, the rest blank
+    header_line = _markdown_from_structured_table(table).splitlines()[0]
+    assert "买方信息" in header_line
+    assert header_line.count("|") == 4  # 3 columns
+
+
+def test_centered_merged_row_does_not_invent_a_column():
+    # A merged header with a tight/centered OCR bbox (x0 between columns) must not
+    # create a spurious column. Columns come from the data rows; a row that does
+    # not geometrically span >= 2 columns is left out rather than corrupting layout.
+    from mantisfetch_docreader import (
+        OCRBlocksSidecar,
+        OCRPageBlocks,
+        _detect_table_candidates_from_ocr_blocks,
+        _reconstruct_table_from_candidate,
+    )
+
+    sidecar = OCRBlocksSidecar(
+        doc_id="DOC-007",
+        pages=(
+            OCRPageBlocks(
+                page=1,
+                width=1000,
+                height=1000,
+                blocks=(
+                    _block("p1-b0001", "采购清单", (250, 100, 360, 120)),  # centered, between cols
+                    _block("p1-b0002", "品名", (100, 140, 180, 160)),
+                    _block("p1-b0003", "数量", (300, 140, 360, 160)),
+                    _block("p1-b0004", "金额", (500, 140, 560, 160)),
+                    _block("p1-b0005", "软件", (100, 180, 180, 200)),
+                    _block("p1-b0006", "1", (300, 180, 330, 200)),
+                    _block("p1-b0007", "100", (500, 180, 560, 200)),
+                ),
+            ),
+        ),
+    )
+
+    candidate = _detect_table_candidates_from_ocr_blocks(sidecar)[0]
+    table = _reconstruct_table_from_candidate(sidecar, candidate, "table-01")
+
+    assert table["column_count"] == 3  # NOT 4 — centered header didn't invent a column
+    assert "p1-b0001" not in candidate["ocr_block_refs"]  # not a >=2-col span → left out
+    assert all(cell["colspan"] == 1 for row in table["rows"] for cell in row["cells"])
+
+
 def test_write_tables_emits_structured_table_sidecar(tmp_path):
     import json
 

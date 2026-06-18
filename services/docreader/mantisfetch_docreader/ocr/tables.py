@@ -174,19 +174,6 @@ def _cluster_ocr_blocks_into_rows(
     return [sorted(row, key=lambda b: b.bbox[0]) for row in rows]
 
 
-def _count_x_clusters(blocks: list[OCRTextBlock], x_tolerance: float) -> int:
-    clusters: list[float] = []
-    for block in sorted(blocks, key=lambda b: b.bbox[0]):
-        x0 = block.bbox[0]
-        for idx, cluster_x in enumerate(clusters):
-            if abs(x0 - cluster_x) <= x_tolerance:
-                clusters[idx] = (cluster_x + x0) / 2
-                break
-        else:
-            clusters.append(x0)
-    return len(clusters)
-
-
 def _detect_table_candidates_from_ocr_blocks(
     sidecar: OCRBlocksSidecar,
     *,
@@ -204,17 +191,39 @@ def _detect_table_candidates_from_ocr_blocks(
             continue
         heights = [block.bbox[3] - block.bbox[1] for block in blocks]
         widths = [block.bbox[2] - block.bbox[0] for block in blocks]
+        col_tolerance = max(12.0, _median(widths, 40.0) * 0.35)
         rows = _cluster_ocr_blocks_into_rows(blocks, y_tolerance=max(8.0, _median(heights, 12.0) * 0.75))
         valid_rows = [row for row in rows if len(row) >= min_columns]
         if len(valid_rows) < min_rows:
             continue
-        candidate_blocks = [block for row in valid_rows for block in row]
-        column_count = _count_x_clusters(
-            candidate_blocks,
-            x_tolerance=max(12.0, _median(widths, 40.0) * 0.35),
-        )
+        # Columns are defined by the multi-column rows ONLY — a merged single-cell
+        # row (esp. a centered header whose bbox sits between columns) must never
+        # invent a column.
+        anchor_blocks = [block for row in valid_rows for block in row]
+        anchor_centers = _column_centers_for_blocks(anchor_blocks, x_tolerance=col_tolerance)
+        column_count = len(anchor_centers)
         if column_count < min_columns:
             continue
+        # Fold in adjacent single-cell rows (merged headers / spanning totals) that
+        # sit in the table's vertical band AND geometrically span >= 2 of those
+        # columns — otherwise they'd be dropped and lose their colspan. The span
+        # requirement keeps centered/stray single lines out (they'd corrupt layout).
+        row_gap = max(8.0, _median(heights, 12.0) * 1.5)
+        band_top = min(block.bbox[1] for block in anchor_blocks) - row_gap
+        band_bottom = max(block.bbox[3] for block in anchor_blocks) + row_gap
+        spanning_rows = [
+            row
+            for row in rows
+            if 0 < len(row) < min_columns
+            and band_top <= _median([(b.bbox[1] + b.bbox[3]) / 2 for b in row]) <= band_bottom
+            and _colspan_for_bbox(_bbox_union([b.bbox for b in row]), anchor_centers, col_tolerance)
+            >= 2
+        ]
+        table_rows = sorted(
+            valid_rows + spanning_rows,
+            key=lambda row: min(block.bbox[1] for block in row),
+        )
+        candidate_blocks = [block for row in table_rows for block in row]
         xs0 = [block.bbox[0] for block in candidate_blocks]
         ys0 = [block.bbox[1] for block in candidate_blocks]
         xs1 = [block.bbox[2] for block in candidate_blocks]
@@ -225,7 +234,7 @@ def _detect_table_candidates_from_ocr_blocks(
                 "candidate_id": f"p{page.page}-tc{len(candidates) + 1:04d}",
                 "page": page.page,
                 "bbox": [min(xs0), min(ys0), max(xs1), max(ys1)],
-                "row_count": len(valid_rows),
+                "row_count": len(table_rows),
                 "column_count": column_count,
                 "confidence": round(avg_confidence, 4),
                 "source": "ocr_geometry",
@@ -264,6 +273,21 @@ def _assign_column(block: OCRTextBlock, centers: list[float]) -> int:
     return distances.index(min(distances)) + 1
 
 
+def _colspan_for_bbox(bbox: list[float], centers: list[float], x_tolerance: float) -> int:
+    """How many column centers a cell's horizontal extent covers.
+
+    Centers are column left-edges; a cell reaching past column j's edge spans it.
+    A normal single-column cell ends before the next column's edge, so it scores
+    1; a merged header/total cell stretched across columns scores >1 — recovered
+    from OCR geometry alone (no cell borders), so downstream can align it to every
+    column it heads instead of only the first. ``column`` (the cell's left-anchor)
+    is the span's start column.
+    """
+    x0, x1 = bbox[0], bbox[2]
+    covered = sum(1 for center in centers if x0 - x_tolerance <= center < x1)
+    return max(1, covered)
+
+
 def _reconstruct_table_from_candidate(
     sidecar: OCRBlocksSidecar,
     candidate: dict[str, Any],
@@ -280,11 +304,15 @@ def _reconstruct_table_from_candidate(
 
     heights = [block.bbox[3] - block.bbox[1] for block in blocks]
     widths = [block.bbox[2] - block.bbox[0] for block in blocks]
+    col_tolerance = max(12.0, _median(widths, 40.0) * 0.35)
     rows = _cluster_ocr_blocks_into_rows(
         blocks,
         y_tolerance=max(8.0, _median(heights, 12.0) * 0.75),
     )
-    centers = _column_centers_for_blocks(blocks, x_tolerance=max(12.0, _median(widths, 40.0) * 0.35))
+    # Columns come from the multi-cell data rows only; a merged single-cell row
+    # maps onto those columns instead of defining new ones (mirrors the detector).
+    center_blocks = [block for row in rows if len(row) >= 2 for block in row] or list(blocks)
+    centers = _column_centers_for_blocks(center_blocks, x_tolerance=col_tolerance)
     structured_rows: list[dict[str, Any]] = []
     for row_index, row_blocks in enumerate(rows, 1):
         grouped: dict[int, list[OCRTextBlock]] = {}
@@ -295,14 +323,15 @@ def _reconstruct_table_from_candidate(
             cell_blocks = sorted(grouped[column], key=lambda b: (b.bbox[1], b.bbox[0]))
             text = "\n".join(block.text for block in cell_blocks).strip()
             confidence = sum(block.confidence for block in cell_blocks) / len(cell_blocks)
+            cell_bbox = _bbox_union([block.bbox for block in cell_blocks])
             cells.append(
                 {
                     "row": row_index,
                     "column": column,
                     "text": text,
-                    "bbox": _bbox_union([block.bbox for block in cell_blocks]),
+                    "bbox": cell_bbox,
                     "rowspan": 1,
-                    "colspan": 1,
+                    "colspan": _colspan_for_bbox(cell_bbox, centers, col_tolerance),
                     "confidence": round(confidence, 4),
                     "ocr_block_refs": [block.block_id for block in cell_blocks],
                 }
