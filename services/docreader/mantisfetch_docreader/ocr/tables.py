@@ -204,15 +204,38 @@ def _detect_table_candidates_from_ocr_blocks(
             continue
         heights = [block.bbox[3] - block.bbox[1] for block in blocks]
         widths = [block.bbox[2] - block.bbox[0] for block in blocks]
+        col_tolerance = max(12.0, _median(widths, 40.0) * 0.35)
         rows = _cluster_ocr_blocks_into_rows(blocks, y_tolerance=max(8.0, _median(heights, 12.0) * 0.75))
         valid_rows = [row for row in rows if len(row) >= min_columns]
         if len(valid_rows) < min_rows:
             continue
-        candidate_blocks = [block for row in valid_rows for block in row]
-        column_count = _count_x_clusters(
-            candidate_blocks,
-            x_tolerance=max(12.0, _median(widths, 40.0) * 0.35),
+        # The multi-column rows confirm a table; now fold in adjacent single-cell
+        # rows (merged headers / spanning totals) that sit within its x-span and
+        # vertical band. Without this they're dropped and never reach reconstruction,
+        # so their colspan is lost. Gating on an already-confirmed table keeps stray
+        # paragraph lines out.
+        anchor_blocks = [block for row in valid_rows for block in row]
+        x_left = min(block.bbox[0] for block in anchor_blocks)
+        x_right = max(block.bbox[2] for block in anchor_blocks)
+        row_gap = max(8.0, _median(heights, 12.0) * 1.5)
+        band_top = min(block.bbox[1] for block in anchor_blocks) - row_gap
+        band_bottom = max(block.bbox[3] for block in anchor_blocks) + row_gap
+        spanning_rows = [
+            row
+            for row in rows
+            if 0 < len(row) < min_columns
+            and all(
+                x_left - col_tolerance <= block.bbox[0] and block.bbox[2] <= x_right + col_tolerance
+                for block in row
+            )
+            and band_top <= (row[0].bbox[1] + row[0].bbox[3]) / 2 <= band_bottom
+        ]
+        table_rows = sorted(
+            valid_rows + spanning_rows,
+            key=lambda row: min(block.bbox[1] for block in row),
         )
+        candidate_blocks = [block for row in table_rows for block in row]
+        column_count = _count_x_clusters(candidate_blocks, x_tolerance=col_tolerance)
         if column_count < min_columns:
             continue
         xs0 = [block.bbox[0] for block in candidate_blocks]
@@ -225,7 +248,7 @@ def _detect_table_candidates_from_ocr_blocks(
                 "candidate_id": f"p{page.page}-tc{len(candidates) + 1:04d}",
                 "page": page.page,
                 "bbox": [min(xs0), min(ys0), max(xs1), max(ys1)],
-                "row_count": len(valid_rows),
+                "row_count": len(table_rows),
                 "column_count": column_count,
                 "confidence": round(avg_confidence, 4),
                 "source": "ocr_geometry",

@@ -156,33 +156,41 @@ def test_colspan_for_bbox_counts_covered_columns():
     assert _colspan_for_bbox([100, 0, 110, 20], centers, 20.0) == 1  # never below 1
 
 
-def test_reconstruct_table_recovers_merged_header_colspan():
+def test_detect_and_reconstruct_recovers_merged_header_colspan():
+    # End-to-end through the real detector: a full-width merged header (a single
+    # cell row) used to be dropped by candidate detection; it must now survive and
+    # carry colspan once reconstructed.
     from mantisfetch_docreader import (
         OCRBlocksSidecar,
         OCRPageBlocks,
+        _detect_table_candidates_from_ocr_blocks,
         _markdown_from_structured_table,
         _reconstruct_table_from_candidate,
     )
 
-    blocks = (
-        _block("p1-b0001", "买方信息", (100, 100, 560, 120)),  # merged header across 3 cols
-        _block("p1-b0002", "品名", (100, 140, 180, 160)),
-        _block("p1-b0003", "数量", (300, 140, 360, 160)),
-        _block("p1-b0004", "金额", (500, 140, 560, 160)),
-        _block("p1-b0005", "软件", (100, 180, 180, 200)),
-        _block("p1-b0006", "1", (300, 180, 330, 200)),
-        _block("p1-b0007", "100", (500, 180, 560, 200)),
-    )
     sidecar = OCRBlocksSidecar(
         doc_id="DOC-006",
-        pages=(OCRPageBlocks(page=1, width=1000, height=1000, blocks=blocks),),
+        pages=(
+            OCRPageBlocks(
+                page=1,
+                width=1000,
+                height=1000,
+                blocks=(
+                    _block("p1-b0001", "买方信息", (100, 100, 560, 120)),  # merged header, 3 cols
+                    _block("p1-b0002", "品名", (100, 140, 180, 160)),
+                    _block("p1-b0003", "数量", (300, 140, 360, 160)),
+                    _block("p1-b0004", "金额", (500, 140, 560, 160)),
+                    _block("p1-b0005", "软件", (100, 180, 180, 200)),
+                    _block("p1-b0006", "1", (300, 180, 330, 200)),
+                    _block("p1-b0007", "100", (500, 180, 560, 200)),
+                ),
+            ),
+        ),
     )
-    candidate = {
-        "candidate_id": "p1-tc0001",
-        "page": 1,
-        "bbox": [100, 100, 560, 200],
-        "ocr_block_refs": [b.block_id for b in blocks],
-    }
+
+    candidate = _detect_table_candidates_from_ocr_blocks(sidecar)[0]
+    # the merged header is no longer dropped before reconstruction
+    assert "p1-b0001" in candidate["ocr_block_refs"]
 
     table = _reconstruct_table_from_candidate(sidecar, candidate, "table-01")
 
@@ -195,7 +203,7 @@ def test_reconstruct_table_recovers_merged_header_colspan():
     # data rows stay 1x1
     data_cells = [c for row in table["rows"][1:] for c in row["cells"]]
     assert data_cells and all(c["colspan"] == 1 for c in data_cells)
-    # markdown view is unchanged: merged value in its start column, the rest blank
+    # markdown view: merged value in its start column, the rest blank
     header_line = _markdown_from_structured_table(table).splitlines()[0]
     assert "买方信息" in header_line
     assert header_line.count("|") == 4  # 3 columns
