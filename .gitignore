@@ -183,3 +183,4 @@ _site/
 .docusaurus/
 docs/mantisfetch_opensource_design.md
 ROADMAP_internal.md
+certs/

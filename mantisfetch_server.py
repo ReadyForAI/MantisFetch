@@ -77,7 +77,22 @@ app.mount("/doc", doc_app)
 app.mount("/mcp", mcp_app)
 
 
+def _ssl_kwargs() -> dict[str, str]:
+    """uvicorn TLS kwargs from the environment, or ``{}`` for plain http.
+
+    Set both MANTISFETCH_TLS_CERTFILE and MANTISFETCH_TLS_KEYFILE to serve https
+    (e.g. for a non-loopback MCP client like NodalOS, where the bearer token must
+    ride an encrypted line). Both are required — setting only one is treated as
+    unset (plain http) rather than a half-configured TLS that would fail to boot.
+    """
+    certfile = os.environ.get("MANTISFETCH_TLS_CERTFILE")
+    keyfile = os.environ.get("MANTISFETCH_TLS_KEYFILE")
+    if certfile and keyfile:
+        return {"ssl_certfile": certfile, "ssl_keyfile": keyfile}
+    return {}
+
+
 if __name__ == "__main__":
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "9898"))
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, **_ssl_kwargs())

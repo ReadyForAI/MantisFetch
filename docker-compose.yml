@@ -6,8 +6,19 @@ services:
       - "9898:9898"
     volumes:
       - ${MANTISFETCH_HOST_DOCS_DIR:-${HOME}/.mantisfetch/docs}:/root/.mantisfetch/docs
+      # TLS cert/key (read-only). Empty dir = no TLS (plain http).
+      - ./certs:/certs:ro
     environment:
       MANTISFETCH_DOCS_DIR: /root/.mantisfetch/docs
+      # MCP server access: bearer token allows non-loopback clients (e.g. NodalOS
+      # over the network); without it /mcp is loopback-only. ALLOWED_HOSTS adds
+      # extra Host values (host:* = any port) past the DNS-rebinding check.
+      MANTISFETCH_MCP_TOKEN: ${MANTISFETCH_MCP_TOKEN:-}
+      MANTISFETCH_MCP_ALLOWED_HOSTS: ${MANTISFETCH_MCP_ALLOWED_HOSTS:-}
+      # TLS (opt-in): set these in .env to serve https. Bearer over an encrypted
+      # line (#702: https + bearer, no mTLS client cert). Unset → plain http.
+      MANTISFETCH_TLS_CERTFILE: ${MANTISFETCH_TLS_CERTFILE:-}
+      MANTISFETCH_TLS_KEYFILE: ${MANTISFETCH_TLS_KEYFILE:-}
       # LLM provider (default: gemini)
       MANTISFETCH_LLM_PROVIDER: ${MANTISFETCH_LLM_PROVIDER:-gemini}
       MANTISFETCH_LLM_VENDOR: ${MANTISFETCH_LLM_VENDOR:-openai}
