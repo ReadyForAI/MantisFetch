@@ -29,6 +29,19 @@ def test_tool_registry_matches_contract() -> None:
     assert len(names) <= 40  # NodalOS mcp.products[].max_tools cap
 
 
+def test_transport_security_allows_http_and_https_origins(monkeypatch) -> None:
+    monkeypatch.setenv("PORT", "9898")
+    monkeypatch.setenv("MANTISFETCH_MCP_ALLOWED_HOSTS", "192.168.0.5:*")
+    ts = mm._transport_security()
+    # both schemes for loopback (TLS deployment sends Origin: https://...)
+    assert "http://127.0.0.1:9898" in ts.allowed_origins
+    assert "https://127.0.0.1:9898" in ts.allowed_origins
+    # and for the extra host, http + https
+    assert "http://192.168.0.5:*" in ts.allowed_origins
+    assert "https://192.168.0.5:*" in ts.allowed_origins
+    assert "192.168.0.5:*" in ts.allowed_hosts
+
+
 # ── injection boundary ─────────────────────────────────────────────────────────
 
 
