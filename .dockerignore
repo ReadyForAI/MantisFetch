@@ -27,6 +27,13 @@ htmlcov
 .idea
 .vscode
 
+# Secrets / local config — injected via env or mounted read-only at runtime;
+# NEVER bake into the image (COPY . . would otherwise leak the private key and
+# the API keys / MCP bearer token into the build layers).
+.env
+.env.*
+certs/
+
 # Runtime data (mounted as a volume)
 docs/
 
