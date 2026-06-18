@@ -264,6 +264,21 @@ def _assign_column(block: OCRTextBlock, centers: list[float]) -> int:
     return distances.index(min(distances)) + 1
 
 
+def _colspan_for_bbox(bbox: list[float], centers: list[float], x_tolerance: float) -> int:
+    """How many column centers a cell's horizontal extent covers.
+
+    Centers are column left-edges; a cell reaching past column j's edge spans it.
+    A normal single-column cell ends before the next column's edge, so it scores
+    1; a merged header/total cell stretched across columns scores >1 — recovered
+    from OCR geometry alone (no cell borders), so downstream can align it to every
+    column it heads instead of only the first. ``column`` (the cell's left-anchor)
+    is the span's start column.
+    """
+    x0, x1 = bbox[0], bbox[2]
+    covered = sum(1 for center in centers if x0 - x_tolerance <= center < x1)
+    return max(1, covered)
+
+
 def _reconstruct_table_from_candidate(
     sidecar: OCRBlocksSidecar,
     candidate: dict[str, Any],
@@ -280,11 +295,12 @@ def _reconstruct_table_from_candidate(
 
     heights = [block.bbox[3] - block.bbox[1] for block in blocks]
     widths = [block.bbox[2] - block.bbox[0] for block in blocks]
+    col_tolerance = max(12.0, _median(widths, 40.0) * 0.35)
     rows = _cluster_ocr_blocks_into_rows(
         blocks,
         y_tolerance=max(8.0, _median(heights, 12.0) * 0.75),
     )
-    centers = _column_centers_for_blocks(blocks, x_tolerance=max(12.0, _median(widths, 40.0) * 0.35))
+    centers = _column_centers_for_blocks(blocks, x_tolerance=col_tolerance)
     structured_rows: list[dict[str, Any]] = []
     for row_index, row_blocks in enumerate(rows, 1):
         grouped: dict[int, list[OCRTextBlock]] = {}
@@ -295,14 +311,15 @@ def _reconstruct_table_from_candidate(
             cell_blocks = sorted(grouped[column], key=lambda b: (b.bbox[1], b.bbox[0]))
             text = "\n".join(block.text for block in cell_blocks).strip()
             confidence = sum(block.confidence for block in cell_blocks) / len(cell_blocks)
+            cell_bbox = _bbox_union([block.bbox for block in cell_blocks])
             cells.append(
                 {
                     "row": row_index,
                     "column": column,
                     "text": text,
-                    "bbox": _bbox_union([block.bbox for block in cell_blocks]),
+                    "bbox": cell_bbox,
                     "rowspan": 1,
-                    "colspan": 1,
+                    "colspan": _colspan_for_bbox(cell_bbox, centers, col_tolerance),
                     "confidence": round(confidence, 4),
                     "ocr_block_refs": [block.block_id for block in cell_blocks],
                 }
