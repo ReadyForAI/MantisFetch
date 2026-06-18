@@ -209,6 +209,45 @@ def test_detect_and_reconstruct_recovers_merged_header_colspan():
     assert header_line.count("|") == 4  # 3 columns
 
 
+def test_centered_merged_row_does_not_invent_a_column():
+    # A merged header with a tight/centered OCR bbox (x0 between columns) must not
+    # create a spurious column. Columns come from the data rows; a row that does
+    # not geometrically span >= 2 columns is left out rather than corrupting layout.
+    from mantisfetch_docreader import (
+        OCRBlocksSidecar,
+        OCRPageBlocks,
+        _detect_table_candidates_from_ocr_blocks,
+        _reconstruct_table_from_candidate,
+    )
+
+    sidecar = OCRBlocksSidecar(
+        doc_id="DOC-007",
+        pages=(
+            OCRPageBlocks(
+                page=1,
+                width=1000,
+                height=1000,
+                blocks=(
+                    _block("p1-b0001", "采购清单", (250, 100, 360, 120)),  # centered, between cols
+                    _block("p1-b0002", "品名", (100, 140, 180, 160)),
+                    _block("p1-b0003", "数量", (300, 140, 360, 160)),
+                    _block("p1-b0004", "金额", (500, 140, 560, 160)),
+                    _block("p1-b0005", "软件", (100, 180, 180, 200)),
+                    _block("p1-b0006", "1", (300, 180, 330, 200)),
+                    _block("p1-b0007", "100", (500, 180, 560, 200)),
+                ),
+            ),
+        ),
+    )
+
+    candidate = _detect_table_candidates_from_ocr_blocks(sidecar)[0]
+    table = _reconstruct_table_from_candidate(sidecar, candidate, "table-01")
+
+    assert table["column_count"] == 3  # NOT 4 — centered header didn't invent a column
+    assert "p1-b0001" not in candidate["ocr_block_refs"]  # not a >=2-col span → left out
+    assert all(cell["colspan"] == 1 for row in table["rows"] for cell in row["cells"])
+
+
 def test_write_tables_emits_structured_table_sidecar(tmp_path):
     import json
 

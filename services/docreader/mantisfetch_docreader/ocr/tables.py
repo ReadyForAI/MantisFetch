@@ -174,19 +174,6 @@ def _cluster_ocr_blocks_into_rows(
     return [sorted(row, key=lambda b: b.bbox[0]) for row in rows]
 
 
-def _count_x_clusters(blocks: list[OCRTextBlock], x_tolerance: float) -> int:
-    clusters: list[float] = []
-    for block in sorted(blocks, key=lambda b: b.bbox[0]):
-        x0 = block.bbox[0]
-        for idx, cluster_x in enumerate(clusters):
-            if abs(x0 - cluster_x) <= x_tolerance:
-                clusters[idx] = (cluster_x + x0) / 2
-                break
-        else:
-            clusters.append(x0)
-    return len(clusters)
-
-
 def _detect_table_candidates_from_ocr_blocks(
     sidecar: OCRBlocksSidecar,
     *,
@@ -209,14 +196,18 @@ def _detect_table_candidates_from_ocr_blocks(
         valid_rows = [row for row in rows if len(row) >= min_columns]
         if len(valid_rows) < min_rows:
             continue
-        # The multi-column rows confirm a table; now fold in adjacent single-cell
-        # rows (merged headers / spanning totals) that sit within its x-span and
-        # vertical band. Without this they're dropped and never reach reconstruction,
-        # so their colspan is lost. Gating on an already-confirmed table keeps stray
-        # paragraph lines out.
+        # Columns are defined by the multi-column rows ONLY — a merged single-cell
+        # row (esp. a centered header whose bbox sits between columns) must never
+        # invent a column.
         anchor_blocks = [block for row in valid_rows for block in row]
-        x_left = min(block.bbox[0] for block in anchor_blocks)
-        x_right = max(block.bbox[2] for block in anchor_blocks)
+        anchor_centers = _column_centers_for_blocks(anchor_blocks, x_tolerance=col_tolerance)
+        column_count = len(anchor_centers)
+        if column_count < min_columns:
+            continue
+        # Fold in adjacent single-cell rows (merged headers / spanning totals) that
+        # sit in the table's vertical band AND geometrically span >= 2 of those
+        # columns — otherwise they'd be dropped and lose their colspan. The span
+        # requirement keeps centered/stray single lines out (they'd corrupt layout).
         row_gap = max(8.0, _median(heights, 12.0) * 1.5)
         band_top = min(block.bbox[1] for block in anchor_blocks) - row_gap
         band_bottom = max(block.bbox[3] for block in anchor_blocks) + row_gap
@@ -224,20 +215,15 @@ def _detect_table_candidates_from_ocr_blocks(
             row
             for row in rows
             if 0 < len(row) < min_columns
-            and all(
-                x_left - col_tolerance <= block.bbox[0] and block.bbox[2] <= x_right + col_tolerance
-                for block in row
-            )
-            and band_top <= (row[0].bbox[1] + row[0].bbox[3]) / 2 <= band_bottom
+            and band_top <= _median([(b.bbox[1] + b.bbox[3]) / 2 for b in row]) <= band_bottom
+            and _colspan_for_bbox(_bbox_union([b.bbox for b in row]), anchor_centers, col_tolerance)
+            >= 2
         ]
         table_rows = sorted(
             valid_rows + spanning_rows,
             key=lambda row: min(block.bbox[1] for block in row),
         )
         candidate_blocks = [block for row in table_rows for block in row]
-        column_count = _count_x_clusters(candidate_blocks, x_tolerance=col_tolerance)
-        if column_count < min_columns:
-            continue
         xs0 = [block.bbox[0] for block in candidate_blocks]
         ys0 = [block.bbox[1] for block in candidate_blocks]
         xs1 = [block.bbox[2] for block in candidate_blocks]
@@ -323,7 +309,10 @@ def _reconstruct_table_from_candidate(
         blocks,
         y_tolerance=max(8.0, _median(heights, 12.0) * 0.75),
     )
-    centers = _column_centers_for_blocks(blocks, x_tolerance=col_tolerance)
+    # Columns come from the multi-cell data rows only; a merged single-cell row
+    # maps onto those columns instead of defining new ones (mirrors the detector).
+    center_blocks = [block for row in rows if len(row) >= 2 for block in row] or list(blocks)
+    centers = _column_centers_for_blocks(center_blocks, x_tolerance=col_tolerance)
     structured_rows: list[dict[str, Any]] = []
     for row_index, row_blocks in enumerate(rows, 1):
         grouped: dict[int, list[OCRTextBlock]] = {}
