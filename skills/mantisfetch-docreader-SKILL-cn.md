@@ -38,6 +38,8 @@ triggers:
 ## 2. 服务依赖
 
 - Base URL: `http://127.0.0.1:9898/doc/`
+- 若服务以 TLS 启动（`MANTISFETCH_TLS_CERTFILE` + `MANTISFETCH_TLS_KEYFILE`），改用 `https://`。
+- 通过 Model Context Protocol 连接的 Agent 可以用 MCP 工具（`doc_parse`、`doc_digest`、`doc_brief`、`doc_section` 等）使用相同能力 —— 见 [mantisfetch-mcp](./mantisfetch-mcp-SKILL-cn.md) Skill。
 
 ---
 
@@ -147,6 +149,8 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
 | `generate_summary`    | bool   | `true`     | 是否生成摘要（false = 仅提取文本） |
 | `summary_mode`        | string | null       | 摘要模式：`sync` / `defer` / `off`。长文档和业务 Skill 推荐 `defer` |
 | `document_profile`    | string | null       | 可选文档 profile 名称；仅在调用方明确知道可用 profile 时传入 |
+| `parse_mode`          | string | `accurate` | PDF 解析强度：`fast`（原生文本，最少 OCR）/ `accurate`（默认 —— 原生文本 + 对扫描/混合页 OCR）/ `full`（最彻底，整页/区域 LLM OCR，成本最高）。作用于 PDF；服务端默认来自 `MANTISFETCH_PDF_PARSE_MODE` |
+| `replace`             | bool   | `false`    | 当显式传入的 `doc_id` 已存在时，设为 `true` 覆盖；否则请求返回 `409`（见 §4.2 说明）          |
 | `id_strategy`         | string | null       | DOC-ID 策略：`counter` / `source_filename` |
 | `skip_ocr_pages`      | string | null       | 已确认空白或无需 OCR 的页码，例如 `"30,104,106-108"` |
 | `force_ocr`           | bool   | `false`    | 强制使用 LLM OCR 处理全部页面；成本较高，只在明确需要视觉模型重识别整份文档时使用 |
@@ -249,6 +253,7 @@ curl -X POST http://localhost:9898/doc/parse \
 - 返回里的 `digest` 已经包含摘要前 300 个字符，通常无需再额外请求 `/doc/library/{doc_id}/digest`
 - `generate_summary=false` 只提取文本和表格，不调用 LLM，速度更快但没有摘要
 - 未传 `content_type` 时默认入库到 `General`；调用方已明确业务类别时传 `Contract`、`Bid` 或 `Knowledge`
+- 显式传入已存在的 `doc_id` 会返回 `409`，除非 `replace=true`；不传 `doc_id` 则总是拿到新的自增 id。该冲突在流式接收 body 之前就检查，因此被拒的上传不浪费磁盘
 - `metadata` 必须是 JSON object；嵌套对象会保留在 manifest 中，而浅层标量字段可用于 `/doc/library/search` 过滤
 - `source_ref` 指向文档目录内保存的上传原件，前提是 `MANTISFETCH_STORE_SOURCE_FILES=true`
 - 大文件（100+ 页 PDF）解析可能需要 30–60 秒，Agent 应设置更长的超时
@@ -419,6 +424,80 @@ table_id 格式：`"01"` 或 `"table-01"`。
 
 返回完整的 `manifest.json` 内容，包括文档结构、section 列表、图片/表格路径信息、metadata、source 文件引用和 provenance。
 
+### 4.13 在单个文档的 Sections 内搜索
+
+- `POST /doc/library/{doc_id}/search_sections`
+
+请求体：`{"q": "payment terms", "case_sensitive": false, "include_content": false, "limit": 20}`
+
+只在单个文档的 section 文件内搜索（标题 + 正文），返回与 `/doc/library/search_text` 相同的结果结构，带 `sid` / `section_title` / `page_start` / `page_end` provenance 和 `snippet`。设 `include_content=true` 可同时返回每个命中 section 的全文。用它在读取 section 全文前定位正确的 `sid`。
+
+### 4.14 读取结构化表格 JSON
+
+- `GET /doc/library/{doc_id}/table/{table_id}/json`
+
+在 §4.10 的 Markdown 形式之外，把表格作为结构化 JSON 返回（当该表存在 JSON sidecar 时）：
+
+```json
+{
+  "doc_id": "DOC-010",
+  "table_id": "table-01",
+  "table": {
+    "table_id": "table-01",
+    "page": 5,
+    "source": "ocr_geometry",
+    "row_count": 4,
+    "column_count": 3,
+    "rows": [
+      {
+        "row_index": 1,
+        "cells": [
+          {"row": 1, "column": 1, "text": "Item", "rowspan": 1, "colspan": 2, "confidence": 0.97},
+          {"row": 1, "column": 3, "text": "Total", "rowspan": 1, "colspan": 1, "confidence": 0.96}
+        ]
+      }
+    ]
+  }
+}
+```
+
+**单元格字段：** `row`、`column`（1 基左锚列）、`text`、`rowspan`、`colspan`、`confidence`，OCR 几何表格另带 `bbox` / `ocr_block_refs`。
+
+- 对从扫描页重建的表格（`source="ocr_geometry"`），跨列的合并表头/合计单元格现在带**真实 `colspan`**（由单元格 bbox 与列中心几何计算得出），下游消费者因此能得到正确的 cell→column 映射。`rowspan` 仍为 `1`（纵向合并需要单元格边框 / TSR 模型）。Markdown 输出（§4.10）不变 —— 合并值本就渲染在其起始列。
+- 阅读用 Markdown 形式（§4.10）；需要显式单元格几何或合并跨度时用 JSON 形式（如合同/发票字段抽取）。
+
+### 4.15 构建检索分块
+
+- `POST /doc/library/{doc_id}/chunks`
+
+请求体：`{"include_text": false}`（外加可选分块配置字段）。
+
+返回按 section 边界切分的分块，供下游 RAG/检索管线使用：`{"doc_id", "chunk_count", "chunks": [...], "config": {...}}`。MantisFetch 自身不做检索 —— 这里只产出通用分块，由上层 Skill 去 embedding/索引。设 `include_text=true` 可包含分块文本。
+
+### 4.16 延迟摘要状态与重试
+
+这两个接口与解析时的 `summary_mode=defer` 配套（摘要在后台生成）。
+
+- `GET /doc/library/{doc_id}/summary` —— 当前摘要状态（延迟解析后轮询它）：
+
+```json
+{"doc_id": "DOC-010", "summary": {"status": "running", "mode": "defer", "attempts": 1}, "paths": {...}}
+```
+
+`status` 取值 `pending` / `running` / `done` / `failed`。
+
+- `POST /doc/library/{doc_id}/summary?concurrency=3&force=false` —— 为解析时未生成摘要的文档（重新）调度摘要生成，或重试失败的摘要。返回 `{"doc_id", "scheduled": true, "summary": {...}, "limits": {...}}`。若摘要已在 `running` 或达到单文档尝试上限则返回 `409`（传 `force=true` 可覆盖）。
+
+### 4.17 发现 Sidecar 与 OCR 版面（进阶）
+
+供需要 OCR 几何信息（如精确表格/区域位置）的消费者使用：
+
+- `GET /doc/library/{doc_id}/sidecars` —— 发现存在哪些可选 sidecar（OCR 版面、结构化表格）及其 endpoint，**不**返回大体积几何数据。包含每个表格的摘要（`row_count`、`column_count`、`json_file`、`bbox_available`）。
+- `GET /doc/library/{doc_id}/layout/pages` —— 列出 OCR 版面页 + block 计数（无 block 几何）。
+- `GET /doc/library/{doc_id}/layout/page/{page_num}` —— 单页（1 基）完整 OCR 几何。
+
+大多数 Agent 用不到这些 —— 优先用 digest/brief/section/table。只有在需要单元格级坐标时才用。
+
 ---
 
 ## 5. 文档库目录结构
@@ -560,6 +639,8 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | Error                                              | Cause                          | Solution |
 | -------------------------------------------------- | ------------------------------ | -------- |
 | `422 unsupported format`                           | 上传了不支持的文件格式         | 通过 `/doc/health` 的 `supported_formats` 检查当前支持格式 |
+| `409 doc_id already exists`                         | 显式 `doc_id` 与已有文档冲突   | 传 `replace=true` 覆盖，或不传 `doc_id` 取新 id |
+| `409 summary already running` / `attempt limit reached` | 并发/重复调用 `POST .../summary` | 改为轮询 `GET .../summary`；只有必须覆盖时才传 `force=true` |
 | `429 too many concurrent requests`                 | 触发限流                       | 等待后重试，服务端限制了并发解析数 |
 | `404 document not found`                           | doc_id 无效或文档尚未入库      | 先用 search 确认 doc_id |
 | `404 section not found`                            | sid 无效                       | 先调用 `/doc/library/{doc_id}/sections` 获取有效 sid 列表 |

@@ -39,6 +39,8 @@ Use for: information gathering, research, competitive analysis, news/blog extrac
 
 - External service: MantisFetch Browser Service (FastAPI + Playwright)
 - Base URL: `http://127.0.0.1:9898/web/`
+- If the server is started with TLS (`MANTISFETCH_TLS_CERTFILE` + `MANTISFETCH_TLS_KEYFILE`), use `https://` instead.
+- Agents that connect over the Model Context Protocol can use the same capabilities as MCP tools (`web_capture`, `web_session_open`, `web_goto`, `web_distill`, `web_act`, …) — see the [mantisfetch-mcp](./mantisfetch-mcp-SKILL.md) skill.
 
 ---
 

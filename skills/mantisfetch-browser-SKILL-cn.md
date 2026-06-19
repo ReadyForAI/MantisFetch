@@ -39,6 +39,8 @@ triggers:
 
 - 外部服务：MantisFetch Browser Service（FastAPI + Playwright）
 - Base URL: `http://127.0.0.1:9898/web/`
+- 若服务以 TLS 启动（`MANTISFETCH_TLS_CERTFILE` + `MANTISFETCH_TLS_KEYFILE`），改用 `https://`。
+- 通过 Model Context Protocol 连接的 Agent 可以用 MCP 工具（`web_capture`、`web_session_open`、`web_goto`、`web_distill`、`web_act` 等）使用相同能力 —— 见 [mantisfetch-mcp](./mantisfetch-mcp-SKILL-cn.md) Skill。
 
 ---
 

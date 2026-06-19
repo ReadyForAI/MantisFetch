@@ -28,7 +28,8 @@ Most scrapers hand your Agent a wall of raw HTML — expensive to process and mo
 - **Table-aware** — auto-extracts tables with precomputed stats (min/max/avg); answer data questions without reading rows
 - **Document parsing** — PDF, DOCX, PPTX, XLSX, CSV, HTML via [MarkItDown](https://github.com/microsoft/markitdown), with Gemini OCR fallback
 - **Multi-LLM support** — Gemini (default), OpenAI, Ollama, Groq, or any OpenAI-compatible API
-- **WebMCP** — Chrome 146+ structured tool discovery (MCP-over-HTTP)
+- **MCP server** — exposes `/web` and `/doc` as native MCP tools (streamable-HTTP at `/mcp`) for agent runtimes; loopback-only by default, with bearer-token + optional TLS for remote clients
+- **WebMCP client** — discovers and invokes structured tools that Chrome 146+ pages expose via `navigator.modelContext`
 - **i18n** — English and Chinese (set `LANG=zh`)
 
 ### Quick Start
@@ -187,22 +188,34 @@ Access documents stored by `/web/capture` and `/doc/parse`.
 |---|---|---|
 | `GET` | `/doc/library/search` | Search by keyword, tag, and/or file type |
 | `GET` | `/doc/library/search_text` | Search full text / sections with snippets and page hints |
+| `POST` | `/doc/library/{doc_id}/search_sections` | Search within one document's sections (sid + page provenance) |
 | `GET` | `/doc/library/{doc_id}/digest` | Short summary (~200 tokens) |
 | `GET` | `/doc/library/{doc_id}/brief` | Extended summary (~1500 tokens) |
 | `GET` | `/doc/library/{doc_id}/full` | Full document text |
 | `GET` | `/doc/library/{doc_id}/sections` | List all sections with metadata |
 | `GET` | `/doc/library/{doc_id}/section/{sid}` | Full text of a single section |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}` | Markdown table with column statistics |
+| `GET` | `/doc/library/{doc_id}/table/{table_id}/json` | Structured table JSON (cells with row/column spans) |
+| `POST` | `/doc/library/{doc_id}/chunks` | Section-boundary chunks for downstream retrieval/RAG |
 | `GET` | `/doc/library/{doc_id}/images` | List embedded Word images with anchors and OCR results |
 | `GET` | `/doc/library/{doc_id}/image/{image_id}` | Metadata and OCR text for one embedded Word image |
+| `GET` | `/doc/library/{doc_id}/summary` | Summary status (poll after a deferred parse) |
+| `POST` | `/doc/library/{doc_id}/summary` | (Re)schedule or retry summary generation |
 | `GET` | `/doc/library/{doc_id}/manifest` | Provenance metadata (source, timestamps, content hash) |
 
-Full API reference: see [`skills/mantisfetch-browser-SKILL.md`](skills/mantisfetch-browser-SKILL.md) and [`skills/mantisfetch-docreader-SKILL.md`](skills/mantisfetch-docreader-SKILL.md).
+#### MCP
+
+MantisFetch also exposes `/web` and `/doc` as **Model Context Protocol** tools over streamable-HTTP at `/mcp`, for agent runtimes (e.g. NodalOS) that speak MCP. It is **loopback-only by default**; set `MANTISFETCH_MCP_TOKEN` (and optionally TLS) to allow remote clients.
+
+Full API reference: see [`skills/mantisfetch-browser-SKILL.md`](skills/mantisfetch-browser-SKILL.md), [`skills/mantisfetch-docreader-SKILL.md`](skills/mantisfetch-docreader-SKILL.md), and [`skills/mantisfetch-mcp-SKILL.md`](skills/mantisfetch-mcp-SKILL.md).
 
 DocReader notes:
 
 - `POST /doc/parse` accepts an optional `metadata` form field containing a JSON object; shallow scalar values are indexed for later filtering.
-- `POST /doc/parse` also accepts an optional `doc_id` form field. Valid values may contain letters, digits, and internal hyphens, for example `DOC-001`, `NBS250321`, or `doc001`.
+- `POST /doc/parse` also accepts an optional `doc_id` form field. Valid values may contain letters, digits, and internal hyphens, for example `DOC-001`, `NBS250321`, or `doc001`. Reusing an existing `doc_id` returns `409` unless `replace=true`.
+- `POST /doc/parse` accepts `summary_mode` (`sync` / `defer` / `off`); with `defer`, the summary is generated in the background — poll `GET /doc/library/{doc_id}/summary` for status, and `POST` the same path to retry a failed one.
+- `POST /doc/parse` accepts `parse_mode` (`fast` / `accurate` / `full`, default `accurate`) to tune PDF parsing intensity vs. cost.
+- `GET /doc/library/{doc_id}/table/{table_id}/json` returns structured cells; for tables reconstructed from scanned pages, merged cells now carry a recovered `colspan` (the Markdown form is unchanged).
 - `POST /doc/parse` and `POST /web/capture` accept `content_type`, one of `General`, `Contract`, `Bid`, or `Knowledge` (case-insensitive on input; persisted in title case); the default is `General`.
 - New ingested documents are stored under `${MANTISFETCH_DOCS_DIR}/<content_type>/<doc_id>`, while legacy flat `${MANTISFETCH_DOCS_DIR}/<doc_id>` documents remain readable.
 - `GET /doc/library/search` also accepts query params prefixed with `metadata.` for equality-style filtering, for example `metadata.customer=ACME`.
@@ -217,8 +230,14 @@ MantisFetch is configured entirely through environment variables. See the table 
 
 | Variable | Default | Description |
 |---|---|---|
+| `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `9898` | HTTP listening port |
 | `LANG` | `en` | UI language (`en` or `zh`) |
+| `MANTISFETCH_TLS_CERTFILE` | — | TLS certificate path; set **with** `MANTISFETCH_TLS_KEYFILE` to serve HTTPS (setting only one is ignored) |
+| `MANTISFETCH_TLS_KEYFILE` | — | TLS private key path (paired with `MANTISFETCH_TLS_CERTFILE`) |
+| `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp` surface; without it, `/mcp` is loopback-only |
+| `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | Extra hosts/origins (comma-separated) for the MCP DNS-rebinding guard |
+| `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | Allowlist roots for the MCP `doc_parse` `rel_path` source; unset disables local-path parsing over MCP |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | Maximum concurrent section-summary LLM batches per document |
 | `MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC` | `2.0` | Minimum spacing between summary LLM requests across the service |
@@ -254,7 +273,8 @@ MIT — see [LICENSE](LICENSE).
 - **表格感知** — 自动提取并预计算统计值（min/max/avg），无需读取原始行即可回答数据问题
 - **文档解析** — 支持 PDF、DOCX、PPTX、XLSX、CSV、HTML，基于 [MarkItDown](https://github.com/microsoft/markitdown)（微软），可自动 Gemini OCR 兜底
 - **多 LLM 支持** — Gemini（默认）、OpenAI、Ollama、Groq，以及任意 OpenAI 兼容接口
-- **WebMCP** — Chrome 146+ 结构化工具发现（MCP-over-HTTP）
+- **MCP 服务** — 把 `/web` 和 `/doc` 暴露为原生 MCP 工具（streamable-HTTP，挂载在 `/mcp`），供 Agent 运行时使用；默认仅 loopback，远程客户端需 bearer token + 可选 TLS
+- **WebMCP 客户端** — 发现并调用 Chrome 146+ 页面通过 `navigator.modelContext` 暴露的结构化工具
 - **多语言** — 支持中英文（设置 `LANG=zh` 切换为中文）
 
 ### 快速上手
@@ -411,22 +431,34 @@ MANTISFETCH_OCR_IMAGE_INPUT_MODE=plain_base64
 |---|---|---|
 | `GET` | `/doc/library/search` | 按关键词、标签和/或文件类型搜索 |
 | `GET` | `/doc/library/search_text` | 按全文 / section 搜索，并返回片段与页码提示 |
+| `POST` | `/doc/library/{doc_id}/search_sections` | 在单个文档的 section 内搜索（返回 sid + 页码 provenance） |
 | `GET` | `/doc/library/{doc_id}/digest` | 简短摘要（约 200 token） |
 | `GET` | `/doc/library/{doc_id}/brief` | 详细摘要（约 1500 token） |
 | `GET` | `/doc/library/{doc_id}/full` | 完整文档正文 |
 | `GET` | `/doc/library/{doc_id}/sections` | 列出所有章节及元数据 |
 | `GET` | `/doc/library/{doc_id}/section/{sid}` | 单个章节的完整文本 |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}` | 带列统计的 Markdown 表格 |
+| `GET` | `/doc/library/{doc_id}/table/{table_id}/json` | 结构化表格 JSON（单元格含行/列跨度） |
+| `POST` | `/doc/library/{doc_id}/chunks` | 面向下游检索/RAG 的 section 边界分块 |
 | `GET` | `/doc/library/{doc_id}/images` | 列出 Word 内嵌图片、锚点和 OCR 结果 |
 | `GET` | `/doc/library/{doc_id}/image/{image_id}` | 单个 Word 内嵌图片的元数据和 OCR 文本 |
+| `GET` | `/doc/library/{doc_id}/summary` | 摘要状态（延迟解析后轮询） |
+| `POST` | `/doc/library/{doc_id}/summary` | （重新）调度或重试摘要生成 |
 | `GET` | `/doc/library/{doc_id}/manifest` | 来源元数据（来源地址、时间戳、内容哈希） |
 
-完整 API 说明见 [`skills/mantisfetch-browser-SKILL.md`](skills/mantisfetch-browser-SKILL.md) 和 [`skills/mantisfetch-docreader-SKILL.md`](skills/mantisfetch-docreader-SKILL.md)。
+#### MCP
+
+MantisFetch 还把 `/web` 和 `/doc` 暴露为 **Model Context Protocol** 工具（streamable-HTTP，挂载在 `/mcp`），供使用 MCP 的 Agent 运行时（如 NodalOS）使用。**默认仅 loopback**；设置 `MANTISFETCH_MCP_TOKEN`（并可选启用 TLS）以允许远程客户端。
+
+完整 API 说明见 [`skills/mantisfetch-browser-SKILL.md`](skills/mantisfetch-browser-SKILL.md)、[`skills/mantisfetch-docreader-SKILL.md`](skills/mantisfetch-docreader-SKILL.md) 和 [`skills/mantisfetch-mcp-SKILL.md`](skills/mantisfetch-mcp-SKILL.md)。
 
 DocReader 补充说明：
 
 - `POST /doc/parse` 支持可选 `metadata` 表单字段，值为 JSON object；其中浅层标量字段会进入索引，供后续过滤。
-- `POST /doc/parse` 也支持可选 `doc_id` 表单字段；合法值可包含字母、数字和中间连字符，例如 `DOC-001`、`NBS250321`、`doc001`。
+- `POST /doc/parse` 也支持可选 `doc_id` 表单字段；合法值可包含字母、数字和中间连字符，例如 `DOC-001`、`NBS250321`、`doc001`。复用已有 `doc_id` 会返回 `409`，除非 `replace=true`。
+- `POST /doc/parse` 支持 `summary_mode`（`sync` / `defer` / `off`）；用 `defer` 时摘要在后台生成 —— 轮询 `GET /doc/library/{doc_id}/summary` 查看状态，`POST` 同一路径可重试失败的摘要。
+- `POST /doc/parse` 支持 `parse_mode`（`fast` / `accurate` / `full`，默认 `accurate`），用于在 PDF 解析强度与成本间权衡。
+- `GET /doc/library/{doc_id}/table/{table_id}/json` 返回结构化单元格；对从扫描页重建的表格，合并单元格现在带恢复的 `colspan`（Markdown 形式不变）。
 - `POST /doc/parse` 和 `POST /web/capture` 支持 `content_type`，可选值为 `General`、`Contract`、`Bid`、`Knowledge`（输入大小写不敏感，存储统一为首字母大写）；默认 `General`。
 - 新入库文档会保存到 `${MANTISFETCH_DOCS_DIR}/<content_type>/<doc_id>`，旧版平铺的 `${MANTISFETCH_DOCS_DIR}/<doc_id>` 文档仍可读取。
 - `GET /doc/library/search` 支持 `metadata.*` 形式的查询参数做等值过滤，例如 `metadata.customer=ACME`。
@@ -441,8 +473,14 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
+| `HOST` | `0.0.0.0` | 绑定地址 |
 | `PORT` | `9898` | HTTP 监听端口 |
 | `LANG` | `en` | 界面语言（`en` 英文 / `zh` 中文） |
+| `MANTISFETCH_TLS_CERTFILE` | — | TLS 证书路径；与 `MANTISFETCH_TLS_KEYFILE` **同时**设置才会启用 HTTPS（只设其一会被忽略） |
+| `MANTISFETCH_TLS_KEYFILE` | — | TLS 私钥路径（与 `MANTISFETCH_TLS_CERTFILE` 配对） |
+| `MANTISFETCH_MCP_TOKEN` | — | `/mcp` 接口的 bearer token；不设置则 `/mcp` 仅 loopback 可达 |
+| `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | MCP DNS-rebinding 防护的额外 host/origin（逗号分隔） |
+| `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | MCP `doc_parse` `rel_path` source 的 allowlist 根目录；不设置则禁用 MCP 上的本地路径解析 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | 文档目录命名策略：`counter` 保持 `DOC-xxx`；`source_filename` 基于上传文件名生成安全目录名 |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | 单文档 section 摘要的最大 LLM batch 并发数 |
 | `MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC` | `2.0` | 全服务摘要 LLM 请求之间的最小间隔秒数 |

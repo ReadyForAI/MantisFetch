@@ -38,6 +38,8 @@ Use for: document analysis, cross-document consolidation, research report extrac
 ## 2. Service Dependency
 
 - Base URL: `http://127.0.0.1:9898/doc/`
+- If the server is started with TLS (`MANTISFETCH_TLS_CERTFILE` + `MANTISFETCH_TLS_KEYFILE`), use `https://` instead.
+- Agents that connect over the Model Context Protocol can use the same capabilities as MCP tools (`doc_parse`, `doc_digest`, `doc_brief`, `doc_section`, …) — see the [mantisfetch-mcp](./mantisfetch-mcp-SKILL.md) skill.
 
 ---
 
@@ -147,6 +149,8 @@ Request parameters:
 | `generate_summary`    | bool   | `true`     | Whether to generate summaries (false = extract text only)                               |
 | `summary_mode`        | string | null       | Summary mode: `sync` / `defer` / `off`. Use `defer` for large documents and business Skills |
 | `document_profile`    | string | null       | Optional document profile name; pass only when the caller knows an available profile    |
+| `parse_mode`          | string | `accurate` | PDF parsing intensity: `fast` (native text, minimal OCR) / `accurate` (default — native text + OCR for scan/mixed pages) / `full` (most thorough, full-page/region LLM OCR; highest cost). Applies to PDFs; server default comes from `MANTISFETCH_PDF_PARSE_MODE` |
+| `replace`             | bool   | `false`    | When an explicit `doc_id` already exists, set `true` to overwrite it; otherwise the request returns `409` (see §4.2 notes)            |
 | `id_strategy`         | string | null       | DOC-ID strategy: `counter` / `source_filename`                                         |
 | `skip_ocr_pages`      | string | null       | Pages confirmed blank or unnecessary for OCR, e.g. `"30,104,106-108"`                  |
 | `force_ocr`           | bool   | `false`    | Force LLM OCR on all pages. This is higher cost and should only be used when the caller explicitly needs visual re-recognition for the whole document |
@@ -249,6 +253,7 @@ Response example:
 - The returned `digest` field already contains the first 300 characters of the summary — Agent usually doesn't need an extra call to `/doc/library/{doc_id}/digest`
 - `generate_summary=false` extracts text and tables only without calling LLM — faster but no summary
 - `content_type` defaults to `General` when omitted; pass `Contract`, `Bid`, or `Knowledge` when the caller already knows the business category
+- Passing an explicit `doc_id` that already exists returns `409` unless `replace=true`; omit `doc_id` to always get a fresh auto-incremented one. The conflict is checked before the body is streamed, so a rejected upload wastes no disk
 - `metadata` should be a JSON object; nested objects are preserved in manifest, while shallow scalar fields are available for filtering in `/doc/library/search`
 - `source_ref` points to the stored upload inside the document directory when `MANTISFETCH_STORE_SOURCE_FILES=true`
 - Large files (100+ page PDFs) may take 30–60 seconds to parse — Agents should set a longer timeout
@@ -419,6 +424,80 @@ Results exist only when `/doc/parse` was called with `extract_images=true`. `ima
 
 Returns the full manifest.json contents, including document structure, section list, image/table path information, metadata, source file reference, and provenance.
 
+### 4.13 Search Within One Document's Sections
+
+- `POST /doc/library/{doc_id}/search_sections`
+
+Request body: `{"q": "payment terms", "case_sensitive": false, "include_content": false, "limit": 20}`
+
+Searches only inside one document's section files (title + body) and returns the same result shape as `/doc/library/search_text`, with `sid` / `section_title` / `page_start` / `page_end` provenance and a `snippet`. Set `include_content=true` to also return each matched section's full text. Use this to locate the right `sid` before reading a section in full.
+
+### 4.14 Read Structured Table JSON
+
+- `GET /doc/library/{doc_id}/table/{table_id}/json`
+
+Returns the table as structured JSON (when a JSON sidecar exists for it), in addition to the Markdown form from §4.10:
+
+```json
+{
+  "doc_id": "DOC-010",
+  "table_id": "table-01",
+  "table": {
+    "table_id": "table-01",
+    "page": 5,
+    "source": "ocr_geometry",
+    "row_count": 4,
+    "column_count": 3,
+    "rows": [
+      {
+        "row_index": 1,
+        "cells": [
+          {"row": 1, "column": 1, "text": "Item", "rowspan": 1, "colspan": 2, "confidence": 0.97},
+          {"row": 1, "column": 3, "text": "Total", "rowspan": 1, "colspan": 1, "confidence": 0.96}
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Cell fields:** `row`, `column` (1-based left-anchor), `text`, `rowspan`, `colspan`, `confidence`, plus `bbox` / `ocr_block_refs` for OCR-geometry tables.
+
+- For tables reconstructed from scanned pages (`source="ocr_geometry"`), a merged header/total cell that spans columns now carries the **real `colspan`** (computed geometrically from the cell bbox vs. column centers), so downstream consumers get correct cell→column mapping. `rowspan` stays `1` (vertical merges need cell borders / a TSR model). The Markdown output (§4.10) is unchanged — the merged value already renders in its start column.
+- Use the Markdown form (§4.10) for reading; use the JSON form when you need explicit cell geometry or merged-cell spans (e.g. contract/invoice field extraction).
+
+### 4.15 Build Retrieval Chunks
+
+- `POST /doc/library/{doc_id}/chunks`
+
+Request body: `{"include_text": false}` (plus optional chunking config fields).
+
+Returns section-boundary chunks for downstream RAG/retrieval pipelines: `{"doc_id", "chunk_count", "chunks": [...], "config": {...}}`. MantisFetch itself does not do retrieval — this produces generic chunks for an upper-level skill to embed/index. Set `include_text=true` to include chunk text.
+
+### 4.16 Deferred Summary Status & Retry
+
+These pair with `summary_mode=defer` at parse time (summary generated in the background).
+
+- `GET /doc/library/{doc_id}/summary` — current summary status (poll this after a deferred parse):
+
+```json
+{"doc_id": "DOC-010", "summary": {"status": "running", "mode": "defer", "attempts": 1}, "paths": {...}}
+```
+
+`status` is one of `pending` / `running` / `done` / `failed`.
+
+- `POST /doc/library/{doc_id}/summary?concurrency=3&force=false` — (re)schedule summary generation for a document parsed without one, or retry a failed one. Returns `{"doc_id", "scheduled": true, "summary": {...}, "limits": {...}}`. Returns `409` if a summary is already `running` or the per-doc attempt limit is reached (pass `force=true` to override).
+
+### 4.17 Discover Sidecars & OCR Layout (Advanced)
+
+For consumers that need OCR geometry (e.g. precise table/region positions):
+
+- `GET /doc/library/{doc_id}/sidecars` — discover which optional sidecars exist (OCR layout, structured tables) and their endpoints, **without** returning large geometry payloads. Includes per-table summaries (`row_count`, `column_count`, `json_file`, `bbox_available`).
+- `GET /doc/library/{doc_id}/layout/pages` — list OCR layout pages + block counts (no block geometry).
+- `GET /doc/library/{doc_id}/layout/page/{page_num}` — full OCR geometry for one 1-based page.
+
+Most agents never need these — prefer digest/brief/section/table. Use them only when cell-level coordinates matter.
+
 ---
 
 ## 5. Document Library Structure
@@ -560,6 +639,8 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | Error                                              | Cause                          | Solution                                                                   |
 | -------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------- |
 | `422 unsupported format`                           | Uploaded non-supported file    | Check file format against `/doc/health` `supported_formats`               |
+| `409 doc_id already exists`                         | Explicit `doc_id` collides with an existing doc | Pass `replace=true` to overwrite, or omit `doc_id` for a fresh one         |
+| `409 summary already running` / `attempt limit reached` | Concurrent / repeated `POST .../summary` | Poll `GET .../summary` instead; pass `force=true` only if you must override |
 | `429 too many concurrent requests`                 | Rate limit exceeded            | Wait and retry — server limits concurrent parse operations                 |
 | `404 document not found`                           | Invalid doc_id or unparsed doc | Use search to confirm doc_id first                                         |
 | `404 section not found`                            | Invalid sid                    | Call `/doc/library/{doc_id}/sections` first to get valid sid list           |
