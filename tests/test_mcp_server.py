@@ -16,10 +16,10 @@ EXPECTED_TOOLS = {
     # web (9)
     "web_capture", "web_session_open", "web_goto", "web_distill", "web_read_sections",
     "web_act", "web_scroll", "web_navigate", "web_session_close",
-    # doc (12)
-    "doc_parse", "doc_digest", "doc_brief", "doc_sections", "doc_section", "doc_full",
-    "doc_search", "doc_search_sections", "doc_table", "doc_chunks", "doc_manifest",
-    "doc_summary",
+    # doc (13)
+    "doc_parse", "doc_digest", "doc_brief", "doc_sections", "doc_section",
+    "doc_sections_batch", "doc_full", "doc_search", "doc_search_sections", "doc_table",
+    "doc_chunks", "doc_manifest", "doc_summary",
 }
 
 
@@ -164,6 +164,16 @@ def test_web_distill_delegates_and_wraps(monkeypatch) -> None:
     assert args[1]["session_id"] == "SID-1"
     # untrusted text wrapped
     assert out["sections"][0]["t"].startswith("⟦mantisfetch:web-content")
+
+
+def test_doc_sections_batch_delegates(monkeypatch) -> None:
+    fake = {"doc_id": "DOC-1", "sections": [{"sid": "s1", "content": "x"}], "missing": ["s9"]}
+    monkeypatch.setattr(mm, "_doc_post", AsyncMock(return_value=fake))
+    out = asyncio.run(mm.doc_sections_batch("DOC-1", ["s1", "s9"]))
+    args, _ = mm._doc_post.call_args
+    assert args[0] == "/library/DOC-1/sections/batch"
+    assert args[1] == {"sids": ["s1", "s9"]}
+    assert out["missing"] == ["s9"]
 
 
 def test_unwrap_raises_tool_error_on_4xx() -> None:

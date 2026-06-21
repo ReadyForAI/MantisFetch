@@ -194,6 +194,7 @@ Access documents stored by `/web/capture` and `/doc/parse`.
 | `GET` | `/doc/library/{doc_id}/full` | Full document text |
 | `GET` | `/doc/library/{doc_id}/sections` | List all sections with metadata |
 | `GET` | `/doc/library/{doc_id}/section/{sid}` | Full text of a single section |
+| `POST` | `/doc/library/{doc_id}/sections/batch` | Read multiple sections by sid in one request |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}` | Markdown table with column statistics |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}/json` | Structured table JSON (cells with row/column spans) |
 | `POST` | `/doc/library/{doc_id}/chunks` | Section-boundary chunks for downstream retrieval/RAG |
@@ -437,6 +438,7 @@ MANTISFETCH_OCR_IMAGE_INPUT_MODE=plain_base64
 | `GET` | `/doc/library/{doc_id}/full` | 完整文档正文 |
 | `GET` | `/doc/library/{doc_id}/sections` | 列出所有章节及元数据 |
 | `GET` | `/doc/library/{doc_id}/section/{sid}` | 单个章节的完整文本 |
+| `POST` | `/doc/library/{doc_id}/sections/batch` | 一次请求按 sid 读取多个章节 |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}` | 带列统计的 Markdown 表格 |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}/json` | 结构化表格 JSON（单元格含行/列跨度） |
 | `POST` | `/doc/library/{doc_id}/chunks` | 面向下游检索/RAG 的 section 边界分块 |

@@ -498,6 +498,18 @@ For consumers that need OCR geometry (e.g. precise table/region positions):
 
 Most agents never need these — prefer digest/brief/section/table. Use them only when cell-level coordinates matter.
 
+### 4.18 Read Multiple Sections (Batch)
+
+- `POST /doc/library/{doc_id}/sections/batch`
+
+Request body: `{"sids": ["a3f8e1b902cd", "b7c2d4e5f612"]}` (1–100 sids).
+
+Reads several sections in one request — fewer round-trips than repeated `/section/{sid}`, which matters for remote/MCP callers. Returns the sections found (in request order, de-duplicated) plus any sids that didn't resolve:
+
+```json
+{"doc_id": "DOC-010", "sections": [{"sid": "a3f8e1b902cd", "content": "# Executive Summary\n\n..."}], "missing": ["unknown_sid"]}
+```
+
 ---
 
 ## 5. Document Library Structure

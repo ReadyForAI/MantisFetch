@@ -150,6 +150,7 @@ Notes:
 | `doc_brief` | Brief tier (~1.5k tokens): section headings + snippets. | `doc_id` |
 | `doc_sections` | List sections (sid + title) for targeted retrieval. | `doc_id` |
 | `doc_section` | Section tier: full text of one section by sid. | `doc_id`, `sid` |
+| `doc_sections_batch` | Read several sections by sid in one call (fewer round-trips than repeated `doc_section`); returns found + missing sids. | `doc_id`, `sids[]` |
 | `doc_full` | Full document text — expensive; prefer the tiers above. | `doc_id` |
 | `doc_search` | Search across the library; returns matching doc ids + metadata. | `q`, `tags?`, `limit=20` |
 | `doc_search_sections` | Search within one document's sections; returns sid/page provenance. | `doc_id`, `q`, `include_content=false` |
