@@ -1542,7 +1542,10 @@ class ChunkRequest(BaseModel):
 
 
 class SectionBatchRequest(BaseModel):
-    sids: list[str] = Field(..., min_length=1, max_length=100)
+    # Length is validated in the handler (HTTPException 422) rather than via Field
+    # min_length/max_length: those are Pydantic-v2-only on list fields and raise at
+    # import under Pydantic v1, which FastAPI's dependency range still permits.
+    sids: list[str]
 
 
 # ---- FastAPI app ----
@@ -3411,6 +3414,10 @@ async def get_sections_batch(doc_id: str, request: SectionBatchRequest):
     """Read multiple sections by sid in one call — fewer round-trips than
     repeated /section/{sid} (matters for cross-host MCP clients). Returns the
     sections found plus any requested sids that didn't resolve."""
+    if not request.sids:
+        raise HTTPException(422, "sids must be a non-empty list")
+    if len(request.sids) > 100:
+        raise HTTPException(422, "sids accepts at most 100 ids")
     _validate_doc_id(doc_id)
     doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
     manifest_path = doc_dir / "manifest.json"

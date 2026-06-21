@@ -255,6 +255,16 @@ class TestLibrarySections:
                 resp = client.post("/doc/library/DOC-001/sections/batch", json={"sids": []})
         assert resp.status_code == 422
 
+    def test_sections_batch_rejects_over_100(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.post(
+                    "/doc/library/DOC-001/sections/batch",
+                    json={"sids": [f"s{i}" for i in range(101)]},
+                )
+        assert resp.status_code == 422
+
     def test_sections_batch_doc_not_found(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
