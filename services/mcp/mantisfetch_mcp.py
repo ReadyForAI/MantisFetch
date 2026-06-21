@@ -389,6 +389,13 @@ async def doc_section(doc_id: str, sid: str) -> Any:
 
 
 @mcp.tool()
+async def doc_sections_batch(doc_id: str, sids: list[str]) -> Any:
+    """Read several sections by sid in one call — fewer round-trips than repeated
+    doc_section (matters cross-host). Returns the sections found + any missing sids."""
+    return await _doc_post(f"/library/{doc_id}/sections/batch", {"sids": sids})
+
+
+@mcp.tool()
 async def doc_full(doc_id: str) -> Any:
     """Full document text — expensive; prefer digest/brief/section first."""
     return await _doc_get(f"/library/{doc_id}/full")

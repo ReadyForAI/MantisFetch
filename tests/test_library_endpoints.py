@@ -233,6 +233,36 @@ class TestLibrarySections:
                 resp = client.get("/doc/library/DOC-001/section/nonexistent")
         assert resp.status_code == 404
 
+    def test_sections_batch_returns_requested_and_missing(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.post(
+                    "/doc/library/DOC-001/sections/batch",
+                    json={"sids": ["abc123", "def456", "nonexistent", "abc123"]},
+                )
+        assert resp.status_code == 200
+        data = resp.json()
+        # found in request order, deduped (abc123 once), missing reported
+        assert [s["sid"] for s in data["sections"]] == ["abc123", "def456"]
+        assert "Introduction" in data["sections"][0]["content"]
+        assert data["missing"] == ["nonexistent"]
+
+    def test_sections_batch_requires_non_empty(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.post("/doc/library/DOC-001/sections/batch", json={"sids": []})
+        assert resp.status_code == 422
+
+    def test_sections_batch_doc_not_found(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.post(
+                    "/doc/library/DOC-999/sections/batch", json={"sids": ["abc123"]}
+                )
+        assert resp.status_code == 404
+
     def test_read_table(self, client: TestClient):
         with tempfile.TemporaryDirectory() as tmp:
             _setup_doc(Path(tmp))

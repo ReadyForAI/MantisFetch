@@ -1541,6 +1541,10 @@ class ChunkRequest(BaseModel):
     include_text: bool = True
 
 
+class SectionBatchRequest(BaseModel):
+    sids: list[str] = Field(..., min_length=1, max_length=100)
+
+
 # ---- FastAPI app ----
 
 app = FastAPI(title="Doc Reader API", version="3.0.0")
@@ -3400,6 +3404,39 @@ async def get_section(doc_id: str, sid: str):
             break
 
     raise HTTPException(404, t("section_not_found", sid=sid))
+
+
+@app.post("/library/{doc_id}/sections/batch")
+async def get_sections_batch(doc_id: str, request: SectionBatchRequest):
+    """Read multiple sections by sid in one call — fewer round-trips than
+    repeated /section/{sid} (matters for cross-host MCP clients). Returns the
+    sections found plus any requested sids that didn't resolve."""
+    _validate_doc_id(doc_id)
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
+    manifest_path = doc_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files_by_sid = {
+        sec["sid"]: sec.get("file")
+        for sec in manifest.get("sections", [])
+        if isinstance(sec, dict) and sec.get("sid")
+    }
+    sections: list[dict[str, str]] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+    for sid in request.sids:
+        if sid in seen:  # dedupe requested ids; don't read the same file twice
+            continue
+        seen.add(sid)
+        file = files_by_sid.get(sid)
+        path = _resolve_manifest_section_path(doc_dir, file) if file else None
+        if path and path.exists():
+            sections.append({"sid": sid, "content": path.read_text(encoding="utf-8")})
+        else:
+            missing.append(sid)
+    return {"doc_id": doc_id, "sections": sections, "missing": missing}
 
 
 @app.get("/library/{doc_id}/table/{table_id}")

@@ -498,6 +498,18 @@ table_id 格式：`"01"` 或 `"table-01"`。
 
 大多数 Agent 用不到这些 —— 优先用 digest/brief/section/table。只有在需要单元格级坐标时才用。
 
+### 4.18 批量读取章节
+
+- `POST /doc/library/{doc_id}/sections/batch`
+
+请求体：`{"sids": ["a3f8e1b902cd", "b7c2d4e5f612"]}`（1–100 个 sid）。
+
+一次请求读取多个章节 —— 比反复调用 `/section/{sid}` 少很多往返，对远程/MCP 调用方尤其有意义。返回找到的章节（按请求顺序、去重），以及未解析到的 sid：
+
+```json
+{"doc_id": "DOC-010", "sections": [{"sid": "a3f8e1b902cd", "content": "# Executive Summary\n\n..."}], "missing": ["unknown_sid"]}
+```
+
 ---
 
 ## 5. 文档库目录结构
