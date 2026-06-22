@@ -1630,6 +1630,7 @@ def _persist_web_capture(
     content_type: str = "General",
     extract_tables: bool = True,
     requested_url: str | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json."""
     normalized_content_type = _normalize_content_type(content_type)
@@ -1728,17 +1729,21 @@ def _persist_web_capture(
             "content_hash": content_hash,
             "extract_tables": extract_tables,
             "requested_url": requested_url or url,
+            "lang": lang,
         })
         index["last_updated"] = now_str
         _write_json(index_path, index)
 
 
 def _find_cached_capture(
-    docs_dir: Path, url: str, content_type: str, extract_tables: bool, ttl_hours: float
+    docs_dir: Path, url: str, content_type: str, extract_tables: bool, lang: str,
+    ttl_hours: float,
 ) -> dict[str, Any] | None:
     """Return the most recent web-capture index entry matching (url, content_type,
-    extract_tables) created within ttl_hours, or None. Reading is lock-free: writes
-    are atomic (temp + rename), so a concurrent write is never seen half-applied."""
+    extract_tables, lang) created within ttl_hours, or None. Reading is lock-free:
+    writes are atomic (temp + rename), so a concurrent write is never seen
+    half-applied. (Note: tags are metadata, not part of the key — a hit returns the
+    existing document with its original tags.)"""
     index_path = docs_dir / "doc-index.json"
     if not index_path.exists():
         return None
@@ -1766,6 +1771,10 @@ def _find_cached_capture(
         # versa). Legacy entries with no recorded flag default to True (the original
         # always-extract behavior).
         if bool(doc.get("extract_tables", True)) != extract_tables:
+            continue
+        # lang sets the browser locale, which can change page content. Legacy entries
+        # with no recorded lang default to DEFAULT_LANG.
+        if (doc.get("lang") or DEFAULT_LANG) != lang:
             continue
         created = doc.get("created_at")
         if not isinstance(created, str):
@@ -2248,7 +2257,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     if CAPTURE_TTL_HOURS > 0 and not req.force_refresh:
         docs_dir = _get_docs_dir()
         cached = _find_cached_capture(
-            docs_dir, req.url, content_type, req.extract_tables, CAPTURE_TTL_HOURS
+            docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
         )
         if cached is not None:
             return _cached_capture_response(cached, content_type, docs_dir)
@@ -2320,6 +2329,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 content_type=content_type,
                 extract_tables=req.extract_tables,
                 requested_url=req.url,
+                lang=req.lang,
             )
 
             return CaptureResponse(

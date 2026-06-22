@@ -324,8 +324,8 @@ description: 网页调研能力
 **现状（已实现）**：
 
 - **URL 去重缓存（opt-in）**：设 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 后，在该时间窗内对同一
-  `url` + `content_type` + `extract_tables` 的 `web_capture` 会直接复用已有 `doc_id`、不再重抓 —— 响应带 `reused: true`
-  和 `cache_age_hours`。默认（`0`）关闭，保持"每次都抓"的原行为；单次想绕过传 `force_refresh: true`。
+  `url` + `content_type` + `extract_tables` + `lang` 的 `web_capture` 会直接复用已有 `doc_id`、不再重抓 —— 响应带 `reused: true`
+  和 `cache_age_hours`（命中返回已有文档及其原有 tags，不重新应用本次 tags）。默认（`0`）关闭，保持"每次都抓"的原行为；单次想绕过传 `force_refresh: true`。
   这正面解决了 §0"多 Agent 抓同一 URL 重复抓取"的诉求。
 - **content_hash 去重**：每份文档记录内容 SHA256，用于去重和变更检测。
 - **doc_id 覆盖保护**：显式 `doc_id` 已存在时返回 `409`，除非 `replace=true`。

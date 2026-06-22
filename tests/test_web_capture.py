@@ -35,6 +35,7 @@ def _seed_capture_index(
         "digest_path": f"docs/{storage_path}/digest.md", "tags": [],
         "created_at": created, "content_hash": "sha256:abc",
         "extract_tables": extract_tables, "requested_url": requested_url or url,
+        "lang": "en-US",
     }
     (docs_dir / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": [entry]}), encoding="utf-8"
@@ -167,15 +168,17 @@ def test_find_cached_capture_hit_stale_and_filters(tmp_path: Path) -> None:
     import mantisfetch_browser as lb
 
     _seed_capture_index(tmp_path, url="https://example.com", content_type="General", age_hours=1.0)
+    en = "en-US"
     # within TTL
-    hit = lb._find_cached_capture(tmp_path, "https://example.com", "General", True, 24.0)
+    hit = lb._find_cached_capture(tmp_path, "https://example.com", "General", True, en, 24.0)
     assert hit is not None and hit["id"] == "WEB-001"
     # older than TTL
-    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", True, 0.5) is None
-    # different URL / content_type / extract_tables
-    assert lb._find_cached_capture(tmp_path, "https://other.com", "General", True, 24.0) is None
-    assert lb._find_cached_capture(tmp_path, "https://example.com", "Knowledge", True, 24.0) is None
-    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", False, 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", True, en, 0.5) is None
+    # different URL / content_type / extract_tables / lang
+    assert lb._find_cached_capture(tmp_path, "https://other.com", "General", True, en, 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "Knowledge", True, en, 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", False, en, 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", True, "zh-CN", 24.0) is None
 
 
 def test_find_cached_capture_picks_most_recent(tmp_path: Path) -> None:
@@ -192,7 +195,7 @@ def test_find_cached_capture_picks_most_recent(tmp_path: Path) -> None:
     (tmp_path / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": docs}), encoding="utf-8"
     )
-    hit = lb._find_cached_capture(tmp_path, "https://x.com", "General", True, 24.0)
+    hit = lb._find_cached_capture(tmp_path, "https://x.com", "General", True, "en-US", 24.0)
     assert hit is not None and hit["id"] == "WEB-002"
 
 
