@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="MantisFetch",
-    version="0.1.0",
+    version="1.0.0",
     description="Open-source data collection and document parsing platform by ReadyForAI.",
     lifespan=lifespan,
 )
@@ -57,7 +57,7 @@ async def health() -> dict:
     """Return aggregated health status for all mounted services."""
     return {
         "ok": True,
-        "version": "0.1.0",
+        "version": "1.0.0",
         "services": {
             "browser": "mounted at /web",
             "docreader": "mounted at /doc",
