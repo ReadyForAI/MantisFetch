@@ -200,6 +200,7 @@ Access documents stored by `/web/capture` and `/doc/parse`.
 | `POST` | `/doc/library/{doc_id}/chunks` | Section-boundary chunks for downstream retrieval/RAG |
 | `GET` | `/doc/library/{doc_id}/images` | List embedded Word images with anchors and OCR results |
 | `GET` | `/doc/library/{doc_id}/image/{image_id}` | Metadata and OCR text for one embedded Word image |
+| `GET` | `/doc/library/{doc_id}/image/{image_id}/raw` | Raw image bytes (`variant=rendered\|original`) for visual reads |
 | `GET` | `/doc/library/{doc_id}/summary` | Summary status (poll after a deferred parse) |
 | `POST` | `/doc/library/{doc_id}/summary` | (Re)schedule or retry summary generation |
 | `GET` | `/doc/library/{doc_id}/manifest` | Provenance metadata (source, timestamps, content hash) |
@@ -445,6 +446,7 @@ MANTISFETCH_OCR_IMAGE_INPUT_MODE=plain_base64
 | `POST` | `/doc/library/{doc_id}/chunks` | 面向下游检索/RAG 的 section 边界分块 |
 | `GET` | `/doc/library/{doc_id}/images` | 列出 Word 内嵌图片、锚点和 OCR 结果 |
 | `GET` | `/doc/library/{doc_id}/image/{image_id}` | 单个 Word 内嵌图片的元数据和 OCR 文本 |
+| `GET` | `/doc/library/{doc_id}/image/{image_id}/raw` | 图片原始字节（`variant=rendered\|original`），用于视觉读图 |
 | `GET` | `/doc/library/{doc_id}/summary` | 摘要状态（延迟解析后轮询） |
 | `POST` | `/doc/library/{doc_id}/summary` | （重新）调度或重试摘要生成 |
 | `GET` | `/doc/library/{doc_id}/manifest` | 来源元数据（来源地址、时间戳、内容哈希） |

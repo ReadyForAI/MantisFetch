@@ -289,6 +289,79 @@ class TestLibrarySections:
         assert resp.status_code == 404
 
 
+class TestLibraryImageRaw:
+    _PNG = b"\x89PNG\r\n\x1a\nFAKEpng"
+
+    def _add_images(self, doc_dir: Path) -> None:
+        (doc_dir / "images").mkdir(exist_ok=True)
+        (doc_dir / "images" / "IMG-001.png").write_bytes(self._PNG)
+        (doc_dir / "images" / "IMG-001.original.bmp").write_bytes(b"BMP-ORIGINAL")
+        (doc_dir / "images.json").write_text(
+            json.dumps([
+                {
+                    "image_id": "IMG-001",
+                    "media": {
+                        "rendered_path": "images/IMG-001.png",
+                        "original_path": "images/IMG-001.original.bmp",
+                    },
+                }
+            ]),
+            encoding="utf-8",
+        )
+
+    def test_raw_returns_rendered_png_bytes(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._add_images(_setup_doc(Path(tmp)))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/image/IMG-001/raw")
+        assert resp.status_code == 200
+        assert resp.content == self._PNG
+        assert resp.headers["content-type"] == "image/png"
+
+    def test_raw_original_variant(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._add_images(_setup_doc(Path(tmp)))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/image/IMG-001/raw?variant=original")
+        assert resp.status_code == 200
+        assert resp.content == b"BMP-ORIGINAL"
+
+    def test_raw_bad_variant_422(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._add_images(_setup_doc(Path(tmp)))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/image/IMG-001/raw?variant=nope")
+        assert resp.status_code == 422
+
+    def test_raw_unknown_image_404(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._add_images(_setup_doc(Path(tmp)))
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/image/IMG-999/raw")
+        assert resp.status_code == 404
+
+    def test_raw_no_images_404(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))  # no images.json
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/image/IMG-001/raw")
+        assert resp.status_code == 404
+
+    def test_raw_path_traversal_blocked(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_dir = _setup_doc(Path(tmp))
+            (Path(tmp) / "secret.bin").write_bytes(b"SECRET")
+            (doc_dir / "images.json").write_text(
+                json.dumps([
+                    {"image_id": "IMG-001", "media": {"rendered_path": "../../secret.bin"}}
+                ]),
+                encoding="utf-8",
+            )
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.get("/doc/library/DOC-001/image/IMG-001/raw")
+        assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Search endpoint
 # ---------------------------------------------------------------------------

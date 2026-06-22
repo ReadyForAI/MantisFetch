@@ -414,7 +414,8 @@ Response: `{"doc_id": "DOC-010", "table_id": "01", "content": "# Table 1 (Page 5
 ### 4.11 Read Embedded Word Image Results
 
 - `GET /doc/library/{doc_id}/images`
-- `GET /doc/library/{doc_id}/image/{image_id}`
+- `GET /doc/library/{doc_id}/image/{image_id}` — metadata + OCR text (JSON)
+- `GET /doc/library/{doc_id}/image/{image_id}/raw` — raw image **bytes** (`variant=rendered` default, or `original`); use for visual reads (stamp/signature recognition) that OCR text can't serve
 
 Results exist only when `/doc/parse` was called with `extract_images=true`. `image_id` format: `"001"` or `"IMG-001"`.
 
