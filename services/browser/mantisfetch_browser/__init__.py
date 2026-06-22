@@ -219,6 +219,10 @@ logger = logging.getLogger("mantisfetch_browser")
 # ---- Rate limiting (in-memory semaphores) ----
 _MAX_CONCURRENT_CAPTURE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_CAPTURE", "10"))
 _MAX_CONCURRENT_SESSIONS = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_SESSIONS", "20"))
+# Opt-in URL dedup for /capture: a capture of the same (url, content_type) made
+# within this many hours is reused instead of re-fetched. 0 (default) disables it,
+# preserving the original always-capture behavior.
+CAPTURE_TTL_HOURS = float(os.environ.get("MANTISFETCH_CAPTURE_TTL_HOURS", "0") or "0")
 _capture_sem = asyncio.Semaphore(_MAX_CONCURRENT_CAPTURE)
 _session_sem = asyncio.Semaphore(_MAX_CONCURRENT_SESSIONS)
 
@@ -1624,6 +1628,9 @@ def _persist_web_capture(
     content_hash: str,
     docs_dir: Path,
     content_type: str = "General",
+    extract_tables: bool = True,
+    requested_url: str | None = None,
+    lang: str = DEFAULT_LANG,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json."""
     normalized_content_type = _normalize_content_type(content_type)
@@ -1720,9 +1727,103 @@ def _persist_web_capture(
             "tags": tags,
             "created_at": now_str,
             "content_hash": content_hash,
+            "extract_tables": extract_tables,
+            "requested_url": requested_url or url,
+            "lang": lang,
         })
         index["last_updated"] = now_str
         _write_json(index_path, index)
+
+
+def _find_cached_capture(
+    docs_dir: Path, url: str, content_type: str, extract_tables: bool, lang: str,
+    ttl_hours: float,
+) -> dict[str, Any] | None:
+    """Return the most recent web-capture index entry matching (url, content_type,
+    extract_tables, lang) created within ttl_hours, or None. Reading is lock-free:
+    writes are atomic (temp + rename), so a concurrent write is never seen
+    half-applied. (Note: tags are metadata, not part of the key — a hit returns the
+    existing document with its original tags.)"""
+    index_path = docs_dir / "doc-index.json"
+    if not index_path.exists():
+        return None
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return None
+    now = datetime.now(UTC)
+    best: dict[str, Any] | None = None
+    best_dt: datetime | None = None
+    for doc in index.get("documents", []):
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("source") != "web_capture":
+            continue
+        # Every cache-key field must be explicitly recorded and match. Entries written
+        # before these fields existed (legacy) are treated as cache misses rather than
+        # reused under assumed defaults — re-capturing is the safe choice. The key uses
+        # the caller-supplied requested_url (not the post-redirect source_url), so a URL
+        # that 301s to https / gains a trailing slash still hits on repeat.
+        if (
+            doc.get("requested_url") != url
+            or _normalize_content_type(doc.get("content_type") or "General") != content_type
+            or doc.get("extract_tables") != extract_tables
+            or doc.get("lang") != lang
+        ):
+            continue
+        created = doc.get("created_at")
+        if not isinstance(created, str):
+            continue
+        try:
+            created_dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        age_hours = (now - created_dt).total_seconds() / 3600.0
+        if age_hours < 0 or age_hours > ttl_hours:
+            continue
+        if best_dt is None or created_dt > best_dt:
+            best, best_dt = doc, created_dt
+    return best
+
+
+def _cached_capture_response(
+    entry: dict[str, Any], content_type: str, docs_dir: Path
+) -> CaptureResponse:
+    """Build a CaptureResponse from a reused doc-index entry (reused=True)."""
+    age_hours: float | None = None
+    created = entry.get("created_at")
+    if isinstance(created, str):
+        try:
+            created_dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+            age_hours = round((datetime.now(UTC) - created_dt).total_seconds() / 3600.0, 2)
+        except ValueError:
+            pass
+    # The index only stores a 200-char digest preview; read digest.md so a reused
+    # response carries the same full digest a fresh capture would return. digest.md
+    # is "# {doc_id}: {title}\n\n{digest}\n" — take the body after the first blank line.
+    digest = entry.get("digest", "")
+    storage_path = entry.get("storage_path")
+    if storage_path:
+        try:
+            raw = (docs_dir / storage_path / "digest.md").read_text(encoding="utf-8")
+            body = raw.partition("\n\n")[2].strip()
+            if body:
+                digest = body
+        except OSError:
+            pass
+    return CaptureResponse(
+        doc_id=entry["id"],
+        content_type=entry.get("content_type") or content_type,
+        storage_path=entry.get("storage_path", ""),
+        digest=digest,
+        # Match a fresh response's section_count = len(sections): the index stores
+        # text and table section counts separately (sections = text-only).
+        section_count=int(entry.get("sections", 0) or 0) + int(entry.get("tables", 0) or 0),
+        table_count=int(entry.get("tables", 0) or 0),
+        reused=True,
+        cache_age_hours=age_hours,
+    )
 
 
 @asynccontextmanager
@@ -2144,6 +2245,19 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     The session is always closed, even on error.
     """
     _validate_url(req.url)
+    content_type = _normalize_content_type(req.content_type)
+
+    # Opt-in URL dedup: reuse a recent capture of the same (url, content_type)
+    # instead of re-fetching. Checked before the rate-limit/browser path so a
+    # cache hit never 429s or spins up a browser context.
+    if CAPTURE_TTL_HOURS > 0 and not req.force_refresh:
+        docs_dir = _get_docs_dir()
+        cached = _find_cached_capture(
+            docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+        )
+        if cached is not None:
+            return _cached_capture_response(cached, content_type, docs_dir)
+
     if _capture_sem.locked():
         raise HTTPException(429, "too many concurrent captures")
     if not _browser:
@@ -2199,7 +2313,6 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             digest = _build_web_digest(title, sections)
             docs_dir = _get_docs_dir()
             doc_id = _next_web_doc_id(docs_dir)
-            content_type = _normalize_content_type(req.content_type)
             _persist_web_capture(
                 doc_id=doc_id,
                 url=url,
@@ -2210,6 +2323,9 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 content_hash=content_hash,
                 docs_dir=docs_dir,
                 content_type=content_type,
+                extract_tables=req.extract_tables,
+                requested_url=req.url,
+                lang=req.lang,
             )
 
             return CaptureResponse(

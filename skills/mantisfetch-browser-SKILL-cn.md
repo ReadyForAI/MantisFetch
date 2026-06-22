@@ -773,6 +773,7 @@ If false:
 | `extract_tables` | bool     | `true`         | 是否提取 HTML 表格 |
 | `lang`           | string   | `"en-US"`      | 浏览器语言环境 |
 | `timeout_ms`     | int      | `25000`        | 页面加载超时（毫秒） |
+| `force_refresh`  | bool     | `false`        | 绕过 URL 去重缓存、强制重抓（见下方说明） |
 
 响应示例：
 
@@ -783,7 +784,9 @@ If false:
   "storage_path": "Knowledge/WEB-005",
   "digest": "Article covers Q3 revenue trends across regions...",
   "section_count": 8,
-  "table_count": 2
+  "table_count": 2,
+  "reused": false,
+  "cache_age_hours": null
 }
 ```
 
@@ -795,6 +798,7 @@ If false:
 - 即使发生错误，session 也一定会被关闭
 - 有并发限流：并发抓取过多时会返回 `429`
 - URL 校验：私有 IP、localhost、非 HTTP(S) 协议都会被拦截
+- **URL 去重（opt-in）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` + `extract_tables` + `lang` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）每次都抓。单次想绕过缓存传 `force_refresh: true`。命中缓存返回的是已有文档（**保留其原有 tags**，不会把本次请求的 `tags` 重新应用上去）。
 
 **什么时候用 `/capture`，什么时候用手动 session 流程：**
 
