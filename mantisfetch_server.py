@@ -65,12 +65,67 @@ async def health() -> dict:
     }
 
 
-# Browser routes are clean (no /web prefix internally) — mount directly.
-app.mount("/web", browser_app)
+class _RestAuthGate:
+    """Pure-ASGI Bearer gate for the /web and /doc HTTP surface (SSE-safe — only
+    ever emits its own response on deny, otherwise passes through untouched).
 
-# Docreader routes are clean (no /doc prefix internally after the fix to
-# /doc/parse → /parse) — mount directly.
-app.mount("/doc", doc_app)
+    The same browser-driving / doc-parsing capabilities the MCP gate locks down
+    are reachable directly on /web/* and /doc/*; once the server binds 0.0.0.0
+    (needed for cross-host MCP) those would otherwise be wide open. Behavior:
+
+    - loopback peer (127.0.0.1 / ::1): always allowed — same-host callers,
+      including one-期 Skeleton-Doc over the Docker bridge, are unaffected.
+    - non-loopback + ``MANTISFETCH_MCP_TOKEN`` set: require that bearer (else 401).
+    - non-loopback + token unset: allowed (preserves the original no-auth default;
+      this is deliberately more permissive than the MCP gate's loopback-only
+      default because a one-期 Agent may reach the API across a Docker bridge,
+      whose peer IP is not loopback — set the token to lock the surface down).
+    - health endpoints are never gated, for liveness probes.
+
+    The real socket peer (``scope["client"]``) is used, never the spoofable Host
+    / X-Forwarded-For header.
+    """
+
+    _LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+    # The mount does not rewrite scope["path"], so the gate sees the full path.
+    # Both the stripped and full forms are exempted to be robust across Starlette
+    # versions.
+    _HEALTH_PATHS = {"/health", "/web/health", "/doc/health"}
+
+    def __init__(self, app: object) -> None:
+        self.app = app
+
+    def _deny(self, scope: dict) -> tuple[int, bytes] | None:
+        client = scope.get("client")
+        peer = client[0] if client else None
+        if peer in self._LOOPBACK:
+            return None
+        token = os.environ.get("MANTISFETCH_MCP_TOKEN")
+        if not token:
+            return None
+        headers = dict(scope.get("headers") or [])
+        if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
+            return 401, b'{"error":"unauthorized"}'
+        return None
+
+    async def __call__(self, scope: dict, receive: object, send: object) -> None:
+        if scope["type"] == "http" and scope.get("path") not in self._HEALTH_PATHS:
+            denied = self._deny(scope)
+            if denied is not None:
+                status, body = denied
+                await send({
+                    "type": "http.response.start", "status": status,
+                    "headers": [(b"content-type", b"application/json")],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+# Browser / docreader routes are clean (no /web /doc prefix internally) — mount
+# directly, behind the REST Bearer gate (loopback-open; token-gated off-host).
+app.mount("/web", _RestAuthGate(browser_app))
+app.mount("/doc", _RestAuthGate(doc_app))
 
 # MCP server (streamable-HTTP) — a thin front-end exposing /web + /doc as Model
 # Context Protocol tools. Its session manager is started in the lifespan above.

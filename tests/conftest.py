@@ -21,6 +21,21 @@ sys.path.insert(0, str(ROOT / "services" / "docreader"))
 sys.path.insert(0, str(ROOT / "services" / "mcp"))
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep MANTISFETCH_MCP_TOKEN unset per test.
+
+    magika (a transitive MarkItDown dependency) calls
+    ``dotenv.load_dotenv(dotenv.find_dotenv())`` at import time, which walks up to
+    the repo ``.env`` and leaks the developer's MANTISFETCH_MCP_TOKEN into
+    os.environ mid-session (lazily, on the first MarkItDown use). With that token
+    set, the REST/MCP auth gate would reject the non-loopback TestClient and break
+    unrelated tests. Tests that exercise auth set the token explicitly via their
+    own monkeypatch (same instance), which wins over this delenv.
+    """
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+
+
 def _make_playwright_mock() -> MagicMock:
     """Build a mock satisfying ``await async_playwright().start()``."""
     mock_browser = AsyncMock()
