@@ -206,6 +206,23 @@ class TestSyncClient:
         client.get_image_bytes("DOC-001", "IMG-001", variant="original")
         assert mock_http.get.call_args.kwargs["params"]["variant"] == "original"
 
+    def test_sections_batch_summary_and_metadata_search(self, sync_client):
+        client, mock_http, mock_resp = sync_client
+        mock_resp.json.return_value = {"ok": True}
+
+        client.get_sections_batch("DOC-001", ["s1", "s2"])
+        post_call = mock_http.post.call_args
+        assert "DOC-001/sections/batch" in post_call.args[0]
+        assert post_call.kwargs["json"] == {"sids": ["s1", "s2"]}
+
+        client.get_summary("DOC-001")
+        assert "DOC-001/summary" in mock_http.get.call_args.args[0]
+
+        client.search("q", metadata={"stage": "pending-review"})
+        params = mock_http.get.call_args.kwargs["params"]
+        assert params["metadata.stage"] == "pending-review"
+        assert params["q"] == "q"
+
     def test_skill_support_helpers(self, sync_client):
         client, mock_http, mock_resp = sync_client
         mock_resp.json.return_value = {"ok": True}
@@ -323,6 +340,17 @@ class TestAsyncClient:
         call = mock_http.get.call_args
         assert "DOC-002/image/IMG-001/raw" in call.args[0]
         assert call.kwargs["params"]["variant"] == "original"
+
+    @pytest.mark.asyncio
+    async def test_async_sections_batch_summary_metadata(self, async_client):
+        client, mock_http, mock_resp = async_client
+        mock_resp.json.return_value = {"ok": True}
+        await client.get_sections_batch("DOC-002", ["s1"])
+        assert "DOC-002/sections/batch" in mock_http.post.call_args.args[0]
+        await client.get_summary("DOC-002")
+        assert "DOC-002/summary" in mock_http.get.call_args.args[0]
+        await client.search("q", metadata={"customer": "ACME"})
+        assert mock_http.get.call_args.kwargs["params"]["metadata.customer"] == "ACME"
 
     @pytest.mark.asyncio
     async def test_async_search(self, async_client):

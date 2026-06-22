@@ -152,8 +152,9 @@ class MantisFetchClient:
 
     # ── internal ─────────────────────────────────────────────────────────────
 
-    def _get(self, path: str, **params: Any) -> dict[str, Any]:
-        resp = self._http.get(f"{self._base}{path}", params={k: v for k, v in params.items() if v is not None})
+    def _get(self, path: str, *, _params: dict[str, Any] | None = None, **params: Any) -> dict[str, Any]:
+        merged = {**params, **(_params or {})}  # _params carries dotted keys (metadata.*)
+        resp = self._http.get(f"{self._base}{path}", params={k: v for k, v in merged.items() if v is not None})
         _raise_for_status(resp)
         return resp.json()
 
@@ -299,6 +300,7 @@ class MantisFetchClient:
         tags: str | None = None,
         file_type: str | None = None,
         content_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
         """Search the document library.
@@ -308,6 +310,8 @@ class MantisFetchClient:
             tags:      Comma-separated tag filter, e.g. ``"Q3,financial"``.
             file_type: Filter by file type: ``"pdf"``, ``"docx"``, or ``"web"``.
             content_type: Filter by library category: General, Contract, Bid, or Knowledge.
+            metadata:  Equality filters on indexed scalar metadata, e.g.
+                       ``{"stage": "pending-review"}`` → ``metadata.stage=pending-review``.
             limit:     Maximum number of results (default: 20).
 
         Returns:
@@ -317,6 +321,7 @@ class MantisFetchClient:
             content_type = _validate_content_type(content_type)
         return self._get(
             "/doc/library/search",
+            _params={f"metadata.{k}": v for k, v in (metadata or {}).items()},
             q=query,
             tags=tags,
             file_type=file_type,
@@ -453,6 +458,15 @@ class MantisFetchClient:
             f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant
         )
 
+    def get_sections_batch(self, doc_id: str, sids: list[str]) -> dict[str, Any]:
+        """Read several sections by sid in one request (fewer round-trips than
+        repeated get_section). Returns ``sections`` found + ``missing`` sids."""
+        return self._post_json(f"/doc/library/{doc_id}/sections/batch", {"sids": sids})
+
+    def get_summary(self, doc_id: str) -> dict[str, Any]:
+        """Retrieve a document's summary status (poll after a deferred parse)."""
+        return self._get(f"/doc/library/{doc_id}/summary")
+
     def search_sections(
         self,
         doc_id: str,
@@ -548,10 +562,11 @@ class AsyncMantisFetchClient:
 
     # ── internal ─────────────────────────────────────────────────────────────
 
-    async def _get(self, path: str, **params: Any) -> dict[str, Any]:
+    async def _get(self, path: str, *, _params: dict[str, Any] | None = None, **params: Any) -> dict[str, Any]:
+        merged = {**params, **(_params or {})}  # _params carries dotted keys (metadata.*)
         resp = await self._http.get(
             f"{self._base}{path}",
-            params={k: v for k, v in params.items() if v is not None},
+            params={k: v for k, v in merged.items() if v is not None},
         )
         _raise_for_status(resp)
         return resp.json()
@@ -670,13 +685,15 @@ class AsyncMantisFetchClient:
         tags: str | None = None,
         file_type: str | None = None,
         content_type: str | None = None,
+        metadata: dict[str, Any] | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        """Search the document library."""
+        """Search the document library (``metadata`` adds metadata.* equality filters)."""
         if content_type is not None:
             content_type = _validate_content_type(content_type)
         return await self._get(
             "/doc/library/search",
+            _params={f"metadata.{k}": v for k, v in (metadata or {}).items()},
             q=query,
             tags=tags,
             file_type=file_type,
@@ -759,6 +776,14 @@ class AsyncMantisFetchClient:
         return await self._get_bytes(
             f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant
         )
+
+    async def get_sections_batch(self, doc_id: str, sids: list[str]) -> dict[str, Any]:
+        """Read several sections by sid in one request (returns found + missing)."""
+        return await self._post_json(f"/doc/library/{doc_id}/sections/batch", {"sids": sids})
+
+    async def get_summary(self, doc_id: str) -> dict[str, Any]:
+        """Retrieve a document's summary status (poll after a deferred parse)."""
+        return await self._get(f"/doc/library/{doc_id}/summary")
 
     async def search_sections(
         self,
