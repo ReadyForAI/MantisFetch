@@ -18,21 +18,27 @@ def _seed_capture_index(
     content_type: str = "General",
     age_hours: float = 1.0,
     digest: str = "cached digest",
+    extract_tables: bool = True,
 ) -> dict:
-    """Write a doc-index.json with one web_capture entry created age_hours ago."""
+    """Write a doc-index.json with one web_capture entry created age_hours ago,
+    plus its digest.md (index stores only the 200-char preview, like production)."""
     created = (datetime.now(UTC) - timedelta(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     storage_path = f"{content_type}/{doc_id}"
     entry = {
         "id": doc_id, "filename": "Example", "file_type": "web_capture",
         "content_type": content_type, "storage_path": storage_path,
         "source": "web_capture", "source_url": url, "pages": 1,
-        "sections": 3, "ocr_pages": 0, "tables": 1, "digest": digest,
+        "sections": 3, "ocr_pages": 0, "tables": 1, "digest": digest[:200],
         "digest_path": f"docs/{storage_path}/digest.md", "tags": [],
         "created_at": created, "content_hash": "sha256:abc",
+        "extract_tables": extract_tables,
     }
     (docs_dir / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": [entry]}), encoding="utf-8"
     )
+    doc_dir = docs_dir / storage_path
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    (doc_dir / "digest.md").write_text(f"# {doc_id}: Example\n\n{digest}\n", encoding="utf-8")
     return entry
 
 
@@ -159,13 +165,14 @@ def test_find_cached_capture_hit_stale_and_filters(tmp_path: Path) -> None:
 
     _seed_capture_index(tmp_path, url="https://example.com", content_type="General", age_hours=1.0)
     # within TTL
-    hit = lb._find_cached_capture(tmp_path, "https://example.com", "General", 24.0)
+    hit = lb._find_cached_capture(tmp_path, "https://example.com", "General", True, 24.0)
     assert hit is not None and hit["id"] == "WEB-001"
     # older than TTL
-    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", 0.5) is None
-    # different URL / different content_type
-    assert lb._find_cached_capture(tmp_path, "https://other.com", "General", 24.0) is None
-    assert lb._find_cached_capture(tmp_path, "https://example.com", "Knowledge", 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", True, 0.5) is None
+    # different URL / content_type / extract_tables
+    assert lb._find_cached_capture(tmp_path, "https://other.com", "General", True, 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "Knowledge", True, 24.0) is None
+    assert lb._find_cached_capture(tmp_path, "https://example.com", "General", False, 24.0) is None
 
 
 def test_find_cached_capture_picks_most_recent(tmp_path: Path) -> None:
@@ -182,18 +189,22 @@ def test_find_cached_capture_picks_most_recent(tmp_path: Path) -> None:
     (tmp_path / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": docs}), encoding="utf-8"
     )
-    hit = lb._find_cached_capture(tmp_path, "https://x.com", "General", 24.0)
+    hit = lb._find_cached_capture(tmp_path, "https://x.com", "General", True, 24.0)
     assert hit is not None and hit["id"] == "WEB-002"
 
 
 def test_capture_reuses_recent_capture(client: TestClient) -> None:
     """With TTL enabled, a repeat capture of the same URL returns the cached
     doc_id without browsing (reused=True)."""
+    # > 200 chars so we can prove the full digest (from digest.md) is returned,
+    # not the truncated index preview.
+    long_digest = "Quarterly revenue analysis across regions. " * 8
+    assert len(long_digest) > 200
     with tempfile.TemporaryDirectory() as tmp:
         docs_dir = Path(tmp)
         _seed_capture_index(
             docs_dir, doc_id="WEB-005", url="https://example.com",
-            content_type="Knowledge", age_hours=2.0,
+            content_type="Knowledge", age_hours=2.0, digest=long_digest,
         )
         with (
             patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
@@ -208,6 +219,44 @@ def test_capture_reuses_recent_capture(client: TestClient) -> None:
     assert data["reused"] is True
     assert data["doc_id"] == "WEB-005"
     assert data["cache_age_hours"] is not None and data["cache_age_hours"] >= 0
+    # full digest (from digest.md), not the 200-char index preview
+    assert data["digest"] == long_digest.strip()
+    assert len(data["digest"]) > 200
+
+
+def test_capture_extract_tables_mismatch_not_reused(client: TestClient) -> None:
+    """A cached extract_tables=false capture must not be reused for a default
+    (extract_tables=true) request — it re-captures instead."""
+    distill_result = _make_distill_result()
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        _seed_capture_index(
+            docs_dir, doc_id="WEB-001", url="https://example.com",
+            content_type="Knowledge", age_hours=1.0, extract_tables=False,
+        )
+        with (
+            patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
+            patch("mantisfetch_browser.CAPTURE_TTL_HOURS", 24.0),
+            patch("mantisfetch_browser._distill", new=AsyncMock(return_value=distill_result)),
+            patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
+        ):
+            mock_page = AsyncMock()
+            mock_page.goto = AsyncMock()
+            mock_context = AsyncMock()
+            mock_context.new_page = AsyncMock(return_value=mock_page)
+            import mantisfetch_browser as lb
+            orig_browser = lb._browser
+            lb._browser = MagicMock()
+            lb._browser.new_context = AsyncMock(return_value=mock_context)
+            try:
+                resp = client.post(
+                    "/web/capture",
+                    json={"url": "https://example.com", "content_type": "Knowledge"},
+                )
+            finally:
+                lb._browser = orig_browser
+    assert resp.status_code == 200
+    assert resp.json()["reused"] is False
 
 
 def test_capture_force_refresh_bypasses_cache(client: TestClient) -> None:

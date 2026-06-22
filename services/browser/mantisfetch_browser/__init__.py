@@ -1628,6 +1628,7 @@ def _persist_web_capture(
     content_hash: str,
     docs_dir: Path,
     content_type: str = "General",
+    extract_tables: bool = True,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json."""
     normalized_content_type = _normalize_content_type(content_type)
@@ -1724,17 +1725,18 @@ def _persist_web_capture(
             "tags": tags,
             "created_at": now_str,
             "content_hash": content_hash,
+            "extract_tables": extract_tables,
         })
         index["last_updated"] = now_str
         _write_json(index_path, index)
 
 
 def _find_cached_capture(
-    docs_dir: Path, url: str, content_type: str, ttl_hours: float
+    docs_dir: Path, url: str, content_type: str, extract_tables: bool, ttl_hours: float
 ) -> dict[str, Any] | None:
-    """Return the most recent web-capture index entry for (url, content_type)
-    created within ttl_hours, or None. Reading is lock-free: writes are atomic
-    (temp + rename), so a concurrent write is never seen half-applied."""
+    """Return the most recent web-capture index entry matching (url, content_type,
+    extract_tables) created within ttl_hours, or None. Reading is lock-free: writes
+    are atomic (temp + rename), so a concurrent write is never seen half-applied."""
     index_path = docs_dir / "doc-index.json"
     if not index_path.exists():
         return None
@@ -1753,6 +1755,11 @@ def _find_cached_capture(
             continue
         if _normalize_content_type(doc.get("content_type") or "General") != content_type:
             continue
+        # Don't hand back a no-table capture to a caller that wants tables (or vice
+        # versa). Legacy entries with no recorded flag default to True (the original
+        # always-extract behavior).
+        if bool(doc.get("extract_tables", True)) != extract_tables:
+            continue
         created = doc.get("created_at")
         if not isinstance(created, str):
             continue
@@ -1768,7 +1775,9 @@ def _find_cached_capture(
     return best
 
 
-def _cached_capture_response(entry: dict[str, Any], content_type: str) -> CaptureResponse:
+def _cached_capture_response(
+    entry: dict[str, Any], content_type: str, docs_dir: Path
+) -> CaptureResponse:
     """Build a CaptureResponse from a reused doc-index entry (reused=True)."""
     age_hours: float | None = None
     created = entry.get("created_at")
@@ -1778,11 +1787,24 @@ def _cached_capture_response(entry: dict[str, Any], content_type: str) -> Captur
             age_hours = round((datetime.now(UTC) - created_dt).total_seconds() / 3600.0, 2)
         except ValueError:
             pass
+    # The index only stores a 200-char digest preview; read digest.md so a reused
+    # response carries the same full digest a fresh capture would return. digest.md
+    # is "# {doc_id}: {title}\n\n{digest}\n" — take the body after the first blank line.
+    digest = entry.get("digest", "")
+    storage_path = entry.get("storage_path")
+    if storage_path:
+        try:
+            raw = (docs_dir / storage_path / "digest.md").read_text(encoding="utf-8")
+            body = raw.partition("\n\n")[2].strip()
+            if body:
+                digest = body
+        except OSError:
+            pass
     return CaptureResponse(
         doc_id=entry["id"],
         content_type=entry.get("content_type") or content_type,
         storage_path=entry.get("storage_path", ""),
-        digest=entry.get("digest", ""),
+        digest=digest,
         section_count=int(entry.get("sections", 0) or 0),
         table_count=int(entry.get("tables", 0) or 0),
         reused=True,
@@ -2215,9 +2237,12 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     # instead of re-fetching. Checked before the rate-limit/browser path so a
     # cache hit never 429s or spins up a browser context.
     if CAPTURE_TTL_HOURS > 0 and not req.force_refresh:
-        cached = _find_cached_capture(_get_docs_dir(), req.url, content_type, CAPTURE_TTL_HOURS)
+        docs_dir = _get_docs_dir()
+        cached = _find_cached_capture(
+            docs_dir, req.url, content_type, req.extract_tables, CAPTURE_TTL_HOURS
+        )
         if cached is not None:
-            return _cached_capture_response(cached, content_type)
+            return _cached_capture_response(cached, content_type, docs_dir)
 
     if _capture_sem.locked():
         raise HTTPException(429, "too many concurrent captures")
@@ -2284,6 +2309,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 content_hash=content_hash,
                 docs_dir=docs_dir,
                 content_type=content_type,
+                extract_tables=req.extract_tables,
             )
 
             return CaptureResponse(

@@ -798,7 +798,7 @@ If false:
 - 即使发生错误，session 也一定会被关闭
 - 有并发限流：并发抓取过多时会返回 `429`
 - URL 校验：私有 IP、localhost、非 HTTP(S) 协议都会被拦截
-- **URL 去重（opt-in）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）每次都抓。单次想绕过缓存传 `force_refresh: true`。
+- **URL 去重（opt-in）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` + `extract_tables` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）每次都抓。单次想绕过缓存传 `force_refresh: true`。
 
 **什么时候用 `/capture`，什么时候用手动 session 流程：**
 
