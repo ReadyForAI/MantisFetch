@@ -19,9 +19,12 @@ def _seed_capture_index(
     age_hours: float = 1.0,
     digest: str = "cached digest",
     extract_tables: bool = True,
+    requested_url: str | None = None,
 ) -> dict:
     """Write a doc-index.json with one web_capture entry created age_hours ago,
-    plus its digest.md (index stores only the 200-char preview, like production)."""
+    plus its digest.md (index stores only the 200-char preview, like production).
+    source_url is the (possibly post-redirect) final URL; requested_url is the
+    caller-supplied one used as the dedup key (defaults to url)."""
     created = (datetime.now(UTC) - timedelta(hours=age_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
     storage_path = f"{content_type}/{doc_id}"
     entry = {
@@ -31,7 +34,7 @@ def _seed_capture_index(
         "sections": 3, "ocr_pages": 0, "tables": 1, "digest": digest[:200],
         "digest_path": f"docs/{storage_path}/digest.md", "tags": [],
         "created_at": created, "content_hash": "sha256:abc",
-        "extract_tables": extract_tables,
+        "extract_tables": extract_tables, "requested_url": requested_url or url,
     }
     (docs_dir / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": [entry]}), encoding="utf-8"
@@ -222,6 +225,29 @@ def test_capture_reuses_recent_capture(client: TestClient) -> None:
     # full digest (from digest.md), not the 200-char index preview
     assert data["digest"] == long_digest.strip()
     assert len(data["digest"]) > 200
+    # section_count matches a fresh response (text sections + table sections)
+    assert data["section_count"] == 4
+    assert data["table_count"] == 1
+
+
+def test_capture_reuses_across_redirect(client: TestClient) -> None:
+    """The dedup key is the caller-supplied URL, so a URL whose capture was stored
+    under a post-redirect source_url still hits the cache on repeat."""
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        _seed_capture_index(
+            docs_dir, doc_id="WEB-007", url="https://example.com/",  # post-redirect
+            content_type="General", age_hours=1.0, requested_url="http://example.com",
+        )
+        with (
+            patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
+            patch("mantisfetch_browser.CAPTURE_TTL_HOURS", 24.0),
+        ):
+            resp = client.post("/web/capture", json={"url": "http://example.com"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["reused"] is True
+    assert data["doc_id"] == "WEB-007"
 
 
 def test_capture_extract_tables_mismatch_not_reused(client: TestClient) -> None:

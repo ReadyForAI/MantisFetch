@@ -1629,6 +1629,7 @@ def _persist_web_capture(
     docs_dir: Path,
     content_type: str = "General",
     extract_tables: bool = True,
+    requested_url: str | None = None,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json."""
     normalized_content_type = _normalize_content_type(content_type)
@@ -1726,6 +1727,7 @@ def _persist_web_capture(
             "created_at": now_str,
             "content_hash": content_hash,
             "extract_tables": extract_tables,
+            "requested_url": requested_url or url,
         })
         index["last_updated"] = now_str
         _write_json(index_path, index)
@@ -1751,7 +1753,12 @@ def _find_cached_capture(
     for doc in index.get("documents", []):
         if not isinstance(doc, dict):
             continue
-        if doc.get("source") != "web_capture" or doc.get("source_url") != url:
+        if doc.get("source") != "web_capture":
+            continue
+        # Match the caller-supplied URL (requested_url), not the post-redirect
+        # source_url — so a URL that 301s to https / a trailing slash still hits the
+        # cache on repeat. Legacy entries (no requested_url) fall back to source_url.
+        if (doc.get("requested_url") or doc.get("source_url")) != url:
             continue
         if _normalize_content_type(doc.get("content_type") or "General") != content_type:
             continue
@@ -1805,7 +1812,9 @@ def _cached_capture_response(
         content_type=entry.get("content_type") or content_type,
         storage_path=entry.get("storage_path", ""),
         digest=digest,
-        section_count=int(entry.get("sections", 0) or 0),
+        # Match a fresh response's section_count = len(sections): the index stores
+        # text and table section counts separately (sections = text-only).
+        section_count=int(entry.get("sections", 0) or 0) + int(entry.get("tables", 0) or 0),
         table_count=int(entry.get("tables", 0) or 0),
         reused=True,
         cache_age_hours=age_hours,
@@ -2310,6 +2319,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 docs_dir=docs_dir,
                 content_type=content_type,
                 extract_tables=req.extract_tables,
+                requested_url=req.url,
             )
 
             return CaptureResponse(
