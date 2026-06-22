@@ -1760,21 +1760,17 @@ def _find_cached_capture(
             continue
         if doc.get("source") != "web_capture":
             continue
-        # Match the caller-supplied URL (requested_url), not the post-redirect
-        # source_url — so a URL that 301s to https / a trailing slash still hits the
-        # cache on repeat. Legacy entries (no requested_url) fall back to source_url.
-        if (doc.get("requested_url") or doc.get("source_url")) != url:
-            continue
-        if _normalize_content_type(doc.get("content_type") or "General") != content_type:
-            continue
-        # Don't hand back a no-table capture to a caller that wants tables (or vice
-        # versa). Legacy entries with no recorded flag default to True (the original
-        # always-extract behavior).
-        if bool(doc.get("extract_tables", True)) != extract_tables:
-            continue
-        # lang sets the browser locale, which can change page content. Legacy entries
-        # with no recorded lang default to DEFAULT_LANG.
-        if (doc.get("lang") or DEFAULT_LANG) != lang:
+        # Every cache-key field must be explicitly recorded and match. Entries written
+        # before these fields existed (legacy) are treated as cache misses rather than
+        # reused under assumed defaults — re-capturing is the safe choice. The key uses
+        # the caller-supplied requested_url (not the post-redirect source_url), so a URL
+        # that 301s to https / gains a trailing slash still hits on repeat.
+        if (
+            doc.get("requested_url") != url
+            or _normalize_content_type(doc.get("content_type") or "General") != content_type
+            or doc.get("extract_tables") != extract_tables
+            or doc.get("lang") != lang
+        ):
             continue
         created = doc.get("created_at")
         if not isinstance(created, str):

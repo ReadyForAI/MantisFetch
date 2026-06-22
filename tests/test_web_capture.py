@@ -186,17 +186,38 @@ def test_find_cached_capture_picks_most_recent(tmp_path: Path) -> None:
 
     older = (datetime.now(UTC) - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     newer = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    common = {
+        "source": "web_capture", "source_url": "https://x.com",
+        "requested_url": "https://x.com", "content_type": "General",
+        "extract_tables": True, "lang": "en-US", "sections": 1, "tables": 0,
+    }
     docs = [
-        {"id": "WEB-001", "source": "web_capture", "source_url": "https://x.com",
-         "content_type": "General", "created_at": older, "sections": 1, "tables": 0},
-        {"id": "WEB-002", "source": "web_capture", "source_url": "https://x.com",
-         "content_type": "General", "created_at": newer, "sections": 1, "tables": 0},
+        {"id": "WEB-001", "created_at": older, **common},
+        {"id": "WEB-002", "created_at": newer, **common},
     ]
     (tmp_path / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": docs}), encoding="utf-8"
     )
     hit = lb._find_cached_capture(tmp_path, "https://x.com", "General", True, "en-US", 24.0)
     assert hit is not None and hit["id"] == "WEB-002"
+
+
+def test_find_cached_capture_skips_legacy_entries(tmp_path: Path) -> None:
+    """A pre-feature entry (no requested_url/extract_tables/lang) is a cache miss —
+    we re-capture rather than reuse it under assumed defaults."""
+    import mantisfetch_browser as lb
+
+    created = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    legacy = {
+        "id": "WEB-001", "source": "web_capture", "source_url": "https://example.com",
+        "content_type": "General", "created_at": created, "sections": 1, "tables": 0,
+    }
+    (tmp_path / "doc-index.json").write_text(
+        json.dumps({"version": 2, "documents": [legacy]}), encoding="utf-8"
+    )
+    assert lb._find_cached_capture(
+        tmp_path, "https://example.com", "General", True, "en-US", 24.0
+    ) is None
 
 
 def test_capture_reuses_recent_capture(client: TestClient) -> None:
