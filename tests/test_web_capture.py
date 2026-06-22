@@ -1,5 +1,6 @@
 """Tests for POST /web/capture (one-shot web capture endpoint)."""
 
+import asyncio
 import json
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -348,6 +349,42 @@ def test_capture_force_refresh_bypasses_cache(client: TestClient) -> None:
     assert data["reused"] is False
     # actually browsed: digest comes from the fresh distill, not the cached entry
     assert data["digest"] != "cached digest"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_url_captures_only_once(tmp_path: Path) -> None:
+    """Two identical /capture calls racing before either persists must result in a
+    single real capture; the loser waits on the per-key lock and reuses the result."""
+    import mantisfetch_browser as lb
+    from mantisfetch_browser.models import CaptureRequest
+
+    distill_result = _make_distill_result(url="https://example.com")
+    distill_mock = AsyncMock(return_value=distill_result)
+    with (
+        patch("mantisfetch_browser._get_docs_dir", return_value=tmp_path),
+        patch("mantisfetch_browser.CAPTURE_TTL_HOURS", 24.0),
+        patch("mantisfetch_browser._distill", new=distill_mock),
+        patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
+    ):
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        orig_browser = lb._browser
+        lb._browser = MagicMock()
+        lb._browser.new_context = AsyncMock(return_value=mock_context)
+        try:
+            req = CaptureRequest(url="https://example.com", content_type="Knowledge")
+            r1, r2 = await asyncio.gather(lb.capture(req), lb.capture(req))
+        finally:
+            lb._browser = orig_browser
+
+    # exactly one real browse happened; the other reused the cache under the lock
+    assert distill_mock.await_count == 1
+    results = [r1, r2]
+    assert sum(1 for r in results if r.reused) == 1
+    assert sum(1 for r in results if not r.reused) == 1
+    assert r1.doc_id == r2.doc_id
 
 
 def test_capture_browser_not_ready(client: TestClient) -> None:
