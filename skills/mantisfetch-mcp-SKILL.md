@@ -120,7 +120,7 @@ tools (`doc_*`) operate on user-uploaded content and are **not** wrapped.
 
 | Tool | Purpose | Key args |
 | ---- | ------- | -------- |
-| `web_capture` | One-shot semantic capture of a URL into the library (token-cheap; no session). Returns `doc_id` + digest + section/table counts. | `url`, `content_type="General"`, `tags?`, `extract_tables=true` |
+| `web_capture` | One-shot semantic capture of a URL into the library (token-cheap; no session). Returns `doc_id` + digest + section/table counts (`reused=true` when a recent cached capture is returned). | `url`, `content_type="General"`, `tags?`, `extract_tables=true`, `force_refresh=false` |
 | `web_session_open` | Open a stateful browser session. Returns `session_id`. | — |
 | `web_goto` | Navigate the session's page to a URL. | `session_id`, `url`, `wait_until="domcontentloaded"` |
 | `web_distill` | Brief tier: sections + actions (each with an `aid`) + diff (`changed_sids`). | `session_id`, `include_actions=true`, `include_diff=true`, `max_sections=30`, `total_output_budget_chars=18000` |

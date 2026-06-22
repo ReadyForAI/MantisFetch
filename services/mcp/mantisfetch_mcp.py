@@ -216,12 +216,16 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
 @mcp.tool()
 async def web_capture(
     url: str, content_type: str = "General", tags: list[str] | None = None,
-    extract_tables: bool = True,
+    extract_tables: bool = True, force_refresh: bool = False,
 ) -> Any:
     """One-shot semantic capture of a web page into the document library — the
     token-cheap replacement for a raw fetch. Returns doc_id + digest + section/
-    table counts. No browser session needed."""
-    payload = {"url": url, "content_type": content_type, "extract_tables": extract_tables}
+    table counts (reused=true if a recent cached capture was returned instead of
+    re-fetching). Set force_refresh to bypass the cache. No browser session needed."""
+    payload = {
+        "url": url, "content_type": content_type, "extract_tables": extract_tables,
+        "force_refresh": force_refresh,
+    }
     if tags is not None:
         payload["tags"] = tags
     return _wrap_web_result(await _web_post("/capture", payload), url)

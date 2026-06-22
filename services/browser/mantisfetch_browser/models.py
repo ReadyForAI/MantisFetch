@@ -216,6 +216,7 @@ class CaptureRequest(BaseModel):
     extract_tables: bool = True
     lang: str = DEFAULT_LANG
     timeout_ms: int = 25000
+    force_refresh: bool = False
 
 
 class CaptureResponse(BaseModel):
@@ -227,3 +228,5 @@ class CaptureResponse(BaseModel):
     digest: str
     section_count: int
     table_count: int
+    reused: bool = False
+    cache_age_hours: float | None = None

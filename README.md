@@ -240,6 +240,7 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | Extra hosts/origins (comma-separated) for the MCP DNS-rebinding guard |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | Allowlist roots for the MCP `doc_parse` `rel_path` source; unset disables local-path parsing over MCP |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |
+| `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | Reuse a prior `/web/capture` of the same URL + content_type made within this many hours instead of re-fetching; `0` disables (default). `force_refresh=true` always bypasses |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | Maximum concurrent section-summary LLM batches per document |
 | `MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC` | `2.0` | Minimum spacing between summary LLM requests across the service |
 | `MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT` | `10` | Documents above this section count skip per-section LLM summaries and generate document-level summaries from section excerpts |
@@ -484,6 +485,7 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | MCP DNS-rebinding 防护的额外 host/origin（逗号分隔） |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | MCP `doc_parse` `rel_path` source 的 allowlist 根目录；不设置则禁用 MCP 上的本地路径解析 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | 文档目录命名策略：`counter` 保持 `DOC-xxx`；`source_filename` 基于上传文件名生成安全目录名 |
+| `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | 在这么多小时内对同一 URL + content_type 的 `/web/capture` 直接复用已有结果而不重抓；`0` 关闭（默认）。`force_refresh=true` 始终绕过 |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | 单文档 section 摘要的最大 LLM batch 并发数 |
 | `MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC` | `2.0` | 全服务摘要 LLM 请求之间的最小间隔秒数 |
 | `MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT` | `10` | 超过该 section 数量后跳过逐 section LLM 摘要，改用 section 摘录生成文档级摘要 |

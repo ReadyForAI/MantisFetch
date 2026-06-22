@@ -773,6 +773,7 @@ Request body:
 | `extract_tables` | bool     | `true`         | Whether to extract HTML tables                   |
 | `lang`           | string   | `"en-US"`      | Browser locale                                   |
 | `timeout_ms`     | int      | `25000`        | Page load timeout in milliseconds                |
+| `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
 
 Response example:
 
@@ -783,7 +784,9 @@ Response example:
   "storage_path": "Knowledge/WEB-005",
   "digest": "Article covers Q3 revenue trends across regions...",
   "section_count": 8,
-  "table_count": 2
+  "table_count": 2,
+  "reused": false,
+  "cache_age_hours": null
 }
 ```
 
@@ -795,6 +798,7 @@ Response example:
 - The session is always closed after capture, even on error
 - Rate-limited: returns `429` when too many concurrent captures are in progress
 - URL validation: private IPs, localhost, and non-HTTP(S) schemes are blocked
+- **URL dedup (opt-in):** when `MANTISFETCH_CAPTURE_TTL_HOURS > 0`, a capture of the same `url` + `content_type` made within that window is reused — the response has `reused: true` and `cache_age_hours`, and no re-fetch happens. Default (`0`) always captures. Pass `force_refresh: true` to bypass the cache for a single call.
 
 **When to use `/capture` vs manual session flow:**
 

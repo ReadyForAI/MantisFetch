@@ -321,15 +321,17 @@ description: 网页调研能力
 
 ## 9. 缓存与去重：现状 vs 规划
 
-**现状（已实现）**：MantisFetch 不做 URL 级 TTL 缓存。文档库本身提供两层去重/保护：
+**现状（已实现）**：
 
+- **URL 去重缓存（opt-in）**：设 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 后，在该时间窗内对同一
+  `url` + `content_type` 的 `web_capture` 会直接复用已有 `doc_id`、不再重抓 —— 响应带 `reused: true`
+  和 `cache_age_hours`。默认（`0`）关闭，保持"每次都抓"的原行为；单次想绕过传 `force_refresh: true`。
+  这正面解决了 §0"多 Agent 抓同一 URL 重复抓取"的诉求。
 - **content_hash 去重**：每份文档记录内容 SHA256，用于去重和变更检测。
 - **doc_id 覆盖保护**：显式 `doc_id` 已存在时返回 `409`，除非 `replace=true`。
 
-也就是说，多个 Agent 抓**同一 URL**时，当前 `web_capture` **会各自重抓**——没有"同 URL 命中已解析内容"的自动短路。要避免重复，Agent 侧先 `doc_search` 查库（见 §7.2 原则 1）。
-
-**规划（未实现）**：URL→doc_id 的 TTL 缓存、按域名的 TTL 规则、`max_library_size_gb` + LRU 淘汰、
-`force_refresh` 参数、响应里的 `cached`/`cache_age_hours`——这些都尚未实现（早期 v1.0 误作已就绪）。见 §10。
+**规划（未实现）**：按域名模式的 TTL 规则、`max_library_size_gb` + LRU 淘汰、跨 `content_type`
+的统一去重——尚未实现。见 §10。
 
 ---
 
@@ -340,7 +342,7 @@ description: 网页调研能力
 | 项 | 现状 | 备注 |
 |----|------|------|
 | `doc_parse` 远程 `url` source | 未实现 | 代码内已标 TODO：安全直取需防 DNS rebinding 的 IP pinning + 流式大小限制。现阶段抓 URL 用 `web_capture` |
-| URL→doc_id 内容缓存 / TTL / LRU 淘汰 | 未实现 | 见 §9。`web_capture` 当前每次重抓 |
+| 按域名 TTL 规则 / `max_library_size_gb` + LRU 淘汰 | 未实现 | URL 去重缓存的基础版已实现（见 §9，`MANTISFETCH_CAPTURE_TTL_HOURS`）；更细的策略待办 |
 | `doc_parse` 的 `format` / `max_tokens` / `inline_content` 截断 | 未实现 | 三级加载已用独立工具覆盖大文档分段需求 |
 | `GET /web/cache/check` | 不存在 | 早期引用的是 LarkScout 商业版设计，非本仓能力 |
 
