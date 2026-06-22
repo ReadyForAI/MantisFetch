@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import threading
+import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -1735,6 +1736,39 @@ def _persist_web_capture(
         _write_json(index_path, index)
 
 
+# Per-capture-key locks serialize *cache misses* for the same (url, content_type,
+# extract_tables, lang): without this, identical /capture requests that arrive
+# before the first persists doc-index.json all miss the cache and re-fetch. The
+# lock-free fast-path check still short-circuits hits before any lock is taken, so
+# only misses contend. WeakValueDictionary so entries vanish once no request holds
+# the lock (high-cardinality URLs would otherwise leak one Lock each); a queued
+# request's `async with lock:` frame keeps it alive. Mirrors docreader's
+# _optional_doc_id_lock.
+_capture_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+_capture_locks_guard = asyncio.Lock()
+
+
+def _capture_cache_key(url: str, content_type: str, extract_tables: bool, lang: str) -> str:
+    """Composite dedup key (\\x1f-separated so fields can't collide)."""
+    return f"{url}\x1f{content_type}\x1f{int(extract_tables)}\x1f{lang}"
+
+
+@asynccontextmanager
+async def _optional_capture_lock(key: str | None) -> AsyncGenerator[None, None]:
+    """Hold a per-key lock across a capture miss. No-op when key is None (caching
+    off / force_refresh), so the non-cached path is unchanged."""
+    if not key:
+        yield
+        return
+    async with _capture_locks_guard:
+        lock = _capture_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _capture_locks[key] = lock
+    async with lock:
+        yield
+
+
 def _find_cached_capture(
     docs_dir: Path, url: str, content_type: str, extract_tables: bool, lang: str,
     ttl_hours: float,
@@ -2237,27 +2271,12 @@ async def close_session(req: CloseSessionRequest) -> dict:
     return {"ok": True}
 
 
-@app.post("/capture", response_model=CaptureResponse)
-async def capture(req: CaptureRequest) -> CaptureResponse:
-    """One-shot web capture: navigate to URL, distill, persist to document library, return doc_id.
-
-    Internally runs: session/new → goto → distill → persist → session/close.
-    The session is always closed, even on error.
-    """
-    _validate_url(req.url)
-    content_type = _normalize_content_type(req.content_type)
-
-    # Opt-in URL dedup: reuse a recent capture of the same (url, content_type)
-    # instead of re-fetching. Checked before the rate-limit/browser path so a
-    # cache hit never 429s or spins up a browser context.
-    if CAPTURE_TTL_HOURS > 0 and not req.force_refresh:
-        docs_dir = _get_docs_dir()
-        cached = _find_cached_capture(
-            docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
-        )
-        if cached is not None:
-            return _cached_capture_response(cached, content_type, docs_dir)
-
+async def _capture_fresh(
+    req: CaptureRequest, content_type: str, docs_dir: Path
+) -> CaptureResponse:
+    """Do an actual capture (navigate → distill → persist) and return the response.
+    The caller holds the per-key cache lock (when caching is on), so concurrent
+    same-key requests never reach here twice."""
     if _capture_sem.locked():
         raise HTTPException(429, "too many concurrent captures")
     if not _browser:
@@ -2311,7 +2330,6 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             table_sections = [s for s in sections if s.get("type") == "table"]
 
             digest = _build_web_digest(title, sections)
-            docs_dir = _get_docs_dir()
             doc_id = _next_web_doc_id(docs_dir)
             _persist_web_capture(
                 doc_id=doc_id,
@@ -2338,3 +2356,40 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             )
         finally:
             await sessions.remove(sid)
+
+
+@app.post("/capture", response_model=CaptureResponse)
+async def capture(req: CaptureRequest) -> CaptureResponse:
+    """One-shot web capture: navigate to URL, distill, persist to document library, return doc_id.
+
+    Internally runs: session/new → goto → distill → persist → session/close.
+    The session is always closed, even on error.
+    """
+    _validate_url(req.url)
+    content_type = _normalize_content_type(req.content_type)
+
+    caching = CAPTURE_TTL_HOURS > 0 and not req.force_refresh
+    docs_dir = _get_docs_dir()
+
+    # Fast path: a lock-free cache hit returns without taking the per-key lock or
+    # spinning up a browser.
+    if caching:
+        cached = _find_cached_capture(
+            docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+        )
+        if cached is not None:
+            return _cached_capture_response(cached, content_type, docs_dir)
+
+    cache_key = (
+        _capture_cache_key(req.url, content_type, req.extract_tables, req.lang) if caching else None
+    )
+    # Serialize misses per key so concurrent identical captures don't all re-fetch:
+    # the first captures under the lock; the rest recheck the cache here and reuse it.
+    async with _optional_capture_lock(cache_key):
+        if caching:
+            cached = _find_cached_capture(
+                docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+            )
+            if cached is not None:
+                return _cached_capture_response(cached, content_type, docs_dir)
+        return await _capture_fresh(req, content_type, docs_dir)
