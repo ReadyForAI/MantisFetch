@@ -1551,7 +1551,7 @@ class SectionBatchRequest(BaseModel):
 
 # ---- FastAPI app ----
 
-app = FastAPI(title="Doc Reader API", version="3.0.0")
+app = FastAPI(title="Doc Reader API", version="1.0.0")
 PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
     "0",
     "false",
@@ -2391,7 +2391,7 @@ def _search_score(*parts: tuple[bool, float]) -> float:
 async def health():
     return {
         "ok": True,
-        "version": "3.0.0",
+        "version": "1.0.0",
         "docs_dir": _mask_path(_get_docs_dir()),
         "supported_formats": SUPPORTED_FORMATS,
     }
@@ -3597,7 +3597,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8090"))
 
     DEFAULT_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info(f"MantisFetch DocReader API v3.0 starting: {host}:{port}")
+    logger.info(f"MantisFetch DocReader API v1.0 starting: {host}:{port}")
     logger.info(f"Docs directory: {DEFAULT_DOCS_DIR}")
 
     uvicorn.run(app, host=host, port=port)
