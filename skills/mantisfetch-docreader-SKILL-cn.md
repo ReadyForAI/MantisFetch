@@ -122,7 +122,7 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
 ```json
 {
   "ok": true,
-  "version": "3.0.0",
+  "version": "1.0.0",
   "docs_dir": "~/.mantisfetch/docs",
   "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"]
 }

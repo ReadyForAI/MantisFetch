@@ -87,7 +87,7 @@ def test_api_error_surfaces_server_detail(monkeypatch):
 class TestSyncClient:
     def test_health(self, sync_client):
         client, mock_http, mock_resp = sync_client
-        mock_resp.json.return_value = {"ok": True, "version": "3.0.0"}
+        mock_resp.json.return_value = {"ok": True, "version": "1.0.0"}
         result = client.health()
         assert result["ok"] is True
         mock_http.get.assert_called_once_with(
@@ -284,7 +284,7 @@ class TestAsyncClient:
     @pytest.mark.asyncio
     async def test_async_health(self, async_client):
         client, mock_http, mock_resp = async_client
-        mock_resp.json.return_value = {"ok": True, "version": "3.0.0"}
+        mock_resp.json.return_value = {"ok": True, "version": "1.0.0"}
         result = await client.health()
         assert result["ok"] is True
 
