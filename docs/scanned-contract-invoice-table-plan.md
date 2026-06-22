@@ -55,7 +55,7 @@ First-stage goals:
 - Detect header rows where possible.
 - Keep cross-page table relationships when detectable.
 - Avoid mixing table body back into normal section text.
-- Preserve existing `/library/{doc_id}/table/{table_id}` behavior.
+- Preserve existing `/doc/library/{doc_id}/table/{table_id}` behavior.
 
 Do not add business labels such as "invoice detail table" or "contract payment table" in core.
 
