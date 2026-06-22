@@ -178,6 +178,34 @@ class TestSyncClient:
         assert result["sid"] == "abc"
         assert "DOC-001/section/abc" in mock_http.get.call_args.args[0]
 
+    def test_table_and_image_methods(self, sync_client):
+        client, mock_http, mock_resp = sync_client
+        mock_resp.json.return_value = {"ok": True}
+
+        client.get_table("DOC-001", "01")
+        assert "DOC-001/table/01" in mock_http.get.call_args.args[0]
+
+        client.get_table_json("DOC-001", "01")
+        assert "DOC-001/table/01/json" in mock_http.get.call_args.args[0]
+
+        client.list_images("DOC-001")
+        assert "DOC-001/images" in mock_http.get.call_args.args[0]
+
+        client.get_image("DOC-001", "IMG-001")
+        assert "DOC-001/image/IMG-001" in mock_http.get.call_args.args[0]
+
+    def test_get_image_bytes(self, sync_client):
+        client, mock_http, mock_resp = sync_client
+        mock_resp.content = b"\x89PNGdata"
+        data = client.get_image_bytes("DOC-001", "IMG-001")
+        assert data == b"\x89PNGdata"
+        call = mock_http.get.call_args
+        assert "DOC-001/image/IMG-001/raw" in call.args[0]
+        assert call.kwargs["params"]["variant"] == "rendered"
+        # explicit variant is threaded through
+        client.get_image_bytes("DOC-001", "IMG-001", variant="original")
+        assert mock_http.get.call_args.kwargs["params"]["variant"] == "original"
+
     def test_skill_support_helpers(self, sync_client):
         client, mock_http, mock_resp = sync_client
         mock_resp.json.return_value = {"ok": True}
@@ -272,6 +300,29 @@ class TestAsyncClient:
         mock_resp.json.return_value = {"doc_id": "DOC-002", "sid": "s1", "content": "section"}
         result = await client.get_section("DOC-002", "s1")
         assert result["sid"] == "s1"
+
+    @pytest.mark.asyncio
+    async def test_async_table_and_image_methods(self, async_client):
+        client, mock_http, mock_resp = async_client
+        mock_resp.json.return_value = {"ok": True}
+        await client.get_table("DOC-002", "01")
+        assert "DOC-002/table/01" in mock_http.get.call_args.args[0]
+        await client.get_table_json("DOC-002", "01")
+        assert "DOC-002/table/01/json" in mock_http.get.call_args.args[0]
+        await client.list_images("DOC-002")
+        assert "DOC-002/images" in mock_http.get.call_args.args[0]
+        await client.get_image("DOC-002", "IMG-001")
+        assert "DOC-002/image/IMG-001" in mock_http.get.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_async_get_image_bytes(self, async_client):
+        client, mock_http, mock_resp = async_client
+        mock_resp.content = b"\x89PNGasync"
+        data = await client.get_image_bytes("DOC-002", "IMG-001", variant="original")
+        assert data == b"\x89PNGasync"
+        call = mock_http.get.call_args
+        assert "DOC-002/image/IMG-001/raw" in call.args[0]
+        assert call.kwargs["params"]["variant"] == "original"
 
     @pytest.mark.asyncio
     async def test_async_search(self, async_client):

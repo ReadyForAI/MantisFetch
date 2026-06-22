@@ -157,6 +157,11 @@ class MantisFetchClient:
         _raise_for_status(resp)
         return resp.json()
 
+    def _get_bytes(self, path: str, **params: Any) -> bytes:
+        resp = self._http.get(f"{self._base}{path}", params={k: v for k, v in params.items() if v is not None})
+        _raise_for_status(resp)
+        return resp.content
+
     def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         resp = self._http.post(f"{self._base}{path}", json=body)
         _raise_for_status(resp)
@@ -397,6 +402,57 @@ class MantisFetchClient:
         """
         return self._get(f"/doc/library/{doc_id}/sections")
 
+    def get_table(self, doc_id: str, table_id: str) -> dict[str, Any]:
+        """Retrieve one extracted table as Markdown (with column statistics).
+
+        Args:
+            doc_id:   Document ID.
+            table_id: Table ID, e.g. ``"01"`` or ``"table-01"``.
+
+        Returns:
+            dict with ``doc_id``, ``table_id`` and ``content`` (Markdown string).
+        """
+        return self._get(f"/doc/library/{doc_id}/table/{table_id}")
+
+    def get_table_json(self, doc_id: str, table_id: str) -> dict[str, Any]:
+        """Retrieve one table as structured JSON (cells with row/column spans).
+
+        Available only for tables with a JSON sidecar (e.g. OCR-geometry tables).
+
+        Returns:
+            dict with ``doc_id``, ``table_id`` and ``table`` (structured rows/cells).
+        """
+        return self._get(f"/doc/library/{doc_id}/table/{table_id}/json")
+
+    def list_images(self, doc_id: str) -> dict[str, Any]:
+        """List a document's embedded images (anchors, dimensions, OCR metadata)."""
+        return self._get(f"/doc/library/{doc_id}/images")
+
+    def get_image(self, doc_id: str, image_id: str) -> dict[str, Any]:
+        """Retrieve one embedded image's metadata record + OCR text (JSON).
+
+        Args:
+            doc_id:   Document ID.
+            image_id: Image ID, e.g. ``"001"`` or ``"IMG-001"``.
+        """
+        return self._get(f"/doc/library/{doc_id}/image/{image_id}")
+
+    def get_image_bytes(self, doc_id: str, image_id: str, *, variant: str = "rendered") -> bytes:
+        """Retrieve the raw image bytes for an embedded image (for visual reads
+        such as stamp/signature recognition that OCR text can't serve).
+
+        Args:
+            doc_id:   Document ID.
+            image_id: Image ID, e.g. ``"001"`` or ``"IMG-001"``.
+            variant:  ``"rendered"`` (normalized PNG, default) or ``"original"``.
+
+        Returns:
+            Raw image bytes.
+        """
+        return self._get_bytes(
+            f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant
+        )
+
     def search_sections(
         self,
         doc_id: str,
@@ -499,6 +555,14 @@ class AsyncMantisFetchClient:
         )
         _raise_for_status(resp)
         return resp.json()
+
+    async def _get_bytes(self, path: str, **params: Any) -> bytes:
+        resp = await self._http.get(
+            f"{self._base}{path}",
+            params={k: v for k, v in params.items() if v is not None},
+        )
+        _raise_for_status(resp)
+        return resp.content
 
     async def _post_json(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         resp = await self._http.post(f"{self._base}{path}", json=body)
@@ -668,6 +732,33 @@ class AsyncMantisFetchClient:
     async def list_sections(self, doc_id: str) -> dict[str, Any]:
         """List all sections of a document with their sids and metadata."""
         return await self._get(f"/doc/library/{doc_id}/sections")
+
+    async def get_table(self, doc_id: str, table_id: str) -> dict[str, Any]:
+        """Retrieve one extracted table as Markdown (with column statistics)."""
+        return await self._get(f"/doc/library/{doc_id}/table/{table_id}")
+
+    async def get_table_json(self, doc_id: str, table_id: str) -> dict[str, Any]:
+        """Retrieve one table as structured JSON (cells with row/column spans)."""
+        return await self._get(f"/doc/library/{doc_id}/table/{table_id}/json")
+
+    async def list_images(self, doc_id: str) -> dict[str, Any]:
+        """List a document's embedded images (anchors, dimensions, OCR metadata)."""
+        return await self._get(f"/doc/library/{doc_id}/images")
+
+    async def get_image(self, doc_id: str, image_id: str) -> dict[str, Any]:
+        """Retrieve one embedded image's metadata record + OCR text (JSON)."""
+        return await self._get(f"/doc/library/{doc_id}/image/{image_id}")
+
+    async def get_image_bytes(
+        self, doc_id: str, image_id: str, *, variant: str = "rendered"
+    ) -> bytes:
+        """Retrieve the raw image bytes for an embedded image (for visual reads).
+
+        ``variant`` is ``"rendered"`` (normalized PNG, default) or ``"original"``.
+        """
+        return await self._get_bytes(
+            f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant
+        )
 
     async def search_sections(
         self,
