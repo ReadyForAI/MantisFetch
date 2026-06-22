@@ -414,7 +414,8 @@ table_id 格式：`"01"` 或 `"table-01"`。
 ### 4.11 读取 Word 内嵌图片结果
 
 - `GET /doc/library/{doc_id}/images`
-- `GET /doc/library/{doc_id}/image/{image_id}`
+- `GET /doc/library/{doc_id}/image/{image_id}` —— 元数据 + OCR 文本（JSON）
+- `GET /doc/library/{doc_id}/image/{image_id}/raw` —— 图片**原始字节**（`variant=rendered` 默认，或 `original`）；用于 OCR 文本无法满足的视觉读图（签章/印章识别）
 
 只有调用 `/doc/parse` 时设置 `extract_images=true` 才会产生结果。`image_id` 格式为 `"001"` 或 `"IMG-001"`。
 

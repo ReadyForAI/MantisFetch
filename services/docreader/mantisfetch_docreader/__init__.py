@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
@@ -3529,6 +3530,45 @@ async def get_image_record(doc_id: str, image_id: str):
                 image["ocr"] = dict(ocr)
                 image["ocr"]["text"] = path.read_text(encoding="utf-8")
         return {"doc_id": doc_id, "image_id": normalized_id, "image": image}
+    raise HTTPException(404, f"image not found: {image_id}")
+
+
+@app.get("/library/{doc_id}/image/{image_id}/raw")
+async def get_image_bytes(doc_id: str, image_id: str, variant: str = "rendered"):
+    """Return the raw image bytes for one embedded image.
+
+    The /image/{id} record endpoint only returns metadata + OCR text; this serves
+    the actual file so cross-host tool code can do visual reads (e.g. stamp /
+    signature recognition) without a shared filesystem. ``variant`` is
+    ``rendered`` (normalized PNG, default; falls back to original) or ``original``.
+    """
+    _validate_doc_id(doc_id)
+    if variant not in {"rendered", "original"}:
+        raise HTTPException(422, "variant must be 'rendered' or 'original'")
+    normalized_id = _normalize_image_id(image_id)
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
+    images_path = doc_dir / "images.json"
+    if not images_path.exists():
+        raise HTTPException(404, f"images not found for {doc_id}")
+    images = json.loads(images_path.read_text(encoding="utf-8"))
+    if not isinstance(images, list):
+        raise HTTPException(500, f"images metadata unreadable for {doc_id}")
+    for image in images:
+        if not isinstance(image, dict) or image.get("image_id") != normalized_id:
+            continue
+        media = image.get("media") if isinstance(image.get("media"), dict) else {}
+        if variant == "original":
+            rel = media.get("original_path") or ""
+        else:  # rendered, fall back to original when no normalized render exists
+            rel = media.get("rendered_path") or media.get("original_path") or ""
+        if not rel:
+            raise HTTPException(404, f"image bytes not available: {image_id}")
+        # Resolve + containment-check (the path comes from images.json, not the URL).
+        path = (doc_dir / rel).resolve()
+        if not path.is_relative_to(doc_dir.resolve()) or not path.is_file():
+            raise HTTPException(404, f"image bytes not found: {image_id}")
+        media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return Response(content=path.read_bytes(), media_type=media_type)
     raise HTTPException(404, f"image not found: {image_id}")
 
 
