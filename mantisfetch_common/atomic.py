@@ -23,9 +23,12 @@ def _atomic_write(path: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        # Leave mkstemp's owner-only 0600 perms: the doc library is private and
-        # served via the API, so we never widen access (a chmod here would make
-        # artifacts world-readable on a restrictive-umask deployment).
+        # mkstemp forces owner-only 0600, which leaves the artifact unreadable to
+        # a group member or SMB account even when the library directory is shared.
+        # Keep owner rw and inherit only the destination directory's *group* rw
+        # bits — never widen to other. A group-shared dir (0775) yields group-rw
+        # 0660; a private dir (0700) stays owner-only 0600. No world exposure.
+        os.chmod(tmp_name, 0o600 | (os.stat(path.parent).st_mode & 0o060))
         os.replace(tmp_name, path)
     except BaseException:
         try:
