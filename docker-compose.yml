@@ -55,6 +55,8 @@ services:
 
   # Zero-cost self-hosted metasearch for MANTISFETCH_SEARCH_PROVIDER=searxng.
   # Opt-in: `docker compose --profile search up` starts it alongside MantisFetch.
+  # Settings live in ./configs/searxng/ (settings.yml = international default;
+  # settings.cn.yml = China preset — see the README "Web search" section).
   searxng:
     image: searxng/searxng:latest
     profiles: [search]

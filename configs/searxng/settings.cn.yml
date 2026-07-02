@@ -1,0 +1,47 @@
+# SearXNG settings — CHINA deployment preset for the MantisFetch `search` profile.
+#
+# ⚠️ STARTING POINT — VALIDATE FROM THE TARGET NETWORK. SearXNG upstream engines
+# break as sites change, and reachability from China varies. Confirm each engine
+# below actually returns results from your deployment, then adjust `keep_only`.
+#
+# To activate, overwrite the active settings with this preset, then start the
+# search profile:
+#   cp configs/searxng/settings.cn.yml configs/searxng/settings.yml
+#   docker compose --profile search up
+#
+# Keeps only typically China-reachable engines (Baidu / 360 / Sogou / Quark +
+# Bing) and drops the defaults usually blocked/slow from China (Google,
+# DuckDuckGo, Startpage, Qwant, ...). All other SearXNG defaults are inherited.
+#
+# `keep_only` FILTERS the engine list but does not enable engines that ship
+# disabled by default (Baidu/360/Sogou/Quark are among them) — so each kept
+# engine is also turned on explicitly via `disabled: false` below.
+use_default_settings:
+  engines:
+    keep_only:
+      - baidu
+      - 360search
+      - sogou
+      - quark
+      - bing
+
+engines:
+  - name: baidu
+    disabled: false
+  - name: 360search
+    disabled: false
+  - name: sogou
+    disabled: false
+  - name: quark
+    disabled: false
+  - name: bing
+    disabled: false
+
+server:
+  secret_key: "change-me-before-deploying"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json
