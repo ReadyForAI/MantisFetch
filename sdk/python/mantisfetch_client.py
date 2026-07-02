@@ -77,9 +77,7 @@ def _validate_content_type(value: str) -> str:
     Accepts the same forms the server accepts: case-insensitive matches
     against the documented enum, with leading/trailing whitespace stripped.
     """
-    canonical = (
-        _CONTENT_TYPE_LOOKUP.get(value.strip().lower()) if isinstance(value, str) else None
-    )
+    canonical = _CONTENT_TYPE_LOOKUP.get(value.strip().lower()) if isinstance(value, str) else None
     if canonical is None:
         raise ValueError(
             f"content_type must be one of {CONTENT_TYPES} (case-insensitive); got {value!r}"
@@ -152,14 +150,20 @@ class MantisFetchClient:
 
     # ── internal ─────────────────────────────────────────────────────────────
 
-    def _get(self, path: str, *, _params: dict[str, Any] | None = None, **params: Any) -> dict[str, Any]:
+    def _get(
+        self, path: str, *, _params: dict[str, Any] | None = None, **params: Any
+    ) -> dict[str, Any]:
         merged = {**params, **(_params or {})}  # _params carries dotted keys (metadata.*)
-        resp = self._http.get(f"{self._base}{path}", params={k: v for k, v in merged.items() if v is not None})
+        resp = self._http.get(
+            f"{self._base}{path}", params={k: v for k, v in merged.items() if v is not None}
+        )
         _raise_for_status(resp)
         return resp.json()
 
     def _get_bytes(self, path: str, **params: Any) -> bytes:
-        resp = self._http.get(f"{self._base}{path}", params={k: v for k, v in params.items() if v is not None})
+        resp = self._http.get(
+            f"{self._base}{path}", params={k: v for k, v in params.items() if v is not None}
+        )
         _raise_for_status(resp)
         return resp.content
 
@@ -207,6 +211,53 @@ class MantisFetchClient:
                 "content_type": content_type,
                 "tags": tags or [],
                 "extract_tables": extract_tables,
+            },
+        )
+
+    def web_search(
+        self,
+        query: str,
+        *,
+        max_results: int | None = None,
+        lang: str = "en",
+        freshness: str | None = None,
+    ) -> dict[str, Any]:
+        """Web search (requires a server-side search provider; 404 when disabled).
+
+        Returns a dict with ``provider`` and ``results`` (each ``{url, title,
+        snippet, published_at, score, provider}``).
+        """
+        return self._post_json(
+            "/web/search",
+            {"query": query, "max_results": max_results, "lang": lang, "freshness": freshness},
+        )
+
+    def web_search_and_capture(
+        self,
+        query: str,
+        *,
+        capture_top: int = 3,
+        tags: list[str] | None = None,
+        content_type: str = "General",
+        lang: str = "en",
+        freshness: str | None = None,
+    ) -> dict[str, Any]:
+        """Search, then capture the top N hits (<=3, serial) into the library.
+
+        Returns a dict with ``captured`` (each ``{doc_id, url, title, digest,
+        reused, rank}``) and ``skipped``. Captured docs carry
+        ``metadata.source=web_search``.
+        """
+        content_type = _validate_content_type(content_type)
+        return self._post_json(
+            "/web/search_and_capture",
+            {
+                "query": query,
+                "capture_top": capture_top,
+                "tags": tags or [],
+                "content_type": content_type,
+                "lang": lang,
+                "freshness": freshness,
             },
         )
 
@@ -454,9 +505,7 @@ class MantisFetchClient:
         Returns:
             Raw image bytes.
         """
-        return self._get_bytes(
-            f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant
-        )
+        return self._get_bytes(f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant)
 
     def get_sections_batch(self, doc_id: str, sids: list[str]) -> dict[str, Any]:
         """Read several sections by sid in one request (fewer round-trips than
@@ -562,7 +611,9 @@ class AsyncMantisFetchClient:
 
     # ── internal ─────────────────────────────────────────────────────────────
 
-    async def _get(self, path: str, *, _params: dict[str, Any] | None = None, **params: Any) -> dict[str, Any]:
+    async def _get(
+        self, path: str, *, _params: dict[str, Any] | None = None, **params: Any
+    ) -> dict[str, Any]:
         merged = {**params, **(_params or {})}  # _params carries dotted keys (metadata.*)
         resp = await self._http.get(
             f"{self._base}{path}",
@@ -584,7 +635,9 @@ class AsyncMantisFetchClient:
         _raise_for_status(resp)
         return resp.json()
 
-    async def _post_multipart(self, path: str, data: dict[str, Any], file_path: Path) -> dict[str, Any]:
+    async def _post_multipart(
+        self, path: str, data: dict[str, Any], file_path: Path
+    ) -> dict[str, Any]:
         with file_path.open("rb") as fh:
             resp = await self._http.post(
                 f"{self._base}{path}",
@@ -613,6 +666,44 @@ class AsyncMantisFetchClient:
                 "content_type": content_type,
                 "tags": tags or [],
                 "extract_tables": extract_tables,
+            },
+        )
+
+    async def web_search(
+        self,
+        query: str,
+        *,
+        max_results: int | None = None,
+        lang: str = "en",
+        freshness: str | None = None,
+    ) -> dict[str, Any]:
+        """Web search (requires a server-side search provider; 404 when disabled)."""
+        return await self._post_json(
+            "/web/search",
+            {"query": query, "max_results": max_results, "lang": lang, "freshness": freshness},
+        )
+
+    async def web_search_and_capture(
+        self,
+        query: str,
+        *,
+        capture_top: int = 3,
+        tags: list[str] | None = None,
+        content_type: str = "General",
+        lang: str = "en",
+        freshness: str | None = None,
+    ) -> dict[str, Any]:
+        """Search, then capture the top N hits (<=3, serial) into the library."""
+        content_type = _validate_content_type(content_type)
+        return await self._post_json(
+            "/web/search_and_capture",
+            {
+                "query": query,
+                "capture_top": capture_top,
+                "tags": tags or [],
+                "content_type": content_type,
+                "lang": lang,
+                "freshness": freshness,
             },
         )
 
@@ -773,9 +864,7 @@ class AsyncMantisFetchClient:
 
         ``variant`` is ``"rendered"`` (normalized PNG, default) or ``"original"``.
         """
-        return await self._get_bytes(
-            f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant
-        )
+        return await self._get_bytes(f"/doc/library/{doc_id}/image/{image_id}/raw", variant=variant)
 
     async def get_sections_batch(self, doc_id: str, sids: list[str]) -> dict[str, Any]:
         """Read several sections by sid in one request (returns found + missing)."""

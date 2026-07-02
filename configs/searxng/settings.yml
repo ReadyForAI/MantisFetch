@@ -1,0 +1,15 @@
+# Minimal SearXNG settings for the MantisFetch `search` compose profile.
+# Inherits SearXNG's defaults and overrides only what the search provider needs:
+# the JSON output format (the SearXNG provider calls /search?format=json).
+#
+# Change `server.secret_key` before any non-local deployment.
+use_default_settings: true
+
+server:
+  secret_key: "change-me-before-deploying"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json

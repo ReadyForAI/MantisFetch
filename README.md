@@ -226,6 +226,34 @@ DocReader notes:
 - Parsed document manifests now include `metadata`, `source_file`, and enriched section page bounds.
 - If `MANTISFETCH_DOC_ID_STRATEGY=source_filename`, uploaded files may use a sanitized source filename as the document directory name. Unsupported characters are stripped, separators such as spaces / `_` / `.` are normalized to `-`, and the service falls back to `DOC-xxx` when no usable characters remain.
 
+### Web search (optional)
+
+Off by default. Set `MANTISFETCH_SEARCH_PROVIDER` to enable two endpoints:
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/web/search` | Web search — returns ranked `{url, title, snippet, ...}`; captures nothing |
+| `POST` | `/web/search_and_capture` | Search, then capture the top N hits (≤3, serial) into the library with search provenance — returns `doc_id`s ready for the three-tier read |
+
+Providers: `searxng` (self-hosted, zero API cost — the recommended default), `tavily`, `bocha` (博查, China), `brave`. A comma-separated `MANTISFETCH_SEARCH_FALLBACK` switches provider only on connection error / 5xx / timeout (a 4xx config error or an empty result does **not** fall back). When unset, `/web/search*` return `404` and the MCP `web_search` / `web_search_capture` tools are not registered.
+
+Zero-cost SearXNG in one command:
+
+```bash
+MANTISFETCH_SEARCH_PROVIDER=searxng docker compose --profile search up
+```
+
+`search_and_capture` reuses the `/web/capture` path, so its results are deduplicated by the same `MANTISFETCH_CAPTURE_TTL_HOURS` cache — **enable it (`> 0`) to share captures (and paid-API savings) across agents/hosts** (it is `0`/off by default). A cache hit keeps the document's original provenance (first-touch): a URL first captured directly stays `source=web_capture`. Filter search-sourced documents with `metadata.source=web_search`, **not** the top-level `source`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MANTISFETCH_SEARCH_PROVIDER` | — | `searxng` / `tavily` / `bocha` / `brave`; unset disables search |
+| `MANTISFETCH_SEARCH_FALLBACK` | — | Comma-separated fallback chain, e.g. `tavily,searxng` |
+| `MANTISFETCH_SEARXNG_URL` | — | SearXNG instance URL (the `search` compose profile defaults it to `http://searxng:8080`) |
+| `MANTISFETCH_SEARCH_API_KEY` | — | API key for the active provider (Tavily / Bocha / Brave) |
+| `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | Default result cap (hard max 20) |
+| `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | Minimum seconds between searches (`429` when exceeded) |
+
 ### Configuration
 
 MantisFetch is configured entirely through environment variables. See the table in the **Docker** section above for LLM settings. Additional variables:
@@ -471,6 +499,34 @@ DocReader 补充说明：
 - `GET /doc/library/search_text` 会返回 `snippet`、`sid`、`page_range`、`page_start`、`page_end`，便于后续定位页面。
 - `manifest.json` 现在会包含 `metadata`、`source_file`，以及补强后的 section 页码边界。
 - 如果设置 `MANTISFETCH_DOC_ID_STRATEGY=source_filename`，上传文件会优先使用“过滤后的源文件名”作为文档目录名；空格、下划线、点会归一成 `-`，不支持的字符会被剔除；若过滤后没有剩余可用字符，则自动回退为 `DOC-xxx`。
+
+### 网络搜索（可选）
+
+默认关闭。设置 `MANTISFETCH_SEARCH_PROVIDER` 后启用两个端点：
+
+| 方法 | 端点 | 说明 |
+|---|---|---|
+| `POST` | `/web/search` | 纯搜索——返回排序后的 `{url, title, snippet, ...}`，不采集 |
+| `POST` | `/web/search_and_capture` | 搜索后串行采集前 N 条（≤3）入库并写入搜索来源标记——返回可直接三级加载的 `doc_id` |
+
+Provider：`searxng`（自托管、零 API 成本，推荐默认）、`tavily`、`bocha`（博查，国内）、`brave`。逗号分隔的 `MANTISFETCH_SEARCH_FALLBACK` **仅**在连接错误 / 5xx / 超时时切换 provider（4xx 配置错误或空结果**不**切换）。未设置时 `/web/search*` 返回 `404`，MCP 的 `web_search` / `web_search_capture` 工具不注册。
+
+一条命令启动零成本 SearXNG：
+
+```bash
+MANTISFETCH_SEARCH_PROVIDER=searxng docker compose --profile search up
+```
+
+`search_and_capture` 复用 `/web/capture` 路径，因此结果由同一个 `MANTISFETCH_CAPTURE_TTL_HOURS` 缓存去重——**将其设为 `> 0` 可在多 Agent / 多主机间共享采集结果（及付费 API 配额节省）**（默认 `0` 关闭）。缓存命中保留文档原有来源（first-touch）：先被直接采集的 URL 仍为 `source=web_capture`。过滤搜索来源文档请用 `metadata.source=web_search`，**不要**用顶层 `source`。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `MANTISFETCH_SEARCH_PROVIDER` | — | `searxng` / `tavily` / `bocha` / `brave`；不设则禁用搜索 |
+| `MANTISFETCH_SEARCH_FALLBACK` | — | 逗号分隔的降级链，如 `tavily,searxng` |
+| `MANTISFETCH_SEARXNG_URL` | — | SearXNG 实例地址（`search` compose profile 默认为 `http://searxng:8080`） |
+| `MANTISFETCH_SEARCH_API_KEY` | — | 当前 provider 的 API key（Tavily / 博查 / Brave） |
+| `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | 单次结果上限（硬顶 20） |
+| `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | 两次搜索的最小间隔秒数（超出返回 `429`） |
 
 ### 配置项
 

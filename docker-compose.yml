@@ -41,4 +41,25 @@ services:
       MANTISFETCH_SUMMARY_BATCH_CONCURRENCY: ${MANTISFETCH_SUMMARY_BATCH_CONCURRENCY:-1}
       MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC: ${MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC:-2.0}
       MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT: ${MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT:-10}
+      # Web search (opt-in): unset MANTISFETCH_SEARCH_PROVIDER = search disabled
+      # (/web/search* 404, MCP search tools not registered). With the `search`
+      # profile below, set MANTISFETCH_SEARCH_PROVIDER=searxng — the SearXNG URL
+      # defaults to the in-compose service.
+      MANTISFETCH_SEARCH_PROVIDER: ${MANTISFETCH_SEARCH_PROVIDER:-}
+      MANTISFETCH_SEARCH_FALLBACK: ${MANTISFETCH_SEARCH_FALLBACK:-}
+      MANTISFETCH_SEARXNG_URL: ${MANTISFETCH_SEARXNG_URL:-http://searxng:8080}
+      MANTISFETCH_SEARCH_API_KEY: ${MANTISFETCH_SEARCH_API_KEY:-}
+      MANTISFETCH_SEARCH_MAX_RESULTS: ${MANTISFETCH_SEARCH_MAX_RESULTS:-10}
+      MANTISFETCH_SEARCH_MIN_INTERVAL_SEC: ${MANTISFETCH_SEARCH_MIN_INTERVAL_SEC:-2}
+    restart: unless-stopped
+
+  # Zero-cost self-hosted metasearch for MANTISFETCH_SEARCH_PROVIDER=searxng.
+  # Opt-in: `docker compose --profile search up` starts it alongside MantisFetch.
+  searxng:
+    image: searxng/searxng:latest
+    profiles: [search]
+    volumes:
+      - ./configs/searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
     restart: unless-stopped
