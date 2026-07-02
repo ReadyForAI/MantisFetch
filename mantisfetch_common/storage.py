@@ -9,6 +9,7 @@ module; this is the single source of truth.
 import os
 import threading
 from pathlib import Path
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -53,3 +54,23 @@ def _doc_storage_rel_path(doc_id: str, content_type: str | None = None) -> str:
 
 def _doc_storage_dir(docs_dir: Path, doc_id: str, content_type: str | None = None) -> Path:
     return docs_dir / _doc_storage_rel_path(doc_id, content_type)
+
+
+def _indexable_metadata(value: dict[str, Any]) -> dict[str, Any]:
+    """Keep only shallow scalar metadata in doc-index for cheap filtering.
+
+    Both /web (browser captures) and /doc (uploaded documents) write into the
+    shared doc-index, so this lives here as the single source of truth for what
+    metadata is index-filterable.
+    """
+    out: dict[str, Any] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(raw, (str, int, float, bool)) or raw is None:
+            out[key] = raw
+        elif isinstance(raw, list) and all(
+            isinstance(item, (str, int, float, bool)) or item is None for item in raw
+        ):
+            out[key] = raw[:20]
+    return out

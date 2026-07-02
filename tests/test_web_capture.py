@@ -402,3 +402,62 @@ def test_capture_browser_not_ready(client: TestClient) -> None:
         lb._browser = orig_browser
 
     assert resp.status_code == 500
+
+
+def test_persist_web_capture_writes_metadata(tmp_path: Path) -> None:
+    """T3: metadata is written verbatim into the manifest and scalar-filtered into
+    the doc-index; the top-level source stays web_capture (search provenance lives
+    only in metadata.source)."""
+    import mantisfetch_browser as lb
+
+    sections = _make_distill_result()["sections"]
+    lb._persist_web_capture(
+        doc_id="WEB-050", url="https://example.com", title="Ex",
+        sections=sections, digest="d", tags=["t"], content_hash="h",
+        docs_dir=tmp_path, content_type="Bid", extract_tables=True,
+        requested_url="https://example.com", lang="en-US",
+        metadata={
+            "source": "web_search", "search_query": "q", "search_rank": 1,
+            "nested": {"drop": "me"},  # non-scalar → dropped from the index
+        },
+    )
+
+    manifest = json.loads((tmp_path / "Bid" / "WEB-050" / "manifest.json").read_text())
+    assert manifest["source"] == "web_capture"  # top-level source unchanged
+    assert manifest["metadata"]["source"] == "web_search"  # provenance in metadata
+    assert manifest["metadata"]["search_rank"] == 1
+
+    entry = next(
+        d for d in json.loads((tmp_path / "doc-index.json").read_text())["documents"]
+        if d["id"] == "WEB-050"
+    )
+    assert entry["source"] == "web_capture"
+    assert entry["metadata"]["source"] == "web_search"
+    assert entry["metadata"]["search_rank"] == 1
+    assert "nested" not in entry["metadata"]  # non-scalar filtered for cheap filtering
+
+
+def test_capture_metadata_does_not_bust_cache(client: TestClient) -> None:
+    """T3: metadata is NOT part of the dedup key — a repeat capture carrying new
+    metadata still hits the existing entry (reused=True, first-touch provenance)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        _seed_capture_index(
+            docs_dir, doc_id="WEB-009", url="https://example.com",
+            content_type="General", age_hours=1.0,
+        )
+        with (
+            patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
+            patch("mantisfetch_browser.CAPTURE_TTL_HOURS", 24.0),
+        ):
+            resp = client.post(
+                "/web/capture",
+                json={
+                    "url": "https://example.com",
+                    "metadata": {"source": "web_search", "search_rank": 3},
+                },
+            )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["reused"] is True  # metadata did not bust the cache
+    assert data["doc_id"] == "WEB-009"

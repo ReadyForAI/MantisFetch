@@ -23,6 +23,7 @@ from mantisfetch_common.storage import (
     _doc_index_lock,
     _doc_storage_rel_path,
     _get_docs_dir,
+    _indexable_metadata,
     _normalize_content_type,
 )
 
@@ -1632,8 +1633,15 @@ def _persist_web_capture(
     extract_tables: bool = True,
     requested_url: str | None = None,
     lang: str = DEFAULT_LANG,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Write a web capture to the document library and update doc-index.json."""
+    """Write a web capture to the document library and update doc-index.json.
+
+    ``metadata`` (e.g. search provenance from /web/search_and_capture) is written
+    verbatim into the manifest and, scalar-filtered, into the doc-index so it is
+    filterable via ``?metadata.<key>=``. It is deliberately NOT part of the dedup
+    cache key.
+    """
     normalized_content_type = _normalize_content_type(content_type)
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = docs_dir / storage_path
@@ -1678,6 +1686,7 @@ def _persist_web_capture(
         "content_type": normalized_content_type,
         "storage_path": storage_path,
         "tags": list(tags) if tags else [],
+        "metadata": dict(metadata) if metadata else {},
         "paths": {
             "digest": "digest.md",
             "sections_dir": "sections/",
@@ -1731,6 +1740,7 @@ def _persist_web_capture(
             "extract_tables": extract_tables,
             "requested_url": requested_url or url,
             "lang": lang,
+            "metadata": _indexable_metadata(metadata or {}),
         })
         index["last_updated"] = now_str
         _write_json(index_path, index)
@@ -1776,8 +1786,10 @@ def _find_cached_capture(
     """Return the most recent web-capture index entry matching (url, content_type,
     extract_tables, lang) created within ttl_hours, or None. Reading is lock-free:
     writes are atomic (temp + rename), so a concurrent write is never seen
-    half-applied. (Note: tags are metadata, not part of the key — a hit returns the
-    existing document with its original tags.)"""
+    half-applied. (Note: tags and the request's metadata are NOT part of the key —
+    a hit returns the existing document with its original tags/metadata, i.e.
+    first-touch provenance: a URL first captured directly keeps source=web_capture
+    with no search metadata even when later reused via /web/search_and_capture.)"""
     index_path = docs_dir / "doc-index.json"
     if not index_path.exists():
         return None
@@ -2344,6 +2356,7 @@ async def _capture_fresh(
                 extract_tables=req.extract_tables,
                 requested_url=req.url,
                 lang=req.lang,
+                metadata=req.metadata,
             )
 
             return CaptureResponse(

@@ -35,6 +35,7 @@ from mantisfetch_common.storage import (
     _doc_index_lock,
     _doc_storage_dir,
     _doc_storage_rel_path,
+    _indexable_metadata,
     _normalize_content_type,
 )
 
@@ -76,21 +77,6 @@ async def _optional_doc_id_lock(doc_id: str | None):
 _doc_counter_lock = threading.Lock()
 # _doc_index_lock is the process-wide shared lock from mantisfetch_common.storage
 # (imported above) so /web and /doc serialize on the same doc-index.json.
-
-
-def _indexable_metadata(value: dict[str, Any]) -> dict[str, Any]:
-    """Keep only shallow scalar metadata in doc-index for cheap filtering."""
-    out: dict[str, Any] = {}
-    for key, raw in value.items():
-        if not isinstance(key, str):
-            continue
-        if isinstance(raw, (str, int, float, bool)) or raw is None:
-            out[key] = raw
-        elif isinstance(raw, list) and all(
-            isinstance(item, (str, int, float, bool)) or item is None for item in raw
-        ):
-            out[key] = raw[:20]
-    return out
 
 
 def _update_doc_index(
