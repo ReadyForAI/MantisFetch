@@ -56,10 +56,17 @@ _DEFAULT_MIN_INTERVAL_SEC = 2.0
 def _registry() -> dict[str, type[SearchProvider]]:
     """Name → provider class. Lazy import so the heavy provider modules load only
     when search is actually configured."""
+    from .bocha import BochaProvider
+    from .brave import BraveProvider
     from .searxng import SearxngProvider
     from .tavily import TavilyProvider
 
-    return {"searxng": SearxngProvider, "tavily": TavilyProvider}
+    return {
+        "searxng": SearxngProvider,
+        "tavily": TavilyProvider,
+        "bocha": BochaProvider,
+        "brave": BraveProvider,
+    }
 
 
 # ── configuration helpers ──────────────────────────────────────────────────────
