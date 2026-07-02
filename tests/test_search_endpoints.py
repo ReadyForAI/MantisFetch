@@ -150,3 +150,13 @@ def test_search_and_capture_bad_content_type_422(client: TestClient) -> None:
     with patch("mantisfetch_browser.create_search_provider", return_value=provider):
         resp = client.post("/web/search_and_capture", json={"query": "q", "content_type": "Nope"})
     assert resp.status_code == 422
+
+
+def test_search_provider_misconfigured_502(client: TestClient, monkeypatch) -> None:
+    """A configured provider that raises during construction (searxng without a URL)
+    surfaces as 502, not an unhandled 500. Uses the real factory (no patch)."""
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "searxng")
+    monkeypatch.delenv("MANTISFETCH_SEARXNG_URL", raising=False)
+    resp = client.post("/web/search", json={"query": "q"})
+    assert resp.status_code == 502
+    assert "misconfigured" in resp.json()["detail"]

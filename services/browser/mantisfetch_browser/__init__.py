@@ -2477,8 +2477,16 @@ async def _enforce_search_throttle() -> None:
 
 
 def _require_search_provider():
-    """Return the active provider, or 404 when search is disabled."""
-    provider = create_search_provider()
+    """Return the active provider, or 404 when search is disabled.
+
+    A configured-but-misconfigured provider (searxng without a URL, tavily without
+    a key, an unknown provider name) raises during construction — surface that as a
+    502 rather than letting it escape as an unhandled 500.
+    """
+    try:
+        provider = create_search_provider()
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(502, f"search provider misconfigured: {exc}")
     if provider is None:
         raise HTTPException(404, "search is not enabled (set MANTISFETCH_SEARCH_PROVIDER)")
     return provider
