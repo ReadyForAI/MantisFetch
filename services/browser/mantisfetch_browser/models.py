@@ -217,6 +217,12 @@ class CaptureRequest(BaseModel):
     lang: str = DEFAULT_LANG
     timeout_ms: int = 25000
     force_refresh: bool = False
+    # Provenance/metadata written verbatim into the capture's manifest + doc-index
+    # (scalar values are index-filterable via ?metadata.<key>=). Used by
+    # /web/search_and_capture to stamp source=web_search + search_* fields. NOT
+    # part of the dedup cache key — a cache hit keeps the existing doc's metadata
+    # (first-touch provenance).
+    metadata: dict[str, Any] | None = None
 
 
 class CaptureResponse(BaseModel):
