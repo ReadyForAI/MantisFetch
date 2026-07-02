@@ -20,6 +20,8 @@ from providers.search.base import (
     SearchResult,
     _raise_for_search_status,
 )
+from providers.search.bocha import BochaProvider
+from providers.search.brave import BraveProvider
 from providers.search.searxng import SearxngProvider
 from providers.search.tavily import TavilyProvider
 
@@ -275,3 +277,108 @@ async def test_fallback_all_unavailable_raises():
     with pytest.raises(SearchProviderUnavailable, match="exhausted"):
         await chain.search("q")
     assert p1.calls == 1 and p2.calls == 1
+
+
+# ── bocha + brave (T5) ──────────────────────────────────────────────────────────
+def test_create_bocha_and_brave(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_API_KEY", "key-x")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    assert isinstance(create_search_provider(), BochaProvider)
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "brave")
+    assert isinstance(create_search_provider(), BraveProvider)
+
+
+def test_bocha_missing_key_raises(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    with pytest.raises(RuntimeError, match="MANTISFETCH_SEARCH_API_KEY"):
+        create_search_provider()
+
+
+async def test_bocha_parse(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_API_KEY", "key-x")
+
+    async def fake_json(provider, method, url, **kwargs):
+        assert kwargs["headers"]["Authorization"] == "Bearer key-x"
+        assert kwargs["json"]["freshness"] == "oneMonth"  # freshness=month
+        return {
+            "code": 200,
+            "data": {
+                "webPages": {
+                    "value": [
+                        {
+                            "name": "N A",
+                            "url": "https://a.com",
+                            "snippet": "s a",
+                            "datePublished": "2026-03-03",
+                        },
+                        {"name": "no-url", "snippet": "x"},
+                    ]
+                }
+            },
+        }
+
+    with patch("providers.search.bocha._search_http_json", fake_json):
+        results = await BochaProvider().search("q", freshness="month")
+    assert [r.url for r in results] == ["https://a.com"]  # no-url dropped
+    assert results[0].title == "N A"
+    assert results[0].snippet == "s a"
+    assert results[0].published_at == "2026-03-03"
+    assert results[0].score is None
+    assert results[0].provider == "bocha"
+
+
+async def test_brave_parse(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_API_KEY", "key-x")
+
+    async def fake_json(provider, method, url, **kwargs):
+        assert kwargs["headers"]["X-Subscription-Token"] == "key-x"
+        assert kwargs["params"]["freshness"] == "pw"  # freshness=week
+        assert kwargs["params"]["search_lang"] == "en"  # en-US locale → en subtag
+        return {
+            "web": {
+                "results": [
+                    {
+                        "title": "T A",
+                        "url": "https://a.com",
+                        "description": "d a",
+                        "page_age": "2026-04-04",
+                    },
+                ]
+            }
+        }
+
+    with patch("providers.search.brave._search_http_json", fake_json):
+        results = await BraveProvider().search("q", lang="en-US", freshness="week")
+    assert results[0].url == "https://a.com"
+    assert results[0].title == "T A"
+    assert results[0].snippet == "d a"  # description → snippet
+    assert results[0].published_at == "2026-04-04"
+    assert results[0].provider == "brave"
+
+
+async def test_bocha_error_envelope_raises(monkeypatch):
+    """Bocha returns HTTP 200 with an error `code`; that must raise (config for 4xx,
+    unavailable for 5xx), not be masked as an empty result."""
+    monkeypatch.setenv("MANTISFETCH_SEARCH_API_KEY", "key-x")
+
+    async def fake_403(provider, method, url, **kwargs):
+        return {"code": 403, "msg": "forbidden", "data": {}}
+
+    with patch("providers.search.bocha._search_http_json", fake_403):
+        with pytest.raises(SearchConfigError):
+            await BochaProvider().search("q")
+
+    async def fake_500(provider, method, url, **kwargs):
+        return {"code": 500, "msg": "internal error"}
+
+    with patch("providers.search.bocha._search_http_json", fake_500):
+        with pytest.raises(SearchProviderUnavailable):
+            await BochaProvider().search("q")
+
+    # a non-200 code below 400 is still an error, never an empty result
+    async def fake_302(provider, method, url, **kwargs):
+        return {"code": 302, "msg": "unexpected"}
+
+    with patch("providers.search.bocha._search_http_json", fake_302):
+        with pytest.raises(SearchProviderUnavailable):
+            await BochaProvider().search("q")
