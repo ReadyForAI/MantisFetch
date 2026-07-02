@@ -181,6 +181,9 @@ out/
 site/
 _site/
 .docusaurus/
-docs/mantisfetch_opensource_design.md
+
+# ── 内部设计文档 / 任务跟踪：仅本地留存，不发布到公开仓库 ──
+/docs/
+/tasks/
 ROADMAP_internal.md
 certs/
