@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import threading
+import time
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -26,6 +27,13 @@ from mantisfetch_common.storage import (
     _indexable_metadata,
     _normalize_content_type,
 )
+from providers.search import (
+    clamp_max_results,
+    create_search_provider,
+    default_max_results,
+    min_interval_sec,
+)
+from providers.search.base import SearchConfigError, SearchProviderUnavailable
 
 # URL validation (anti-SSRF). Re-exported so the goto/capture endpoints and
 # test_security keep calling _validate_url off the package namespace.
@@ -53,6 +61,9 @@ from .models import (
 )
 from .models import (
     ActResponse as ActResponse,
+)
+from .models import (
+    CapturedItem as CapturedItem,
 )
 from .models import (
     CaptureRequest as CaptureRequest,
@@ -100,7 +111,25 @@ from .models import (
     ScrollRequest as ScrollRequest,
 )
 from .models import (
+    SearchAndCaptureRequest as SearchAndCaptureRequest,
+)
+from .models import (
+    SearchAndCaptureResponse as SearchAndCaptureResponse,
+)
+from .models import (
+    SearchHit as SearchHit,
+)
+from .models import (
+    SearchRequest as SearchRequest,
+)
+from .models import (
+    SearchResponse as SearchResponse,
+)
+from .models import (
     Section as Section,
+)
+from .models import (
+    SkippedItem as SkippedItem,
 )
 from .models import (
     WebMCPDiscoverRequest as WebMCPDiscoverRequest,
@@ -1604,19 +1633,27 @@ def _build_manifest_sections(
         sid = s.get("sid", f"s_{i:03d}")
         h = s.get("h", "")
         safe_h = _safe_heading(h)
-        result.append({
-            "sid": sid, "index": i, "title": h,
-            "char_count": len(s.get("t", "")), "type": "text",
-            "file": f"sections/{i:02d}-{sid}-{safe_h}.md",
-        })
+        result.append(
+            {
+                "sid": sid,
+                "index": i,
+                "title": h,
+                "char_count": len(s.get("t", "")),
+                "type": "text",
+                "file": f"sections/{i:02d}-{sid}-{safe_h}.md",
+            }
+        )
     for i, s in enumerate(table_sections, 1):
-        result.append({
-            "sid": s.get("sid", f"t_{i:03d}"),
-            "index": len(text_sections) + i,
-            "title": s.get("h", f"Table {i}"),
-            "char_count": len(s.get("t", "")), "type": "table",
-            "file": f"tables/table-{i:02d}.md",
-        })
+        result.append(
+            {
+                "sid": s.get("sid", f"t_{i:03d}"),
+                "index": len(text_sections) + i,
+                "title": s.get("h", f"Table {i}"),
+                "char_count": len(s.get("t", "")),
+                "type": "table",
+                "file": f"tables/table-{i:02d}.md",
+            }
+        )
     return result
 
 
@@ -1720,28 +1757,30 @@ def _persist_web_capture(
         if not isinstance(index.get("documents"), list):
             index["documents"] = []
         index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
-        index["documents"].append({
-            "id": doc_id,
-            "filename": title or url,
-            "file_type": "web_capture",
-            "content_type": normalized_content_type,
-            "storage_path": storage_path,
-            "source": "web_capture",
-            "source_url": url,
-            "pages": 1,
-            "sections": len(text_sections),
-            "ocr_pages": 0,
-            "tables": len(table_sections),
-            "digest": digest[:200],
-            "digest_path": f"docs/{storage_path}/digest.md",
-            "tags": tags,
-            "created_at": now_str,
-            "content_hash": content_hash,
-            "extract_tables": extract_tables,
-            "requested_url": requested_url or url,
-            "lang": lang,
-            "metadata": _indexable_metadata(metadata or {}),
-        })
+        index["documents"].append(
+            {
+                "id": doc_id,
+                "filename": title or url,
+                "file_type": "web_capture",
+                "content_type": normalized_content_type,
+                "storage_path": storage_path,
+                "source": "web_capture",
+                "source_url": url,
+                "pages": 1,
+                "sections": len(text_sections),
+                "ocr_pages": 0,
+                "tables": len(table_sections),
+                "digest": digest[:200],
+                "digest_path": f"docs/{storage_path}/digest.md",
+                "tags": tags,
+                "created_at": now_str,
+                "content_hash": content_hash,
+                "extract_tables": extract_tables,
+                "requested_url": requested_url or url,
+                "lang": lang,
+                "metadata": _indexable_metadata(metadata or {}),
+            }
+        )
         index["last_updated"] = now_str
         _write_json(index_path, index)
 
@@ -1780,7 +1819,11 @@ async def _optional_capture_lock(key: str | None) -> AsyncGenerator[None, None]:
 
 
 def _find_cached_capture(
-    docs_dir: Path, url: str, content_type: str, extract_tables: bool, lang: str,
+    docs_dir: Path,
+    url: str,
+    content_type: str,
+    extract_tables: bool,
+    lang: str,
     ttl_hours: float,
 ) -> dict[str, Any] | None:
     """Return the most recent web-capture index entry matching (url, content_type,
@@ -2283,9 +2326,7 @@ async def close_session(req: CloseSessionRequest) -> dict:
     return {"ok": True}
 
 
-async def _capture_fresh(
-    req: CaptureRequest, content_type: str, docs_dir: Path
-) -> CaptureResponse:
+async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path) -> CaptureResponse:
     """Do an actual capture (navigate → distill → persist) and return the response.
     The caller holds the per-key cache lock (when caching is on), so concurrent
     same-key requests never reach here twice."""
@@ -2406,3 +2447,141 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             if cached is not None:
                 return _cached_capture_response(cached, content_type, docs_dir)
         return await _capture_fresh(req, content_type, docs_dir)
+
+
+# ═══════════════════════════════════════════
+# Web search (/web/search, /web/search_and_capture)
+# ═══════════════════════════════════════════
+
+SEARCH_CAPTURE_TOP_MAX = 3  # search_and_capture captures at most this many, serially
+
+# Process-level min-interval throttle (protects paid search-API quota). Mirrors the
+# docreader summary min-interval pattern rather than a token bucket — search is
+# low-frequency, so burst tolerance buys nothing.
+_search_throttle_lock = asyncio.Lock()
+_last_search_monotonic = 0.0
+
+
+async def _enforce_search_throttle() -> None:
+    """Raise a bare 429 when two searches arrive closer than the configured min
+    interval; record the timestamp when the search is allowed."""
+    global _last_search_monotonic
+    interval = min_interval_sec()
+    if interval <= 0:
+        return
+    async with _search_throttle_lock:
+        now = time.monotonic()
+        if _last_search_monotonic and now - _last_search_monotonic < interval:
+            raise HTTPException(429, "search rate limited: minimum interval not elapsed")
+        _last_search_monotonic = now
+
+
+def _require_search_provider():
+    """Return the active provider, or 404 when search is disabled."""
+    provider = create_search_provider()
+    if provider is None:
+        raise HTTPException(404, "search is not enabled (set MANTISFETCH_SEARCH_PROVIDER)")
+    return provider
+
+
+async def _run_search(provider, query, *, max_results, lang, freshness):
+    """Call the provider, mapping provider-level failures onto HTTP 502."""
+    try:
+        return await provider.search(query, max_results=max_results, lang=lang, freshness=freshness)
+    except SearchConfigError as exc:
+        raise HTTPException(502, f"search provider configuration error: {exc}")
+    except SearchProviderUnavailable as exc:
+        raise HTTPException(502, f"search provider unavailable: {exc}")
+
+
+@app.post("/search", response_model=SearchResponse)
+async def search(req: SearchRequest) -> SearchResponse:
+    """Web search only — returns results, captures nothing. 404 when disabled."""
+    provider = _require_search_provider()
+    await _enforce_search_throttle()
+    max_results = (
+        clamp_max_results(req.max_results) if req.max_results is not None else default_max_results()
+    )
+    results = await _run_search(
+        provider, req.query, max_results=max_results, lang=req.lang, freshness=req.freshness
+    )
+    return SearchResponse(
+        query=req.query,
+        provider=provider.name,
+        results=[
+            SearchHit(
+                url=r.url,
+                title=r.title,
+                snippet=r.snippet,
+                published_at=r.published_at,
+                score=r.score,
+                provider=r.provider,
+            )
+            for r in results
+        ],
+        searched_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
+@app.post("/search_and_capture", response_model=SearchAndCaptureResponse)
+async def search_and_capture(req: SearchAndCaptureRequest) -> SearchAndCaptureResponse:
+    """Search, then capture the top N hits into the document library (serially) with
+    search provenance stamped in metadata. One hit failing to capture is recorded in
+    `skipped` and does not abort the batch."""
+    provider = _require_search_provider()
+    _normalize_content_type(req.content_type)  # 422 early on a bad content_type
+    await _enforce_search_throttle()
+    top = max(1, min(req.capture_top, SEARCH_CAPTURE_TOP_MAX))
+    searched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    results = await _run_search(
+        provider, req.query, max_results=top, lang=req.lang, freshness=req.freshness
+    )
+
+    captured: list[CapturedItem] = []
+    skipped: list[SkippedItem] = []
+    for rank, hit in enumerate(results[:top], start=1):
+        metadata = {
+            "source": "web_search",
+            "search_query": req.query,
+            "search_provider": provider.name,
+            "search_rank": rank,
+            "searched_at": searched_at,
+        }
+        cap_req = CaptureRequest(
+            url=hit.url,
+            content_type=req.content_type,
+            tags=req.tags,
+            lang=req.lang,
+            metadata=metadata,
+        )
+        # capture() runs the SSRF guard on the (search-supplied) URL, so a hit
+        # pointing at a private/loopback target is rejected here → skipped.
+        try:
+            cap = await capture(cap_req)
+        except HTTPException as exc:
+            skipped.append(
+                SkippedItem(url=hit.url, reason=f"capture_failed: {exc.detail}", rank=rank)
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 — one bad hit must not abort the batch
+            skipped.append(SkippedItem(url=hit.url, reason=f"capture_failed: {exc}", rank=rank))
+            continue
+        captured.append(
+            CapturedItem(
+                doc_id=cap.doc_id,
+                url=hit.url,
+                title=hit.title,
+                digest=cap.digest,
+                reused=cap.reused,
+                rank=rank,
+            )
+        )
+
+    return SearchAndCaptureResponse(
+        query=req.query,
+        provider=provider.name,
+        captured=captured,
+        skipped=skipped,
+        searched_at=searched_at,
+    )

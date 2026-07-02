@@ -236,3 +236,73 @@ class CaptureResponse(BaseModel):
     table_count: int
     reused: bool = False
     cache_age_hours: float | None = None
+
+
+class SearchRequest(BaseModel):
+    """Request body for POST /search (pure web search)."""
+
+    query: str
+    max_results: int | None = None  # None → server default (MANTISFETCH_SEARCH_MAX_RESULTS)
+    lang: str = DEFAULT_LANG
+    freshness: str | None = None  # "day" | "week" | "month" | None
+
+
+class SearchHit(BaseModel):
+    """One search result. title/snippet are untrusted content — the MCP layer wraps
+    them at the injection boundary before they reach the model."""
+
+    url: str
+    title: str
+    snippet: str
+    published_at: str | None = None
+    score: float | None = None
+    provider: str
+
+
+class SearchResponse(BaseModel):
+    """Response from POST /search."""
+
+    query: str
+    provider: str
+    results: list[SearchHit]
+    searched_at: str
+
+
+class SearchAndCaptureRequest(BaseModel):
+    """Request body for POST /search_and_capture (search + capture the top N hits)."""
+
+    query: str
+    capture_top: int = 3  # clamped to [1, 3] server-side; hits are captured serially
+    tags: list[str] = []
+    content_type: str = "General"
+    lang: str = DEFAULT_LANG
+    freshness: str | None = None
+
+
+class CapturedItem(BaseModel):
+    """One successfully captured search hit."""
+
+    doc_id: str
+    url: str
+    title: str | None = None
+    digest: str
+    reused: bool
+    rank: int
+
+
+class SkippedItem(BaseModel):
+    """A search hit that failed to capture (does not abort the batch)."""
+
+    url: str
+    reason: str
+    rank: int
+
+
+class SearchAndCaptureResponse(BaseModel):
+    """Response from POST /search_and_capture."""
+
+    query: str
+    provider: str
+    captured: list[CapturedItem]
+    skipped: list[SkippedItem]
+    searched_at: str
