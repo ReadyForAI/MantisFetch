@@ -286,6 +286,10 @@ def parse_pdf(
                         "max_pixels": max_pixels,
                     }
                 )
+                # Drop from the OCR sets so ocr_page_count / is_ocr don't report a
+                # page we never rendered as OCR'd.
+                local_ocr_set.discard(page_num)
+                llm_ocr_set.discard(page_num)
                 continue
             if capped:
                 logger.info(

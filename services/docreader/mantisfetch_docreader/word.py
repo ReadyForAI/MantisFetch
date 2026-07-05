@@ -187,6 +187,10 @@ def _count_word_embedded_image_references(filepath: Path) -> int:
     """Count embedded Word image references that would be processed for image OCR."""
     if filepath.suffix.lower() != ".docx":
         return 0
+    # /doc/parse calls this before parse_word when extract_images=true, and it
+    # zf.read()s document.xml — enforce the zip-bomb budget here too (outside the
+    # try below, which would otherwise swallow the 422).
+    _check_docx_unzip_budget(filepath)
     try:
         with zipfile.ZipFile(filepath) as zf:
             document_xml = zf.read("word/document.xml")

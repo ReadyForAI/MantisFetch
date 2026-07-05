@@ -39,6 +39,19 @@ def test_docx_budget_rejects_oversized_total(tmp_path: Path, monkeypatch) -> Non
     assert exc.value.status_code == 422
 
 
+def test_count_refs_also_enforces_budget(tmp_path: Path) -> None:
+    # The image-count pre-scan (run before parse_word) must enforce the budget too.
+    from mantisfetch_docreader.word import _count_word_embedded_image_references
+
+    path = tmp_path / "bomb-count.docx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("word/document.xml", b"\x00" * (80 * 1024 * 1024))
+
+    with pytest.raises(HTTPException) as exc:
+        _count_word_embedded_image_references(path)
+    assert exc.value.status_code == 422
+
+
 def test_docx_budget_allows_normal_document(tmp_path: Path) -> None:
     from mantisfetch_docreader.word import _check_docx_unzip_budget
 
