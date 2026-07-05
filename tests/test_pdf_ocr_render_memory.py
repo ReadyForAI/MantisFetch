@@ -66,3 +66,30 @@ def test_pdf_ocr_render_memory_bounded(tmp_path, monkeypatch):
     # The core guarantee: never more than `concurrency` PNGs resident at once
     # (would be up to 8 if the queue held bytes instead of paths).
     assert state["peak"] <= 2, f"peak resident PNGs {state['peak']} exceeded concurrency"
+
+
+def test_pdf_ocr_scratch_cleaned_up_on_failure(tmp_path, monkeypatch):
+    """Scratch PNGs/dir must not leak when OCR (or rendering) fails mid-parse."""
+    pytest.importorskip("fitz")
+    import glob
+    import os
+    import tempfile
+
+    import mantisfetch_docreader as dr
+
+    pdf = tmp_path / "scan.pdf"
+    _make_scan_pdf(pdf, pages=3)
+
+    pattern = os.path.join(tempfile.gettempdir(), "mf_ocr_png_*")
+    before = set(glob.glob(pattern))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("ocr backend down")
+
+    monkeypatch.setattr(dr, "gemini_ocr", boom)
+    monkeypatch.setattr(dr, "local_ocr_with_layout", boom)
+
+    with pytest.raises(Exception):
+        dr.parse_pdf(pdf, force_ocr=True, concurrency=2)
+
+    assert set(glob.glob(pattern)) == before, "scratch dir leaked after a parse failure"

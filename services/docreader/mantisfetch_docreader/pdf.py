@@ -357,10 +357,10 @@ def parse_pdf(
             else:
                 local_tasks.append((page_num, png_path))
 
-    finally:
-        doc.close()
-
-    try:
+        # OCR runs inside the doc try so the scratch cleanup in `finally` also
+        # covers a render-time failure (a partially-spilled scratch dir). The fitz
+        # doc stays open during OCR — ~file-size in memory, far less than the page
+        # PNGs we no longer keep resident.
         if local_tasks:
             logger.info(
                 "Concurrent local OCR: %d pages (%d workers, backend=%s)...",
@@ -421,6 +421,7 @@ def parse_pdf(
                     llm_ocr_results[pn] = result
                     logger.info(f"Page {pn}/{total_pages}: LLM OCR done")
     finally:
+        doc.close()
         shutil.rmtree(ocr_png_scratch, ignore_errors=True)
 
     pages: list[PageContent] = []
