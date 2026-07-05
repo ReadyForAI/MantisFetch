@@ -45,6 +45,11 @@ GEMINI_API_KEY=your_key_here docker compose up -d
 curl http://localhost:9898/health
 ```
 
+> `/web` and `/doc` are **loopback-only** without a token. Host requests reach the
+> container across the Docker bridge (a non-loopback peer), so set
+> `MANTISFETCH_MCP_TOKEN=…` and send `Authorization: Bearer …` to use them; only
+> `/health` is exempt.
+
 #### Python (local)
 
 ```bash
