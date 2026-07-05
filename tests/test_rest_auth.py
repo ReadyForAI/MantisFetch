@@ -52,11 +52,11 @@ def test_loopback_allowed_even_with_token(monkeypatch):
     assert status == 200 and reached
 
 
-def test_non_loopback_allowed_without_token(monkeypatch):
-    # Backward-compat: no token configured → original no-auth behavior.
+def test_non_loopback_denied_without_token(monkeypatch):
+    # Default-deny (aligned with the MCP gate): non-loopback + no token → 403.
     monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
     status, reached = _drive(("10.0.0.9", 5555))
-    assert status == 200 and reached
+    assert status == 403 and not reached
 
 
 def test_non_loopback_blocked_without_bearer_when_token_set(monkeypatch):
@@ -80,13 +80,20 @@ def test_health_exempt_even_off_host_with_token(monkeypatch):
     assert status == 200 and reached
 
 
-def test_integration_gate_through_unified_client(client: TestClient, monkeypatch):
-    """End-to-end: the unified TestClient peer is non-loopback, so a token gates
-    /doc until the bearer is supplied; /doc/health stays open."""
+def test_integration_gate_mounted_on_doc(monkeypatch):
+    """End-to-end: the gate is actually mounted on /doc. Uses a non-loopback peer
+    (no lifespan needed — the gate is ASGI middleware that runs before routing)."""
+    from mantisfetch_server import app  # noqa: PLC0415
+
+    off_host = TestClient(app, client=("10.0.0.9", 5555), raise_server_exceptions=False)
+
+    # No token → non-loopback denied (403), handler never reached.
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    assert off_host.get("/doc/library/DOC-X/digest").status_code == 403
+    assert off_host.get("/doc/health").status_code == 200  # health always exempt
+
+    # Token set: bearer required, then passes through to the handler (not 401/403).
     monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
-    assert client.get("/doc/library/DOC-X/digest").status_code == 401
-    # with the bearer the gate passes through to the handler (404, not 401)
-    ok = client.get("/doc/library/DOC-X/digest", headers={"Authorization": "Bearer s3cret"})
-    assert ok.status_code != 401
-    # health is never gated
-    assert client.get("/doc/health").status_code == 200
+    assert off_host.get("/doc/library/DOC-X/digest").status_code == 401
+    ok = off_host.get("/doc/library/DOC-X/digest", headers={"Authorization": "Bearer s3cret"})
+    assert ok.status_code not in (401, 403)

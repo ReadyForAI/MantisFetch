@@ -45,6 +45,11 @@ GEMINI_API_KEY=your_key_here docker compose up -d
 curl http://localhost:9898/health
 ```
 
+> `/web` and `/doc` are **loopback-only** without a token. Host requests reach the
+> container across the Docker bridge (a non-loopback peer), so set
+> `MANTISFETCH_MCP_TOKEN=…` and send `Authorization: Bearer …` to use them; only
+> `/health` is exempt.
+
 #### Python (local)
 
 ```bash
@@ -267,7 +272,7 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `LANG` | `en` | UI language (`en` or `zh`) |
 | `MANTISFETCH_TLS_CERTFILE` | — | TLS certificate path; set **with** `MANTISFETCH_TLS_KEYFILE` to serve HTTPS (setting only one is ignored) |
 | `MANTISFETCH_TLS_KEYFILE` | — | TLS private key path (paired with `MANTISFETCH_TLS_CERTFILE`) |
-| `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp` surface; without it, `/mcp` is loopback-only |
+| `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp`, `/web` and `/doc` surfaces; without it they are **loopback-only** (non-loopback callers get 403) |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | Extra hosts/origins (comma-separated) for the MCP DNS-rebinding guard |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | Allowlist roots for the MCP `doc_parse` `rel_path` source; unset disables local-path parsing over MCP |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |

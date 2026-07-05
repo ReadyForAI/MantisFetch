@@ -10,9 +10,11 @@ services:
       - ./certs:/certs:ro
     environment:
       MANTISFETCH_DOCS_DIR: /root/.mantisfetch/docs
-      # MCP server access: bearer token allows non-loopback clients (e.g. NodalOS
-      # over the network); without it /mcp is loopback-only. ALLOWED_HOSTS adds
-      # extra Host values (host:* = any port) past the DNS-rebinding check.
+      # Bearer token for /mcp, /web and /doc. Without it these surfaces are
+      # loopback-only — and a host request to the published port reaches the
+      # container from the Docker bridge (a NON-loopback peer), so it is denied
+      # (403). SET THIS to use /web and /doc against the container. ALLOWED_HOSTS
+      # adds extra Host values (host:* = any port) past the DNS-rebinding check.
       MANTISFETCH_MCP_TOKEN: ${MANTISFETCH_MCP_TOKEN:-}
       MANTISFETCH_MCP_ALLOWED_HOSTS: ${MANTISFETCH_MCP_ALLOWED_HOSTS:-}
       # TLS (opt-in): set these in .env to serve https. Bearer over an encrypted

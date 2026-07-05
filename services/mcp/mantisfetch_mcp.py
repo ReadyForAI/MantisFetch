@@ -602,7 +602,8 @@ class _McpAuthGate:
         token = os.environ.get("MANTISFETCH_MCP_TOKEN")
         if token:
             headers = dict(scope.get("headers") or [])
-            if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
+            provided = headers.get(b"authorization", b"").decode()
+            if not secrets.compare_digest(provided, f"Bearer {token}"):
                 return 401, b'{"error":"unauthorized"}'
             return None
         client = scope.get("client")
