@@ -44,6 +44,10 @@ def test_defer_persist_marks_pending(tmp_path: Path) -> None:
     doc_dir = _persist(tmp_path, "defer")
     manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["parse_metadata"]["summary"]["status"] == "pending"
+    # index mirrors it (library list/search read summary_status from the index)
+    entry = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))["documents"][0]
+    assert entry["summary_mode"] == "defer"
+    assert entry["summary_status"] == "pending"
 
 
 def test_reload_web_capture_text_sections_roundtrip(tmp_path: Path) -> None:
@@ -145,8 +149,9 @@ def test_defer_summary_writes_brief_and_llm_digest(tmp_path: Path, monkeypatch) 
     manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["parse_metadata"]["summary"]["status"] == "completed"
     assert manifest["paths"]["brief"] == "brief.md"
-    index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
-    assert index["documents"][0]["digest"] == "LLM DIGEST"
+    entry = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))["documents"][0]
+    assert entry["digest"] == "LLM DIGEST"
+    assert entry["summary_status"] == "completed"
 
 
 def test_defer_summary_failure_marks_failed(tmp_path: Path, monkeypatch) -> None:

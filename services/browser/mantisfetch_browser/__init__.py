@@ -1810,7 +1810,10 @@ def _persist_web_capture(
         if not isinstance(index.get("documents"), list):
             index["documents"] = []
         index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
-        index["documents"].append(
+        index_entry: dict[str, Any] = (
+            {"summary_mode": "defer", "summary_status": "pending"} if summary_mode == "defer" else {}
+        )
+        index_entry.update(
             {
                 "id": doc_id,
                 "filename": title or url,
@@ -1834,6 +1837,7 @@ def _persist_web_capture(
                 "metadata": _indexable_metadata(metadata or {}),
             }
         )
+        index["documents"].append(index_entry)
         index["last_updated"] = now_str
         _write_json(index_path, index)
 
@@ -1865,8 +1869,13 @@ def _set_web_summary_status(
     _write_text_atomic(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
 
 
-def _update_web_index_digest(docs_dir: Path, doc_id: str, digest: str) -> None:
-    """Refresh the doc-index digest preview to the generated LLM digest."""
+def _update_web_index_summary(
+    docs_dir: Path, doc_id: str, *, status: str, digest: str | None = None
+) -> None:
+    """Mirror the deferred-summary status (and, on completion, the LLM digest
+    preview) into the doc-index entry, so /doc/library list/search report web
+    captures the same way they report uploaded docs (which carry summary_mode /
+    summary_status in the index)."""
     with _doc_index_lock:
         index_path = docs_dir / "doc-index.json"
         try:
@@ -1875,7 +1884,10 @@ def _update_web_index_digest(docs_dir: Path, doc_id: str, digest: str) -> None:
             return
         for entry in index.get("documents", []):
             if entry.get("id") == doc_id:
-                entry["digest"] = digest[:200]
+                entry["summary_mode"] = "defer"
+                entry["summary_status"] = status
+                if digest is not None:
+                    entry["digest"] = digest[:200]
                 _write_json(index_path, index)
                 return
 
@@ -1902,6 +1914,7 @@ def _defer_web_summary(
     doc_dir = docs_dir / _doc_storage_rel_path(doc_id, _normalize_content_type(content_type))
     with _web_summary_sem:
         _set_web_summary_status(doc_dir, "running")
+        _update_web_index_summary(docs_dir, doc_id, status="running")
         text_sections = [s for s in sections if s.get("type") != "table"]
         parsed = ParsedDocument(
             filename=title or url,
@@ -1925,10 +1938,11 @@ def _defer_web_summary(
         except Exception as exc:  # noqa: BLE001 - status recorded; the thread must not crash
             logger.warning("web capture summary failed for %s: %s", doc_id, exc)
             _set_web_summary_status(doc_dir, "failed", error=str(exc))
+            _update_web_index_summary(docs_dir, doc_id, status="failed")
             return
         _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest_text}\n")
         _write_text_atomic(doc_dir / "brief.md", f"{brief_text}\n")
-        _update_web_index_digest(docs_dir, doc_id, digest_text)
+        _update_web_index_summary(docs_dir, doc_id, status="completed", digest=digest_text)
         # Flip status last so "completed" means every artifact is already on disk.
         _set_web_summary_status(doc_dir, "completed", add_brief_path=True)
         logger.info("web capture summary complete: %s", doc_id)
@@ -2070,6 +2084,7 @@ def _resolve_cached_summary(
         if not sections:
             return status
         _set_web_summary_status(doc_dir, "pending")
+        _update_web_index_summary(docs_dir, doc_id, status="pending")
     threading.Thread(
         target=_defer_web_summary,
         args=(
