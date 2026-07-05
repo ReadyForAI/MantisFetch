@@ -58,6 +58,30 @@ def test_guard_skips_write_when_content_hash_differs(tmp_path: Path) -> None:
     assert "STALE_DIGEST" not in (tmp_path / "DOC-G1" / "digest.md").read_text(encoding="utf-8")
 
 
+def test_guard_skips_write_when_only_metadata_differs(tmp_path: Path) -> None:
+    """Generation token catches replaces that change tags/metadata even if text matches."""
+    from mantisfetch_docreader import write_output, write_output_extract_only
+
+    write_output_extract_only(
+        "DOC-G5", _parsed("same text"), tmp_path, source="upload", tags=["new-tag"]
+    )
+    before = (tmp_path / "DOC-G5" / "manifest.json").read_text(encoding="utf-8")
+
+    write_output(
+        "DOC-G5",
+        _parsed("same text"),
+        "STALE_DIGEST",
+        "STALE_BRIEF",
+        tmp_path,
+        source="upload",
+        tags=["old-tag"],
+        guard_stale_generation=True,
+    )
+    after = (tmp_path / "DOC-G5" / "manifest.json").read_text(encoding="utf-8")
+    assert after == before, "stale write rolled back a metadata-only replace"
+    assert "STALE_DIGEST" not in (tmp_path / "DOC-G5" / "digest.md").read_text(encoding="utf-8")
+
+
 def test_guard_allows_write_when_content_hash_matches(tmp_path: Path) -> None:
     from mantisfetch_docreader import write_output, write_output_extract_only
 
@@ -131,3 +155,40 @@ def test_deferred_summary_timeout_does_not_block_on_worker(
     assert elapsed < 0.9, f"deferred summary blocked on worker shutdown ({elapsed:.2f}s)"
     manifest = json.loads((tmp_path / "DOC-T1" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["parse_metadata"]["summary"]["status"] == "failed"
+
+
+def test_semaphore_held_until_worker_finishes_after_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P2b: on timeout the concurrency slot must stay held by the abandoned worker,
+    not released early — otherwise a hung backend bypasses the concurrency cap."""
+    import threading
+
+    import mantisfetch_docreader as dr
+
+    sem = threading.Semaphore(1)
+    monkeypatch.setattr(dr, "_deferred_summary_sem", sem)
+    monkeypatch.setattr(dr, "DEFERRED_SUMMARY_TIMEOUT_SEC", 0.2)
+
+    release = threading.Event()
+
+    def slow(parsed, concurrency, flag):  # noqa: ANN001, ARG001
+        release.wait(3.0)
+        return ("d", "b", None)
+
+    monkeypatch.setattr(dr, "generate_summaries", slow)
+
+    dr._generate_deferred_summary("DOC-T2", _parsed("x"), tmp_path, 1, None, None, None)
+
+    # Returned on timeout while the worker is still blocked → slot must stay held.
+    assert sem.acquire(blocking=False) is False, "slot released before worker finished"
+
+    release.set()  # let the worker finish → completion callback releases the slot
+    freed = False
+    for _ in range(60):
+        if sem.acquire(blocking=False):
+            freed = True
+            sem.release()
+            break
+        time.sleep(0.05)
+    assert freed, "slot not released after worker finished"

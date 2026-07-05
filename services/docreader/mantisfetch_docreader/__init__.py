@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -990,8 +990,42 @@ def _build_doc_meta(
     }
 
 
-def _manifest_content_hash(doc_dir: Path) -> str | None:
-    """Read the content_hash recorded in an existing manifest, or None if absent."""
+def _content_hash_of(parsed: ParsedDocument) -> str:
+    full_text = "\n".join(sec.text for sec in parsed.sections)
+    return "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _generation_token(
+    parsed: ParsedDocument,
+    tags: list[str] | None,
+    metadata: dict[str, Any] | None,
+    source_record: dict[str, Any] | None,
+) -> str:
+    """A per-parse identity that changes on every replace.
+
+    Includes the section text plus the caller-supplied filename/tags/metadata/
+    source_record — the fields a replace=true re-parse can change even when the
+    extracted text is byte-identical. Deliberately excludes ``parsed.metadata``
+    (summary status), which _set_summary_metadata mutates on every write, so the
+    token stays stable across a single worker's pending→running→completed writes.
+    """
+    payload = json.dumps(
+        {
+            "content_hash": _content_hash_of(parsed),
+            "filename": parsed.filename,
+            "tags": sorted(tags) if tags else [],
+            "metadata": metadata or {},
+            "source": source_record or {},
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _manifest_generation(doc_dir: Path) -> str | None:
+    """Read the generation token recorded in an existing manifest, or None if absent."""
     try:
         with (doc_dir / "manifest.json").open(encoding="utf-8") as f:
             data = json.load(f)
@@ -999,32 +1033,27 @@ def _manifest_content_hash(doc_dir: Path) -> str | None:
         return None
     prov = data.get("provenance")
     if isinstance(prov, dict):
-        value = prov.get("content_hash")
+        value = prov.get("generation")
         if isinstance(value, str) and value:
             return value
     return None
 
 
-def _content_hash_of(parsed: ParsedDocument) -> str:
-    full_text = "\n".join(sec.text for sec in parsed.sections)
-    return "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
-
-
-def _skip_stale_generation(doc_id: str, doc_dir: Path, content_hash: str) -> bool:
+def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
     """B1: a background deferred-summary thread holds a snapshot of `parsed`. If the
     same doc_id was re-parsed (replace=true) while the LLM ran, the on-disk manifest
-    now carries a different content_hash; any write here (success placeholder,
-    running, or failed) would roll the doc back to the stale content. Detect that
-    and skip. Must run before any disk mutation (e.g. _reset_generated_output_dirs).
+    now carries a different generation token; any write here (success, running, or
+    failed placeholder) would roll the doc back to the stale parse. Detect that and
+    skip. Must run before any disk mutation (e.g. _reset_generated_output_dirs).
     """
-    existing = _manifest_content_hash(doc_dir)
-    if existing is not None and existing != content_hash:
+    existing = _manifest_generation(doc_dir)
+    if existing is not None and existing != generation:
         logger.warning(
-            "Skipping stale deferred write for %s: on-disk content_hash %s != "
+            "Skipping stale deferred write for %s: on-disk generation %s != "
             "expected %s (a newer parse replaced this doc)",
             doc_id,
             existing,
-            content_hash,
+            generation,
         )
         return True
     return False
@@ -1050,10 +1079,12 @@ def write_output(
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
 
-    # v3: content_hash (computed early — the generation guard must run before any
-    # disk mutation so a stale deferred writer can't wipe a newer parse's output).
+    # content_hash + generation token computed early — the generation guard must
+    # run before any disk mutation so a stale deferred writer can't wipe a newer
+    # parse's output.
     content_hash = _content_hash_of(parsed)
-    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, content_hash):
+    generation = _generation_token(parsed, tags, metadata, source_record)
+    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
         return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -1163,6 +1194,7 @@ def write_output(
             "source_url": original_path or str(parsed.filename),
             "created_at": meta["created_at"],
             "content_hash": content_hash,
+            "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
             "source_filename": (source_record or {}).get("filename", ""),
             "source_ref": (source_record or {}).get("ref", ""),
@@ -1209,7 +1241,8 @@ def write_output_extract_only(
     sections_dir = doc_dir / "sections"
 
     content_hash = _content_hash_of(parsed)
-    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, content_hash):
+    generation = _generation_token(parsed, tags, metadata, source_record)
+    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
         return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
@@ -1294,6 +1327,7 @@ def write_output_extract_only(
             "source_url": str(parsed.filename),
             "created_at": meta["created_at"],
             "content_hash": content_hash,
+            "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
             "source_filename": (source_record or {}).get("filename", ""),
             "source_ref": (source_record or {}).get("ref", ""),
@@ -1367,15 +1401,24 @@ def _generate_deferred_summary(
         # Impose a wall-clock bound WITHOUT the `with` block's shutdown(wait=True):
         # on timeout, exiting the context manager would join the worker and block
         # until the (串行 + rate-limited) LLM call actually finished, defeating the
-        # timeout and pinning the deferred-summary semaphore. Shut the pool down
-        # non-blocking instead; the worker leaks until it finishes but we return
-        # promptly to write the timeout status and release the semaphore. (A3)
+        # timeout. Instead we bound future.result and, on timeout, return promptly
+        # to write the status. The (non-cancellable) worker keeps the concurrency
+        # slot via its completion callback until it truly finishes, so a hung
+        # backend can't let deferred jobs pile up past DEFERRED_SUMMARY_MAX_CONCURRENT
+        # (A3, plus the report's "信号量语义要重新审视" note).
         pool = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = pool.submit(generate_summaries, parsed, concurrency, False)
-            digest_text, brief_text, _ = future.result(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC)
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+        future = pool.submit(generate_summaries, parsed, concurrency, False)
+
+        def _release_slot(_f: Future, pool: ThreadPoolExecutor = pool) -> None:
+            pool.shutdown(wait=False)
+            try:
+                _deferred_summary_sem.release()
+            except ValueError:
+                pass
+
+        future.add_done_callback(_release_slot)
+        acquired = False  # slot ownership handed to the completion callback
+        digest_text, brief_text, _ = future.result(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC)
         _set_summary_metadata(parsed, mode="defer", status="completed", attempts=attempts)
         write_output(
             doc_id,
