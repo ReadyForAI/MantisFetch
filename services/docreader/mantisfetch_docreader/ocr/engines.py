@@ -119,27 +119,37 @@ def _read_local_ocr_worker_message(proc: subprocess.Popen[str], timeout: float) 
     if proc.stdout is None:
         raise RuntimeError("local OCR worker stdout is unavailable")
     deadline = time.monotonic() + max(timeout, 0.1)
-    # Non-blocking reads + our own line buffering so a partial line written by
-    # the worker can't block readline() past the deadline (#45).
-    os.set_blocking(proc.stdout.fileno(), False)
+    # Read raw bytes from the fd (never the TextIOWrapper): a non-blocking
+    # TextIOWrapper.read() surfaces the incremental decoder's TypeError on
+    # Python 3.11 when no data is ready (only 3.12+ raises the catchable
+    # BlockingIOError). Raw os.read + our own line buffering keeps the deadline
+    # honoured regardless of runtime and can't block on a partial line (#45).
+    fd = proc.stdout.fileno()
+    os.set_blocking(fd, False)
     selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, selectors.EVENT_READ)
-    buffer = ""
+    selector.register(fd, selectors.EVENT_READ)
+    buffer = b""
     try:
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(f"local OCR worker exited with code {proc.returncode}")
             remaining = max(deadline - time.monotonic(), 0.05)
-            selector.select(timeout=remaining)
+            if not selector.select(timeout=remaining):
+                continue  # nothing ready yet; re-check the deadline
             try:
-                chunk = proc.stdout.read()
-            except (BlockingIOError, OSError):
-                chunk = None
-            if not chunk:  # None = nothing ready yet; "" = EOF (caught via poll)
+                chunk = os.read(fd, 65536)
+            except (BlockingIOError, InterruptedError):
+                continue  # spurious wakeup, no data
+            except OSError:
+                continue
+            if not chunk:  # b"" = EOF (surfaced next loop via proc.poll())
                 continue
             buffer += chunk
-            while "\n" in buffer:
-                line, _, buffer = buffer.partition("\n")
+            while b"\n" in buffer:
+                raw_line, _, buffer = buffer.partition(b"\n")
+                # Splitting on the \n byte is decode-safe: 0x0A never appears
+                # inside a UTF-8 multibyte sequence.
+                line = raw_line.decode("utf-8", errors="replace")
                 if not line.strip():
                     continue
                 try:
