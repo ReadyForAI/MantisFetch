@@ -2013,8 +2013,69 @@ def _find_cached_capture(
     return best
 
 
+def _load_web_capture_text_sections(doc_dir: Path) -> list[dict[str, Any]]:
+    """Reload a persisted web capture's text sections (to summarize a cache hit)."""
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    out: list[dict[str, Any]] = []
+    for s in manifest.get("sections", []):
+        if s.get("type") != "text" or not s.get("file"):
+            continue
+        try:
+            raw = (doc_dir / s["file"]).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        h = s.get("title") or ""
+        body = raw.partition("\n\n")[2] if (h and raw.startswith("## ")) else raw
+        out.append({"sid": s.get("sid") or "", "h": h, "t": body.strip(), "type": "text"})
+    return out
+
+
+def _resolve_cached_summary(
+    entry: dict[str, Any], docs_dir: Path, content_type: str, summary_mode: str
+) -> str | None:
+    """For a reused capture with summary_mode=defer, report the cached doc's
+    summary status — and schedule one (reloading its sections) if it has none or
+    previously failed, so the option isn't silently a no-op on cache hits."""
+    if summary_mode != "defer":
+        return None
+    doc_id = entry["id"]
+    storage_path = entry.get("storage_path") or _doc_storage_rel_path(
+        doc_id, _normalize_content_type(content_type)
+    )
+    doc_dir = docs_dir / storage_path
+    status = None
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+        summary = manifest.get("parse_metadata", {}).get("summary", {})
+        status = summary.get("status") if isinstance(summary, dict) else None
+    except (OSError, ValueError):
+        pass
+    if status in {"pending", "running", "completed"}:
+        return status  # already generated, or one is already in flight
+    sections = _load_web_capture_text_sections(doc_dir)
+    if not sections:
+        return status
+    threading.Thread(
+        target=_defer_web_summary,
+        args=(
+            doc_id,
+            sections,
+            docs_dir,
+            content_type,
+            entry.get("filename"),
+            entry.get("source_url") or "",
+        ),
+        daemon=True,
+        name=f"web-summary-{doc_id}",
+    ).start()
+    return "pending"
+
+
 def _cached_capture_response(
-    entry: dict[str, Any], content_type: str, docs_dir: Path
+    entry: dict[str, Any], content_type: str, docs_dir: Path, summary_mode: str = "off"
 ) -> CaptureResponse:
     """Build a CaptureResponse from a reused doc-index entry (reused=True)."""
     age_hours: float | None = None
@@ -2049,6 +2110,7 @@ def _cached_capture_response(
         table_count=int(entry.get("tables", 0) or 0),
         reused=True,
         cache_age_hours=age_hours,
+        summary_status=_resolve_cached_summary(entry, docs_dir, content_type, summary_mode),
     )
 
 
@@ -2581,7 +2643,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
         )
         if cached is not None:
-            return _cached_capture_response(cached, content_type, docs_dir)
+            return _cached_capture_response(cached, content_type, docs_dir, req.summary_mode)
 
     cache_key = (
         _capture_cache_key(req.url, content_type, req.extract_tables, req.lang) if caching else None
@@ -2594,7 +2656,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
             )
             if cached is not None:
-                return _cached_capture_response(cached, content_type, docs_dir)
+                return _cached_capture_response(cached, content_type, docs_dir, req.summary_mode)
         return await _capture_fresh(req, content_type, docs_dir)
 
 

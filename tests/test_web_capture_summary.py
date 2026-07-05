@@ -46,6 +46,54 @@ def test_defer_persist_marks_pending(tmp_path: Path) -> None:
     assert manifest["parse_metadata"]["summary"]["status"] == "pending"
 
 
+def test_reload_web_capture_text_sections_roundtrip(tmp_path: Path) -> None:
+    doc_dir = _persist(tmp_path, "off")
+    reloaded = mb._load_web_capture_text_sections(doc_dir)
+    assert [s["sid"] for s in reloaded] == ["s_001", "s_002"]
+    assert reloaded[0]["h"] == "Intro"
+    assert "Intro body text." in reloaded[0]["t"]
+
+
+_CACHED_ENTRY = {
+    "id": "WEB-001",
+    "storage_path": "General/WEB-001",
+    "content_type": "General",
+    "filename": "Example",
+    "source_url": "https://example.com",
+}
+
+
+def test_cache_hit_defer_schedules_when_no_summary(tmp_path: Path, monkeypatch) -> None:
+    import mantisfetch_docreader as dr
+
+    _persist(tmp_path, "off")  # a cached doc that has no summary yet
+    monkeypatch.setattr(dr, "generate_summaries", lambda parsed, c, f: ("HIT DIGEST", "HIT BRIEF", []))
+
+    status = mb._resolve_cached_summary(_CACHED_ENTRY, tmp_path, "General", "defer")
+    assert status == "pending"
+
+    doc_dir = tmp_path / "General" / "WEB-001"
+    for _ in range(60):
+        m = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+        if m.get("parse_metadata", {}).get("summary", {}).get("status") == "completed":
+            break
+        time.sleep(0.05)
+    assert (doc_dir / "brief.md").read_text(encoding="utf-8").strip() == "HIT BRIEF"
+
+
+def test_cache_hit_defer_reports_existing_without_rescheduling(tmp_path: Path) -> None:
+    doc_dir = _persist(tmp_path, "defer")
+    mb._set_web_summary_status(doc_dir, "completed", add_brief_path=True)
+    # No generate_summaries mock: if this wrongly rescheduled it would try the
+    # real pipeline. It must just report the existing status.
+    assert mb._resolve_cached_summary(_CACHED_ENTRY, tmp_path, "General", "defer") == "completed"
+
+
+def test_cache_hit_off_mode_reports_no_status(tmp_path: Path) -> None:
+    _persist(tmp_path, "defer")
+    assert mb._resolve_cached_summary(_CACHED_ENTRY, tmp_path, "General", "off") is None
+
+
 def test_defer_summary_writes_brief_and_llm_digest(tmp_path: Path, monkeypatch) -> None:
     import mantisfetch_docreader as dr
 
