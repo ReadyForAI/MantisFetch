@@ -34,7 +34,7 @@
 ## 🔜 Next
 
 - [ ] JavaScript / TypeScript SDK (`npm install mantisfetch-client`)
-- [ ] Optional API key authentication (`Authorization: Bearer <token>`)
+- [x] Optional API key authentication (`Authorization: Bearer <token>`) — `MANTISFETCH_MCP_TOKEN` gates `/web`, `/doc` and `/mcp`
 - [ ] Streaming progress events for long parse and capture operations
 - [ ] GitHub Actions CI pipeline (lint, unit tests, build Docker image)
 - [ ] PyPI package publishing (`pip install mantisfetch`)
