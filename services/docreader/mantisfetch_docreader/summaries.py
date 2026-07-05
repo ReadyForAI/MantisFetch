@@ -55,30 +55,43 @@ SUMMARY_BRIEF_MAX_INPUT_CHARS = max(
     int(os.environ.get("MANTISFETCH_SUMMARY_BRIEF_MAX_INPUT_CHARS", "32000")),
 )
 
+# Rate-limit state (min-interval between request *starts*) and a separate
+# concurrency cap. The lock guards only the slot reservation, never the network
+# call — see gemini_summarize.
 _summary_llm_lock = threading.Lock()
 _summary_llm_next_allowed_at = 0.0
-
-
-def _set_next_summary_llm_allowed_at() -> None:
-    global _summary_llm_next_allowed_at
-    _summary_llm_next_allowed_at = (
-        time.monotonic() + SUMMARY_REQUEST_MIN_INTERVAL_SEC
-    )
+_summary_llm_sem = threading.BoundedSemaphore(SUMMARY_BATCH_CONCURRENCY)
 
 
 def gemini_summarize(text: str, summarize_prompt: str, max_retries: int = 2) -> str:
-    """Generate summary via the active LLM provider."""
+    """Generate summary via the active LLM provider.
+
+    D1: the previous version held _summary_llm_lock for the entire network call
+    (plus retries + backoff), so SUMMARY_BATCH_CONCURRENCY and the batch worker
+    pool collapsed to serial execution. Now concurrency is bounded by
+    _summary_llm_sem and the lock only reserves this request's start slot; the
+    sleep and the network call run outside the lock. Throughput scales with the
+    configured concurrency while min-interval-between-starts is preserved.
+
+    The slot is claimed against the *current* time immediately before the call
+    (sleep-then-recheck loop), so the min-interval holds between actual request
+    starts even if a thread is delayed after sleeping (CPU starvation, process
+    suspend/resume) — a stale reservation can't let several calls fire back to
+    back.
+    """
     from providers import get_provider
 
-    with _summary_llm_lock:
-        now = time.monotonic()
-        wait_sec = _summary_llm_next_allowed_at - now
-        if wait_sec > 0:
+    global _summary_llm_next_allowed_at
+    with _summary_llm_sem:
+        while True:
+            with _summary_llm_lock:
+                now = time.monotonic()
+                if now >= _summary_llm_next_allowed_at:
+                    _summary_llm_next_allowed_at = now + SUMMARY_REQUEST_MIN_INTERVAL_SEC
+                    break
+                wait_sec = _summary_llm_next_allowed_at - now
             time.sleep(wait_sec)
-        try:
-            return get_provider().summarize(text, summarize_prompt, max_retries=max_retries)
-        finally:
-            _set_next_summary_llm_allowed_at()
+        return get_provider().summarize(text, summarize_prompt, max_retries=max_retries)
 
 
 def _summary_failed_text(text: str | None) -> bool:
