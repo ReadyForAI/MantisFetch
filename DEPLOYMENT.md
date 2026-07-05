@@ -17,6 +17,7 @@ without a token even from the same machine. `/health` is always exempt.
 
 ```yaml
     cap_drop: ["ALL"]
+    cap_add: ["DAC_OVERRIDE"]
     security_opt: ["no-new-privileges:true"]
 ```
 
@@ -27,13 +28,21 @@ This is safe for MantisFetch specifically:
   sandbox helper (`no-new-privileges` would block it) nor `SYS_ADMIN` for a
   user-namespace sandbox (`cap_drop: ALL` would block it).
 - It writes only paths it owns (the docs library, the OCR cache, and a `/tmp`
-  scratch dir for page rendering), which needs no capabilities.
+  scratch dir for page rendering).
 
-The one behavioural change to be aware of: `cap_drop: ALL` also removes root's
-`DAC_OVERRIDE` / `CHOWN` / `FOWNER` — the container's root user can **no longer
-override file permissions or `chown`**. The mounted document-library volume must
-therefore be writable by the container user/group **on its own permissions**
-(see the next section), not because "root can write anything".
+`cap_drop: ALL` drops the ~13 default capabilities the app never uses
+(`NET_RAW`, `MKNOD`, `SETUID`/`SETGID`, `SYS_CHROOT`, `SETFCAP`, …), which is the
+bulk of the escalation surface. **`DAC_OVERRIDE` is added back** for one reason:
+the default bind mount `${HOME}/.mantisfetch/docs` may already exist **owned by a
+different host user** (e.g. from a prior `python mantisfetch_server.py` run), and
+without `DAC_OVERRIDE` the container's root could not write it — a working
+`docker compose up` would silently fail to persist captures/parses.
+
+**Maximal hardening:** if you align the docs volume so the container's user/group
+owns it (root-owned by default, or the shared-group setup below), you can drop
+`DAC_OVERRIDE` too — then the container's root can no longer override file
+permissions at all. In that case the volume **must** be writable on its own
+permissions, not because "root can write anything".
 
 Smoke-test after enabling: capture a page (`/web/capture`), parse a scanned PDF
 (`/doc/parse`), and — if enabled — exercise local OCR.
