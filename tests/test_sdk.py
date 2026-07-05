@@ -19,6 +19,17 @@ class TestSDKStructure:
     def test_pyproject_exists(self):
         assert (SDK_PATH / "pyproject.toml").is_file()
 
+    def test_pyproject_build_config_is_buildable(self):
+        # A5: the SDK is a single-file module. Guard the two settings that make it
+        # produce a non-empty, installable wheel — a real PEP 517 backend and
+        # py-modules (packages.find can't discover a single-file module).
+        import tomllib  # noqa: PLC0415
+
+        data = tomllib.loads((SDK_PATH / "pyproject.toml").read_text(encoding="utf-8"))
+        assert data["build-system"]["build-backend"] == "setuptools.build_meta"
+        setuptools_cfg = data.get("tool", {}).get("setuptools", {})
+        assert "mantisfetch_client" in setuptools_cfg.get("py-modules", [])
+
     def test_examples_exist(self):
         examples = list((SDK_PATH / "examples").glob("*.py"))
         assert len(examples) >= 1

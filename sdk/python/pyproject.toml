@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "mantisfetch-client"
@@ -33,9 +33,8 @@ Homepage = "https://github.com/ReadyForAI/MantisFetch"
 Repository = "https://github.com/ReadyForAI/MantisFetch"
 Documentation = "https://github.com/ReadyForAI/MantisFetch/tree/main/sdk/python"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["mantisfetch_client*"]
+[tool.setuptools]
+py-modules = ["mantisfetch_client"]
 
 [tool.ruff]
 target-version = "py311"
