@@ -93,3 +93,22 @@ def test_pdf_ocr_scratch_cleaned_up_on_failure(tmp_path, monkeypatch):
         dr.parse_pdf(pdf, force_ocr=True, concurrency=2)
 
     assert set(glob.glob(pattern)) == before, "scratch dir leaked after a parse failure"
+
+
+def test_pdf_pre_render_failure_reports_real_error(tmp_path, monkeypatch):
+    """A failure before OCR rendering must surface its real cause, not an
+    UnboundLocalError from the scratch-cleanup finally."""
+    pytest.importorskip("fitz")
+    import mantisfetch_docreader as dr
+
+    pdf = tmp_path / "scan.pdf"
+    _make_scan_pdf(pdf, pages=2)
+
+    def _boom(**kwargs):
+        raise RuntimeError("plan boom")
+
+    # _plan_pdf_ocr runs before the scratch dir is created.
+    monkeypatch.setattr(dr, "_plan_pdf_ocr", _boom)
+
+    with pytest.raises(RuntimeError, match="plan boom"):
+        dr.parse_pdf(pdf, force_ocr=True)

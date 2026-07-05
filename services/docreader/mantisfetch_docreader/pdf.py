@@ -123,6 +123,7 @@ def parse_pdf(
     }
     # Open with fitz for page count, TOC, and OCR rendering
     doc = fitz.open(str(filepath))
+    ocr_png_scratch: Path | None = None  # set once OCR rendering begins
     try:
         total_pages = len(doc)
         logger.info(f"Total pages: {total_pages}")
@@ -422,7 +423,8 @@ def parse_pdf(
                     logger.info(f"Page {pn}/{total_pages}: LLM OCR done")
     finally:
         doc.close()
-        shutil.rmtree(ocr_png_scratch, ignore_errors=True)
+        if ocr_png_scratch is not None:
+            shutil.rmtree(ocr_png_scratch, ignore_errors=True)
 
     pages: list[PageContent] = []
     ocr_table_count = 0
