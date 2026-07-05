@@ -1005,6 +1005,31 @@ def _manifest_content_hash(doc_dir: Path) -> str | None:
     return None
 
 
+def _content_hash_of(parsed: ParsedDocument) -> str:
+    full_text = "\n".join(sec.text for sec in parsed.sections)
+    return "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _skip_stale_generation(doc_id: str, doc_dir: Path, content_hash: str) -> bool:
+    """B1: a background deferred-summary thread holds a snapshot of `parsed`. If the
+    same doc_id was re-parsed (replace=true) while the LLM ran, the on-disk manifest
+    now carries a different content_hash; any write here (success placeholder,
+    running, or failed) would roll the doc back to the stale content. Detect that
+    and skip. Must run before any disk mutation (e.g. _reset_generated_output_dirs).
+    """
+    existing = _manifest_content_hash(doc_dir)
+    if existing is not None and existing != content_hash:
+        logger.warning(
+            "Skipping stale deferred write for %s: on-disk content_hash %s != "
+            "expected %s (a newer parse replaced this doc)",
+            doc_id,
+            existing,
+            content_hash,
+        )
+        return True
+    return False
+
+
 def write_output(
     doc_id: str,
     parsed: ParsedDocument,
@@ -1027,25 +1052,9 @@ def write_output(
 
     # v3: content_hash (computed early — the generation guard must run before any
     # disk mutation so a stale deferred writer can't wipe a newer parse's output).
-    full_text = "\n".join(sec.text for sec in parsed.sections)
-    content_hash = (
-        "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
-    )
-    # B1: a background deferred-summary thread holds a snapshot of `parsed`. If the
-    # same doc_id was re-parsed (replace=true) while the LLM ran, the on-disk
-    # manifest now carries a different content_hash; writing here would roll the
-    # doc back to the stale content. Skip instead.
-    if guard_stale_generation:
-        existing = _manifest_content_hash(doc_dir)
-        if existing is not None and existing != content_hash:
-            logger.warning(
-                "Skipping stale deferred summary write for %s: on-disk content_hash "
-                "%s != expected %s (a newer parse replaced this doc)",
-                doc_id,
-                existing,
-                content_hash,
-            )
-            return
+    content_hash = _content_hash_of(parsed)
+    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, content_hash):
+        return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
@@ -1192,11 +1201,17 @@ def write_output_extract_only(
     summary_placeholder: str | None = None,
     content_type: str | None = None,
     preserve_extracted: bool = False,
+    guard_stale_generation: bool = False,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
+
+    content_hash = _content_hash_of(parsed)
+    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, content_hash):
+        return
+
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
     sections_dir.mkdir(exist_ok=True)
@@ -1237,11 +1252,6 @@ def write_output_extract_only(
     _write_text(
         doc_dir / "brief.md",
         f"{tmpl_for_locale(output_locale, 'digest_title', doc_id=doc_id, filename=parsed.filename)}\n\n{placeholder}\n",
-    )
-
-    full_text = "\n".join(sec.text for sec in parsed.sections)
-    content_hash = (
-        "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
     )
 
     manifest = {
@@ -1352,6 +1362,7 @@ def _generate_deferred_summary(
             summary_placeholder=_summary_placeholder_text(
                 "running", locale=_parsed_document_locale(parsed)
             ),
+            guard_stale_generation=True,
         )
         # Impose a wall-clock bound WITHOUT the `with` block's shutdown(wait=True):
         # on timeout, exiting the context manager would join the worker and block
@@ -1406,6 +1417,7 @@ def _generate_deferred_summary(
             summary_placeholder=_summary_placeholder_text(
                 "failed", error_message, locale=_parsed_document_locale(parsed)
             ),
+            guard_stale_generation=True,
         )
     finally:
         if acquired:

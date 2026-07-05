@@ -74,6 +74,25 @@ def test_guard_allows_write_when_content_hash_matches(tmp_path: Path) -> None:
     assert "FRESH_DIGEST" in (tmp_path / "DOC-G2" / "digest.md").read_text(encoding="utf-8")
 
 
+def test_extract_only_guard_skips_stale_placeholder_write(tmp_path: Path) -> None:
+    """The deferred running/failed placeholder writes must not roll back a newer parse."""
+    from mantisfetch_docreader import write_output_extract_only
+
+    write_output_extract_only("DOC-G4", _parsed("NEW content"), tmp_path, source="upload")
+    before = (tmp_path / "DOC-G4" / "manifest.json").read_text(encoding="utf-8")
+
+    write_output_extract_only(
+        "DOC-G4",
+        _parsed("OLD content"),
+        tmp_path,
+        source="upload",
+        summary_placeholder="(Summary failed: boom)",
+        guard_stale_generation=True,
+    )
+    after = (tmp_path / "DOC-G4" / "manifest.json").read_text(encoding="utf-8")
+    assert after == before, "stale failed placeholder overwrote a newer parse"
+
+
 def test_guard_allows_first_write_when_no_manifest(tmp_path: Path) -> None:
     from mantisfetch_docreader import write_output
 
