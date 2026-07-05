@@ -59,5 +59,8 @@ def client() -> TestClient:
     with patch("mantisfetch_browser.async_playwright", return_value=_make_playwright_mock()):
         from mantisfetch_server import app  # noqa: PLC0415
 
-        with TestClient(app, raise_server_exceptions=True) as c:
+        # Present as a loopback peer: the REST gate is loopback-only by default,
+        # and a TestClient simulates a same-host caller. Auth-gating for
+        # non-loopback peers is exercised separately in test_rest_auth.
+        with TestClient(app, client=("127.0.0.1", 50000), raise_server_exceptions=True) as c:
             yield c

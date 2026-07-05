@@ -15,6 +15,7 @@ Final API surface (single port 9898):
 
 import logging
 import os
+import secrets
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -94,15 +95,19 @@ class _RestAuthGate:
 
     The same browser-driving / doc-parsing capabilities the MCP gate locks down
     are reachable directly on /web/* and /doc/*; once the server binds 0.0.0.0
-    (needed for cross-host MCP) those would otherwise be wide open. Behavior:
+    (needed for cross-host MCP) those would otherwise be wide open. Behavior
+    (loopback-only by default, matching the MCP gate):
 
     - loopback peer (127.0.0.1 / ::1): always allowed — same-host callers,
-      including one-期 Skeleton-Doc over the Docker bridge, are unaffected.
-    - non-loopback + ``MANTISFETCH_MCP_TOKEN`` set: require that bearer (else 401).
-    - non-loopback + token unset: allowed (preserves the original no-auth default;
-      this is deliberately more permissive than the MCP gate's loopback-only
-      default because a one-期 Agent may reach the API across a Docker bridge,
-      whose peer IP is not loopback — set the token to lock the surface down).
+      including Skeleton-Doc over the Docker bridge when it shares the host, are
+      unaffected.
+    - ``MANTISFETCH_MCP_TOKEN`` set: require that bearer for non-loopback peers
+      (constant-time compare; else 401). A cross-host / cross-bridge Agent reaches
+      the surface by presenting the token.
+    - non-loopback + token unset: denied (403). Closes the default footgun where
+      ``docker compose up`` (publishing 9898) would otherwise expose file upload,
+      browser control and login-state export to the LAN. Set the token to allow
+      authenticated off-host access.
     - health endpoints are never gated, for liveness probes.
 
     The real socket peer (``scope["client"]``) is used, never the spoofable Host
@@ -125,9 +130,13 @@ class _RestAuthGate:
             return None
         token = os.environ.get("MANTISFETCH_MCP_TOKEN")
         if not token:
-            return None
+            return 403, (
+                b'{"error":"forbidden: /web and /doc are loopback-only; '
+                b'set MANTISFETCH_MCP_TOKEN to allow non-loopback clients"}'
+            )
         headers = dict(scope.get("headers") or [])
-        if headers.get(b"authorization", b"").decode() != f"Bearer {token}":
+        provided = headers.get(b"authorization", b"").decode()
+        if not secrets.compare_digest(provided, f"Bearer {token}"):
             return 401, b'{"error":"unauthorized"}'
         return None
 
