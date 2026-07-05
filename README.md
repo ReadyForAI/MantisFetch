@@ -64,7 +64,7 @@ python mantisfetch_server.py     # listens on port 9898
 
 ### Docker
 
-The `docker-compose.yml` provides a single-service setup. By default, the document library is bind-mounted to the current user's `~/.mantisfetch/docs` directory on the host.
+The `docker-compose.yml` provides a single-service setup. By default, the document library is bind-mounted to the current user's `~/.mantisfetch/docs` directory on the host. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for container hardening, shared-volume ownership (SMB/NFS), and the single-process boundary.
 
 ```yaml
 # docker-compose.yml (excerpt)

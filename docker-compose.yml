@@ -53,6 +53,13 @@ services:
       MANTISFETCH_SEARCH_API_KEY: ${MANTISFETCH_SEARCH_API_KEY:-}
       MANTISFETCH_SEARCH_MAX_RESULTS: ${MANTISFETCH_SEARCH_MAX_RESULTS:-10}
       MANTISFETCH_SEARCH_MIN_INTERVAL_SEC: ${MANTISFETCH_SEARCH_MIN_INTERVAL_SEC:-2}
+    # Hardening: the app binds a high port (9898), launches Chromium with
+    # --no-sandbox, and only writes paths it owns, so it needs no Linux
+    # capabilities and no privilege escalation. cap_drop also strips root's
+    # permission-override powers, so the docs volume must be writable by the
+    # container user/group on its own perms — see DEPLOYMENT.md.
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
   # Zero-cost self-hosted metasearch for MANTISFETCH_SEARCH_PROVIDER=searxng.
