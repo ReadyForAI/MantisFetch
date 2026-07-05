@@ -1691,6 +1691,18 @@ _WEB_SUMMARY_MAX_CONCURRENT = max(
 )
 _WEB_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("MANTISFETCH_SUMMARY_BATCH_CONCURRENCY", "1")))
 _web_summary_sem = threading.BoundedSemaphore(_WEB_SUMMARY_MAX_CONCURRENT)
+# Serializes the "read status → claim pending → enqueue" step for cache hits so
+# concurrent hits on the same cached doc can't enqueue duplicate LLM jobs.
+_web_summary_claim_lock = threading.Lock()
+
+
+def _read_web_summary_status(doc_dir: Path) -> str | None:
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    summary = manifest.get("parse_metadata", {}).get("summary", {})
+    return summary.get("status") if isinstance(summary, dict) else None
 
 
 def _persist_web_capture(
@@ -2046,18 +2058,18 @@ def _resolve_cached_summary(
         doc_id, _normalize_content_type(content_type)
     )
     doc_dir = docs_dir / storage_path
-    status = None
-    try:
-        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
-        summary = manifest.get("parse_metadata", {}).get("summary", {})
-        status = summary.get("status") if isinstance(summary, dict) else None
-    except (OSError, ValueError):
-        pass
-    if status in {"pending", "running", "completed"}:
-        return status  # already generated, or one is already in flight
-    sections = _load_web_capture_text_sections(doc_dir)
-    if not sections:
-        return status
+    # Claim atomically: read the status and, if none/failed, write "pending"
+    # BEFORE enqueueing, all under the lock. Otherwise a second cache hit in the
+    # window before the worker acquires the semaphore would enqueue a duplicate
+    # LLM job and /summary would disagree with the returned status.
+    with _web_summary_claim_lock:
+        status = _read_web_summary_status(doc_dir)
+        if status in {"pending", "running", "completed"}:
+            return status  # already generated, or one is already claimed/in flight
+        sections = _load_web_capture_text_sections(doc_dir)
+        if not sections:
+            return status
+        _set_web_summary_status(doc_dir, "pending")
     threading.Thread(
         target=_defer_web_summary,
         args=(

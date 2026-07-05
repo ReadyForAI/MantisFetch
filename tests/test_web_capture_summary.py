@@ -94,6 +94,42 @@ def test_cache_hit_off_mode_reports_no_status(tmp_path: Path) -> None:
     assert mb._resolve_cached_summary(_CACHED_ENTRY, tmp_path, "General", "off") is None
 
 
+def test_cache_hit_defer_claims_and_dedups(tmp_path: Path, monkeypatch) -> None:
+    """Concurrent cache hits must enqueue exactly one LLM job (atomic claim)."""
+    import threading as _threading
+
+    import mantisfetch_docreader as dr
+
+    _persist(tmp_path, "off")
+    calls: list[int] = []
+    gate = _threading.Event()
+
+    def slow(parsed, c, f):
+        calls.append(1)
+        gate.wait(2.0)
+        return ("D", "B", [])
+
+    monkeypatch.setattr(dr, "generate_summaries", slow)
+    doc_dir = tmp_path / "General" / "WEB-001"
+
+    assert mb._resolve_cached_summary(_CACHED_ENTRY, tmp_path, "General", "defer") == "pending"
+    # claimed synchronously (the worker is blocked on `gate`, not yet done)
+    assert mb._read_web_summary_status(doc_dir) in {"pending", "running"}
+    # a second hit in the window must not enqueue another job
+    assert mb._resolve_cached_summary(_CACHED_ENTRY, tmp_path, "General", "defer") in {
+        "pending",
+        "running",
+    }
+
+    gate.set()
+    for _ in range(60):
+        if mb._read_web_summary_status(doc_dir) == "completed":
+            break
+        time.sleep(0.05)
+    time.sleep(0.1)  # let any (wrongly) queued duplicate run
+    assert calls == [1], "duplicate summary jobs enqueued on concurrent cache hits"
+
+
 def test_defer_summary_writes_brief_and_llm_digest(tmp_path: Path, monkeypatch) -> None:
     import mantisfetch_docreader as dr
 
