@@ -2519,8 +2519,8 @@ async def api_parse_doc(
     image_ocr_backend: str = Form("auto"),
     max_images: int = Form(200),
     max_ocr_images: int = Form(WORD_IMAGE_OCR_MAX_IMAGES),
-    max_tables_per_page: int = Form(3),
-    concurrency: int = Form(3),
+    max_tables_per_page: int = Form(3, ge=0, le=50),
+    concurrency: int = Form(3, ge=1, le=16),
     tags: str | None = Form(None),  # JSON array string: '["Q3","financial"]'
     metadata: str | None = Form(None),  # JSON object string
     replace: bool = Form(False),

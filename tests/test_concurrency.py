@@ -157,6 +157,29 @@ class TestSessionEviction:
 
         asyncio.run(run())
 
+    def test_close_waits_for_inflight_lock(self):
+        """B2: close marks the session closed at once but defers context.close()
+        until the in-flight op (holding sess.lock) finishes — no TargetClosed."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from mantisfetch_browser import Session, SessionManager
+
+        async def run():
+            mgr = SessionManager(ttl=60, maxsize=10)
+            ctx = AsyncMock()
+            sess = Session(context=ctx, page=MagicMock(), lang="en")
+            await mgr.put("s1", sess)
+            async with sess.lock:  # simulate an in-flight goto/distill/act
+                close_task = asyncio.create_task(mgr.remove("s1"))
+                await asyncio.sleep(0.05)
+                assert sess.closed is True  # marked closed immediately
+                assert ctx.close.await_count == 0  # but context stays open
+            await close_task
+            ctx.close.assert_awaited_once()  # closed only after the lock released
+
+        asyncio.run(run())
+
 
 class TestSessionClosedFlag:
     """H2: session use-after-close — closed sessions must be rejected."""

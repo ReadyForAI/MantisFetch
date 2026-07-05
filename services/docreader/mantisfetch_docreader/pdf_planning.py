@@ -95,19 +95,28 @@ def _resolve_ocr_render_scale(
     requested_scale: float,
     max_pixels: int,
     min_scale: float,
-) -> tuple[float, int, bool]:
+) -> tuple[float, int, bool, bool]:
+    """Return (scale, pixels, capped, skip).
+
+    max_pixels is a HARD ceiling. When even min_scale would exceed it (a
+    maliciously huge page — PDF pages go up to 14400pt, ~50MP at 0.5x), skip is
+    True so the caller drops that page's OCR instead of rendering a multi-hundred-MB
+    pixmap.
+    """
     requested_scale = max(0.5, float(requested_scale))
     min_scale = min(requested_scale, max(0.5, float(min_scale)))
     max_pixels = max(1, int(max_pixels))
     requested_pixels = _page_render_pixels(page, requested_scale)
     if requested_pixels <= max_pixels:
-        return requested_scale, requested_pixels, False
+        return requested_scale, requested_pixels, False, False
 
     rect = page.rect
     base_area = max(1.0, float(rect.width) * float(rect.height))
     capped_scale = (max_pixels / base_area) ** 0.5
-    scale = max(min_scale, min(requested_scale, capped_scale))
-    return scale, _page_render_pixels(page, scale), scale < requested_scale
+    if capped_scale < min_scale:
+        return min_scale, _page_render_pixels(page, min_scale), True, True
+    scale = min(requested_scale, capped_scale)
+    return scale, _page_render_pixels(page, scale), True, False
 
 
 def _page_blank_signal(page: Any, *, scale: float = 0.5) -> dict[str, Any]:
