@@ -68,24 +68,25 @@ def gemini_summarize(text: str, summarize_prompt: str, max_retries: int = 2) -> 
 
     D1: the previous version held _summary_llm_lock for the entire network call
     (plus retries + backoff), so SUMMARY_BATCH_CONCURRENCY and the batch worker
-    pool collapsed to serial execution. Now the lock only reserves this request's
-    start slot (spacing starts by SUMMARY_REQUEST_MIN_INTERVAL_SEC); the sleep
-    and the network call run outside it, and concurrency is bounded separately by
-    _summary_llm_sem. Semantics unchanged (min-interval still enforced), but
-    throughput scales with the configured concurrency.
+    pool collapsed to serial execution. Now concurrency is bounded by
+    _summary_llm_sem and the lock only reserves this request's start slot; the
+    sleep and the network call run outside the lock. Throughput scales with the
+    configured concurrency while min-interval-between-starts is preserved.
+
+    The semaphore is acquired *before* the slot reservation so the reservation is
+    coupled to the actual call: otherwise a burst of semaphore releases could let
+    several already-reserved calls start within less than the min-interval.
     """
     from providers import get_provider
 
     global _summary_llm_next_allowed_at
-    with _summary_llm_lock:
-        start_at = max(time.monotonic(), _summary_llm_next_allowed_at)
-        _summary_llm_next_allowed_at = start_at + SUMMARY_REQUEST_MIN_INTERVAL_SEC
-
-    wait_sec = start_at - time.monotonic()
-    if wait_sec > 0:
-        time.sleep(wait_sec)
-
     with _summary_llm_sem:
+        with _summary_llm_lock:
+            start_at = max(time.monotonic(), _summary_llm_next_allowed_at)
+            _summary_llm_next_allowed_at = start_at + SUMMARY_REQUEST_MIN_INTERVAL_SEC
+        wait_sec = start_at - time.monotonic()
+        if wait_sec > 0:
+            time.sleep(wait_sec)
         return get_provider().summarize(text, summarize_prompt, max_retries=max_retries)
 
 

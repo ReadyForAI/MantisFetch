@@ -38,8 +38,10 @@ def test_gemini_summarize_runs_concurrently(monkeypatch):
 
 
 def test_gemini_summarize_still_spaces_request_starts(monkeypatch):
+    # Saturate the semaphore (cap 2 < 6 callers): the min-interval between actual
+    # provider starts must hold even when callers queue behind the semaphore.
     monkeypatch.setattr(s, "SUMMARY_REQUEST_MIN_INTERVAL_SEC", 0.2)
-    monkeypatch.setattr(s, "_summary_llm_sem", threading.BoundedSemaphore(4))
+    monkeypatch.setattr(s, "_summary_llm_sem", threading.BoundedSemaphore(2))
     monkeypatch.setattr(s, "_summary_llm_next_allowed_at", 0.0)
 
     starts: list[float] = []
@@ -53,8 +55,8 @@ def test_gemini_summarize_still_spaces_request_starts(monkeypatch):
 
     monkeypatch.setattr("providers.get_provider", lambda: _Provider())
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(lambda _: s.gemini_summarize("text", "prompt"), range(3)))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(lambda _: s.gemini_summarize("text", "prompt"), range(6)))
 
     starts.sort()
     gaps = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
