@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1653,7 +1655,18 @@ class SectionBatchRequest(BaseModel):
 
 # ---- FastAPI app ----
 
-app = FastAPI(title="Doc Reader API", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Startup tasks (replaces deprecated @app.on_event). Runs under the unified
+    server's lifespan_context; the referenced helpers are module globals resolved
+    at startup, after the module has fully loaded."""
+    await _startup_prewarm_local_ocr()
+    await _startup_backfill_manifest_tags()
+    yield
+
+
+app = FastAPI(title="Doc Reader API", version="1.0.0", lifespan=lifespan)
 PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
     "0",
     "false",
@@ -1662,7 +1675,6 @@ PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").stri
 }
 
 
-@app.on_event("startup")
 async def _startup_prewarm_local_ocr() -> None:
     if not PREWARM_LOCAL_OCR:
         return
@@ -1674,7 +1686,6 @@ async def _startup_prewarm_local_ocr() -> None:
         logger.warning("Local OCR worker prewarm skipped: %s", exc)
 
 
-@app.on_event("startup")
 async def _startup_backfill_manifest_tags() -> None:
     try:
         stats = _backfill_manifest_tags(_get_docs_dir())
