@@ -18,7 +18,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -990,6 +989,75 @@ def _build_doc_meta(
     }
 
 
+def _content_hash_of(parsed: ParsedDocument) -> str:
+    full_text = "\n".join(sec.text for sec in parsed.sections)
+    return "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _generation_token(
+    parsed: ParsedDocument,
+    tags: list[str] | None,
+    metadata: dict[str, Any] | None,
+    source_record: dict[str, Any] | None,
+) -> str:
+    """A per-parse identity that changes on every replace.
+
+    Includes the section text plus the caller-supplied filename/tags/metadata/
+    source_record — the fields a replace=true re-parse can change even when the
+    extracted text is byte-identical. Deliberately excludes ``parsed.metadata``
+    (summary status), which _set_summary_metadata mutates on every write, so the
+    token stays stable across a single worker's pending→running→completed writes.
+    """
+    payload = json.dumps(
+        {
+            "content_hash": _content_hash_of(parsed),
+            "filename": parsed.filename,
+            "tags": sorted(tags) if tags else [],
+            "metadata": metadata or {},
+            "source": source_record or {},
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+        default=str,
+    )
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _manifest_generation(doc_dir: Path) -> str | None:
+    """Read the generation token recorded in an existing manifest, or None if absent."""
+    try:
+        with (doc_dir / "manifest.json").open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    prov = data.get("provenance")
+    if isinstance(prov, dict):
+        value = prov.get("generation")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
+    """B1: a background deferred-summary thread holds a snapshot of `parsed`. If the
+    same doc_id was re-parsed (replace=true) while the LLM ran, the on-disk manifest
+    now carries a different generation token; any write here (success, running, or
+    failed placeholder) would roll the doc back to the stale parse. Detect that and
+    skip. Must run before any disk mutation (e.g. _reset_generated_output_dirs).
+    """
+    existing = _manifest_generation(doc_dir)
+    if existing is not None and existing != generation:
+        logger.warning(
+            "Skipping stale deferred write for %s: on-disk generation %s != "
+            "expected %s (a newer parse replaced this doc)",
+            doc_id,
+            existing,
+            generation,
+        )
+        return True
+    return False
+
+
 def write_output(
     doc_id: str,
     parsed: ParsedDocument,
@@ -1003,11 +1071,21 @@ def write_output(
     source_record: dict[str, Any] | None = None,
     content_type: str | None = None,
     preserve_extracted: bool = False,
+    guard_stale_generation: bool = False,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
+
+    # content_hash + generation token computed early — the generation guard must
+    # run before any disk mutation so a stale deferred writer can't wipe a newer
+    # parse's output.
+    content_hash = _content_hash_of(parsed)
+    generation = _generation_token(parsed, tags, metadata, source_record)
+    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
+        return
+
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
     sections_dir.mkdir(exist_ok=True)
@@ -1071,13 +1149,7 @@ def write_output(
         _write_text(sections_dir / sec_filename, sec_content)
     logger.info(f"sections/ ({len(parsed.sections)} files)")
 
-    # v3: content_hash
-    full_text = "\n".join(sec.text for sec in parsed.sections)
-    content_hash = (
-        "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
-    )
-
-    # manifest.json + v3 provenance
+    # manifest.json + v3 provenance (content_hash computed at function top)
     manifest = {
         "doc_id": doc_id,
         "filename": parsed.filename,
@@ -1121,6 +1193,7 @@ def write_output(
             "source_url": original_path or str(parsed.filename),
             "created_at": meta["created_at"],
             "content_hash": content_hash,
+            "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
             "source_filename": (source_record or {}).get("filename", ""),
             "source_ref": (source_record or {}).get("ref", ""),
@@ -1159,11 +1232,18 @@ def write_output_extract_only(
     summary_placeholder: str | None = None,
     content_type: str | None = None,
     preserve_extracted: bool = False,
+    guard_stale_generation: bool = False,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
+
+    content_hash = _content_hash_of(parsed)
+    generation = _generation_token(parsed, tags, metadata, source_record)
+    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
+        return
+
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
     sections_dir.mkdir(exist_ok=True)
@@ -1206,11 +1286,6 @@ def write_output_extract_only(
         f"{tmpl_for_locale(output_locale, 'digest_title', doc_id=doc_id, filename=parsed.filename)}\n\n{placeholder}\n",
     )
 
-    full_text = "\n".join(sec.text for sec in parsed.sections)
-    content_hash = (
-        "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
-    )
-
     manifest = {
         "doc_id": doc_id,
         "filename": parsed.filename,
@@ -1251,6 +1326,7 @@ def write_output_extract_only(
             "source_url": str(parsed.filename),
             "created_at": meta["created_at"],
             "content_hash": content_hash,
+            "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
             "source_filename": (source_record or {}).get("filename", ""),
             "source_ref": (source_record or {}).get("ref", ""),
@@ -1319,15 +1395,42 @@ def _generate_deferred_summary(
             summary_placeholder=_summary_placeholder_text(
                 "running", locale=_parsed_document_locale(parsed)
             ),
+            guard_stale_generation=True,
         )
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                generate_summaries,
-                parsed,
-                concurrency,
-                False,
-            )
-            digest_text, brief_text, _ = future.result(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC)
+        # Bound the wall-clock wait with a daemon worker instead of future.result
+        # on a ThreadPoolExecutor: the executor's threads are non-daemon and its
+        # atexit join would let a hung LLM backend block process shutdown. The
+        # daemon worker owns releasing the concurrency slot when it truly finishes,
+        # so on timeout we return promptly to write the status while the slot stays
+        # held until the (non-cancellable) call ends — a hung backend can neither
+        # pile deferred jobs past DEFERRED_SUMMARY_MAX_CONCURRENT nor keep the
+        # process alive (A3 + the report's "信号量语义要重新审视" note).
+        summary_result: dict[str, Any] = {}
+        summary_done = threading.Event()
+
+        def _run_summary() -> None:
+            try:
+                summary_result["value"] = generate_summaries(parsed, concurrency, False)
+            except Exception as exc:  # noqa: BLE001 - surfaced on the caller thread
+                summary_result["error"] = exc
+            finally:
+                summary_done.set()
+                try:
+                    _deferred_summary_sem.release()
+                except ValueError:
+                    pass
+
+        threading.Thread(
+            target=_run_summary, name=f"deferred-summary-{doc_id}", daemon=True
+        ).start()
+        acquired = False  # the worker thread now owns releasing the concurrency slot
+        if not summary_done.wait(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC):
+            raise TimeoutError(f"summary timed out after {DEFERRED_SUMMARY_TIMEOUT_SEC}s")
+        if "error" in summary_result:
+            raise summary_result["error"]
+        if "value" not in summary_result:
+            raise RuntimeError("deferred summary worker produced no result")
+        digest_text, brief_text, _ = summary_result["value"]
         _set_summary_metadata(parsed, mode="defer", status="completed", attempts=attempts)
         write_output(
             doc_id,
@@ -1342,6 +1445,7 @@ def _generate_deferred_summary(
             source_record=source_record,
             content_type=content_type,
             preserve_extracted=preserve_extracted,
+            guard_stale_generation=True,
         )
         logger.info("Deferred summary complete: %s", doc_id)
     except Exception as exc:
@@ -1368,6 +1472,7 @@ def _generate_deferred_summary(
             summary_placeholder=_summary_placeholder_text(
                 "failed", error_message, locale=_parsed_document_locale(parsed)
             ),
+            guard_stale_generation=True,
         )
     finally:
         if acquired:
