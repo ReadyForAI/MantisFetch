@@ -1683,6 +1683,16 @@ def _build_manifest_sections(
     return result
 
 
+# Web-capture LLM summary (opt-in via summary_mode="defer"). Bound concurrent
+# background jobs by the same env the docreader defer path uses; the LLM call
+# itself is further bounded by summaries._summary_llm_sem (shared, process-wide).
+_WEB_SUMMARY_MAX_CONCURRENT = max(
+    1, int(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT", "1"))
+)
+_WEB_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("MANTISFETCH_SUMMARY_BATCH_CONCURRENCY", "1")))
+_web_summary_sem = threading.BoundedSemaphore(_WEB_SUMMARY_MAX_CONCURRENT)
+
+
 def _persist_web_capture(
     doc_id: str,
     url: str,
@@ -1697,6 +1707,7 @@ def _persist_web_capture(
     requested_url: str | None = None,
     lang: str = DEFAULT_LANG,
     metadata: dict[str, Any] | None = None,
+    summary_mode: str = "off",
 ) -> None:
     """Write a web capture to the document library and update doc-index.json.
 
@@ -1763,6 +1774,10 @@ def _persist_web_capture(
             "content_hash": content_hash,
         },
     }
+    if summary_mode == "defer":
+        # Report status under parse_metadata.summary so /doc/library/{id}/summary
+        # reports web captures the same way it does uploaded docs.
+        manifest["parse_metadata"] = {"summary": {"mode": "defer", "status": "pending"}}
     _write_text_atomic(
         doc_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
     )
@@ -1809,6 +1824,102 @@ def _persist_web_capture(
         )
         index["last_updated"] = now_str
         _write_json(index_path, index)
+
+
+def _set_web_summary_status(
+    doc_dir: Path, status: str, *, error: str | None = None, add_brief_path: bool = False
+) -> None:
+    """Update the web capture manifest's parse_metadata.summary (and, on
+    completion, register the brief.md path)."""
+    manifest_path = doc_dir / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    summary: dict[str, Any] = {
+        "mode": "defer",
+        "status": status,
+        "updated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if error:
+        summary["error"] = error[:200]
+    pm = manifest.get("parse_metadata")
+    if not isinstance(pm, dict):
+        pm = {}
+    pm["summary"] = summary
+    manifest["parse_metadata"] = pm
+    if add_brief_path and isinstance(manifest.get("paths"), dict):
+        manifest["paths"]["brief"] = "brief.md"
+    _write_text_atomic(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2))
+
+
+def _update_web_index_digest(docs_dir: Path, doc_id: str, digest: str) -> None:
+    """Refresh the doc-index digest preview to the generated LLM digest."""
+    with _doc_index_lock:
+        index_path = docs_dir / "doc-index.json"
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        for entry in index.get("documents", []):
+            if entry.get("id") == doc_id:
+                entry["digest"] = digest[:200]
+                _write_json(index_path, index)
+                return
+
+
+def _defer_web_summary(
+    doc_id: str,
+    sections: list[dict[str, Any]],
+    docs_dir: Path,
+    content_type: str,
+    title: str | None,
+    url: str,
+) -> None:
+    """Background: generate an LLM digest + brief for a web capture and write them
+    into its storage layout (three-tier parity with /doc). Reuses the docreader
+    summary pipeline via a function-level import — this avoids import-time coupling
+    and lets tests patch ``mantisfetch_docreader.generate_summaries``. The LLM
+    client's own request timeouts bound the call; the thread is a daemon."""
+    from mantisfetch_docreader import (  # noqa: PLC0415
+        ParsedDocument,
+        Section,
+        generate_summaries,
+    )
+
+    doc_dir = docs_dir / _doc_storage_rel_path(doc_id, _normalize_content_type(content_type))
+    with _web_summary_sem:
+        _set_web_summary_status(doc_dir, "running")
+        text_sections = [s for s in sections if s.get("type") != "table"]
+        parsed = ParsedDocument(
+            filename=title or url,
+            file_type="web_capture",
+            total_pages=1,
+            pages=[],
+            sections=[
+                Section(
+                    index=i,
+                    title=s.get("h") or "",
+                    level=1,
+                    text=s.get("t") or "",
+                    page_range="1",
+                    sid=s.get("sid") or f"s_{i:03d}",
+                )
+                for i, s in enumerate(text_sections, 1)
+            ],
+        )
+        try:
+            digest_text, brief_text, _ = generate_summaries(parsed, _WEB_SUMMARY_CONCURRENCY, False)
+        except Exception as exc:  # noqa: BLE001 - status recorded; the thread must not crash
+            logger.warning("web capture summary failed for %s: %s", doc_id, exc)
+            _set_web_summary_status(doc_dir, "failed", error=str(exc))
+            return
+        _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest_text}\n")
+        _write_text_atomic(doc_dir / "brief.md", f"{brief_text}\n")
+        _update_web_index_digest(docs_dir, doc_id, digest_text)
+        # Flip status last so "completed" means every artifact is already on disk.
+        _set_web_summary_status(doc_dir, "completed", add_brief_path=True)
+        logger.info("web capture summary complete: %s", doc_id)
 
 
 # Per-capture-key locks serialize *cache misses* for the same (url, content_type,
@@ -2424,7 +2535,18 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 requested_url=req.url,
                 lang=req.lang,
                 metadata=req.metadata,
+                summary_mode=req.summary_mode,
             )
+
+            summary_status: str | None = None
+            if req.summary_mode == "defer":
+                threading.Thread(
+                    target=_defer_web_summary,
+                    args=(doc_id, sections, docs_dir, content_type, title, url),
+                    daemon=True,
+                    name=f"web-summary-{doc_id}",
+                ).start()
+                summary_status = "pending"
 
             return CaptureResponse(
                 doc_id=doc_id,
@@ -2433,6 +2555,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 digest=digest,
                 section_count=len(sections),
                 table_count=len(table_sections),
+                summary_status=summary_status,
             )
         finally:
             await sessions.remove(sid)

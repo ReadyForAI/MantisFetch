@@ -223,6 +223,10 @@ class CaptureRequest(BaseModel):
     # part of the dedup cache key — a cache hit keeps the existing doc's metadata
     # (first-touch provenance).
     metadata: dict[str, Any] | None = None
+    # "off" (default): the digest is a fast local snippet (title + section
+    # previews). "defer": after persisting, generate an LLM digest + brief in the
+    # background (three-tier parity with /doc) — opt-in because it spends tokens.
+    summary_mode: Literal["off", "defer"] = "off"
 
 
 class CaptureResponse(BaseModel):
@@ -236,6 +240,9 @@ class CaptureResponse(BaseModel):
     table_count: int
     reused: bool = False
     cache_age_hours: float | None = None
+    # "pending" when summary_mode="defer" scheduled an LLM digest/brief; poll
+    # /doc/library/{doc_id}/summary for progress. None otherwise.
+    summary_status: str | None = None
 
 
 class SearchRequest(BaseModel):
