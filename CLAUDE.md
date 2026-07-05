@@ -75,12 +75,17 @@ Single-process FastAPI application with two mounted sub-apps:
 - `/web/*` — Browser service (Playwright-based web scraping, semantic distillation, WebMCP)
 - `/doc/*` — Document reader (PDF/DOCX parsing, OCR, three-tier summaries)
 
-Unified entry point: `mantisfetch_server.py` (planned)
+Unified entry point: `mantisfetch_server.py` (mounts `/web`, `/doc`, `/mcp`)
 
 Key source files:
 
-- `mantisfetch_browser.py` — Web browser service (~2100 lines)
-- `mantisfetch_docreader.py` — Document parsing service (~1300 lines)
+- `services/browser/mantisfetch_browser/` — Web browser service package
+  (`__init__.py`, `session.py`, `models.py`, `ranking.py`, `vision.py`)
+- `services/docreader/mantisfetch_docreader/` — Document reader package
+  (`__init__.py`, `storage.py`, `summaries.py`, `pdf.py`, `word.py`, `ocr/`)
+- `services/mcp/mantisfetch_mcp.py` — MCP server (streamable-HTTP at `/mcp`)
+- `mantisfetch_common/` — shared storage/atomic-write/path helpers
+- `providers/` — LLM (Gemini / OpenAI-compatible) and search providers
 - `i18n.py` — Internationalization (zh/en, default en, LANG env switch)
 
 ## Tech Stack
@@ -104,17 +109,18 @@ Key source files:
 
 ```
 mantisfetch/
-├── mantisfetch_server.py          # Unified entry (mounts /web and /doc)
-├── mantisfetch_browser.py         # Browser service
-├── mantisfetch_docreader.py       # Document reader service
-├── i18n.py                      # Internationalization
+├── mantisfetch_server.py                       # Unified entry (mounts /web /doc /mcp)
+├── services/
+│   ├── browser/mantisfetch_browser/            # Browser service package
+│   ├── docreader/mantisfetch_docreader/        # Document reader package (incl. ocr/)
+│   └── mcp/mantisfetch_mcp.py                   # MCP server
+├── mantisfetch_common/                         # Shared storage/atomic/path helpers
+├── providers/                                  # LLM + search providers
+├── i18n.py                                     # Internationalization
 ├── requirements.txt
-├── tests/
-│   ├── test_browser.py
-│   └── test_docreader.py
-├── docs/                        # Design documents
-│   └── mantisfetch_opensource_design.md
-└── skills/                      # Agent SKILL files
+├── tests/                                      # ~60 test modules
+├── sdk/python/                                 # Python client SDK
+└── skills/                                     # Agent SKILL files
     ├── mantisfetch-browser-SKILL.md
     └── mantisfetch-docreader-SKILL.md
 ```

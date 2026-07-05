@@ -23,4 +23,7 @@ jobs:
         run: ruff check .
 
       - name: Test
-        run: pytest tests/ -v --tb=short || echo "No tests found yet, skipping"
+        # e2e is excluded: it needs a real browser (playwright install), an LLM
+        # key, and network egress. The real-Chromium smoke test skips cleanly
+        # when Chromium is absent, so it stays green here too.
+        run: pytest tests/ --ignore=tests/e2e -v --tb=short
