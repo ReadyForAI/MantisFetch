@@ -774,6 +774,7 @@ Request body:
 | `lang`           | string   | `"en-US"`      | Browser locale                                   |
 | `timeout_ms`     | int      | `25000`        | Page load timeout in milliseconds                |
 | `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
+| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
 
 Response example:
 
@@ -786,7 +787,8 @@ Response example:
   "section_count": 8,
   "table_count": 2,
   "reused": false,
-  "cache_age_hours": null
+  "cache_age_hours": null,
+  "summary_status": null
 }
 ```
 
