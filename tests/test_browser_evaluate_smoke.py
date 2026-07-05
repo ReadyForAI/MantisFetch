@@ -47,11 +47,11 @@ PAGE_HTML = """<!DOCTYPE html>
      remain stable and marketing spend stays within the approved annual budget.</p>
   <table>
     <caption>Revenue by region</caption>
-    <tr><th>Region</th><th>Amount</th></tr>
-    <tr><td>North</td><td>100</td></tr>
-    <tr><td>South</td><td>200</td></tr>
-    <tr><td>East</td><td>300</td></tr>
-    <tr><td>West</td><td>400</td></tr>
+    <tr><th>Region</th><th>Date</th><th>Amount</th></tr>
+    <tr><td>North</td><td>2024-01-15</td><td>100</td></tr>
+    <tr><td>South</td><td>2024-02-15</td><td>200</td></tr>
+    <tr><td>East</td><td>2024-03-15</td><td>300</td></tr>
+    <tr><td>West</td><td>2024-04-15</td><td>400</td></tr>
   </table>
   <form toolname="subscribe" tooldescription="Subscribe to the report">
     <input name="email" type="text" toolparamdescription="Email address" />
@@ -111,6 +111,19 @@ async def test_distill_readability_extracts_table(page) -> None:
     assert result["meta"]["mode"] == "readability", "readability parse fell back to simple"
     tables = [s for s in result["sections"] if s.get("type") == "table"]
     assert tables, "readability-mode distill returned no tables"
+
+
+async def test_table_stats_exclude_date_column(page) -> None:
+    """D5: numeric column stats must skip a date column parseFloat would coerce."""
+    result = await mb._distill(
+        _session(page),
+        DistillRequest(session_id="s", distill_mode="simple", include_actions=False),
+    )
+    tables = [s for s in result["sections"] if s.get("type") == "table"]
+    assert tables
+    stats = (tables[0].get("table_meta") or {}).get("stats") or {}
+    assert "Amount" in stats, stats  # the real numeric column is counted
+    assert "Date" not in stats, stats  # dates must not be coerced into stats
 
 
 async def test_webmcp_declarative_invoke_populates_form(page) -> None:

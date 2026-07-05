@@ -437,8 +437,11 @@ DISTILL_SIMPLE_JS = r"""
         for (let ci = 0; ci < totalCols; ci++) {
           const nums = [];
           for (const row of allRows.slice(1)) {
-            const v = parseFloat(row.cells[ci].replace(/[,$%¥€£]/g, ""));
-            if (!isNaN(v)) nums.push(v);
+            // Only whole-cell numbers count toward stats — reject dates (2024-01-15)
+            // and ids (No.42) that parseFloat would otherwise coerce to a number.
+            const cleaned = row.cells[ci].replace(/[,$%¥€£\s]/g, "");
+            if (!/^-?\d+(\.\d+)?$/.test(cleaned)) continue;
+            nums.push(parseFloat(cleaned));
           }
           if (nums.length > allRows.length * 0.5) {
             const colName = headerRow[ci] || ("Col_" + (ci + 1));
@@ -557,8 +560,11 @@ EXTRACT_TABLES_JS = r"""
       for (let ci = 0; ci < totalCols; ci++) {
         const nums = [];
         for (const row of allRows.slice(1)) {
-          const v = parseFloat(row.cells[ci].replace(/[,$%¥€£]/g, ""));
-          if (!isNaN(v)) nums.push(v);
+          // Only whole-cell numbers count toward stats — reject dates (2024-01-15)
+          // and ids (No.42) that parseFloat would otherwise coerce to a number.
+          const cleaned = row.cells[ci].replace(/[,$%¥€£\s]/g, "");
+          if (!/^-?\d+(\.\d+)?$/.test(cleaned)) continue;
+          nums.push(parseFloat(cleaned));
         }
         if (nums.length > allRows.length * 0.5) {
           const colName = headerRow[ci] || ("Col_" + (ci + 1));
@@ -2252,7 +2258,7 @@ async def scroll(req: ScrollRequest) -> NavigateResponse:
     sess = await _ensure_session(req.session_id)
     async with sess.lock:
         delta = req.pixels if req.direction == "down" else -req.pixels
-        await sess.page.evaluate(f"window.scrollBy(0, {delta})")
+        await sess.page.evaluate("(d) => window.scrollBy(0, d)", delta)
 
         # wait for possible lazy-load
         await asyncio.sleep(0.3)
