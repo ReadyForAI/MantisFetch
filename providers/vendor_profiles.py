@@ -54,6 +54,13 @@ _VENDOR_PROFILES: dict[str, VendorProfile] = {
 
 
 def get_vendor_profile(name: str | None) -> VendorProfile:
-    """Return a vendor profile, defaulting to OpenAI."""
+    """Return a vendor profile. Defaults to OpenAI only when unset; an unknown
+    vendor name raises rather than silently sending requests to api.openai.com."""
     key = (name or "openai").strip().lower()
-    return _VENDOR_PROFILES.get(key, _VENDOR_PROFILES["openai"])
+    profile = _VENDOR_PROFILES.get(key)
+    if profile is None:
+        allowed = ", ".join(sorted(_VENDOR_PROFILES))
+        raise RuntimeError(
+            f"unknown MANTISFETCH_LLM_VENDOR {name!r}; must be one of: {allowed}"
+        )
+    return profile

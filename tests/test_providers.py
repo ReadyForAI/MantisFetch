@@ -168,6 +168,31 @@ class TestOpenAICompatProvider:
         with pytest.raises(RuntimeError, match="MANTISFETCH_LLM_API_KEY"):
             get_provider()
 
+    # A8: fail fast on vendor misconfiguration instead of silently mis-routing.
+    def test_unknown_vendor_raises(self):
+        with pytest.raises(RuntimeError, match="unknown MANTISFETCH_LLM_VENDOR"):
+            get_vendor_profile("bogus-vendor")
+
+    def test_vendor_profile_defaults_to_openai_when_unset(self):
+        assert get_vendor_profile(None).name == "openai"
+
+    def test_vendor_without_default_model_requires_explicit_model(self, monkeypatch):
+        from providers.openai_compat import OpenAICompatProvider
+
+        monkeypatch.setenv("MANTISFETCH_LLM_VENDOR", "volcengine")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.delenv("MANTISFETCH_LLM_MODEL", raising=False)
+        with pytest.raises(RuntimeError, match="no default model"):
+            OpenAICompatProvider()
+
+    def test_vendor_without_default_model_ok_with_explicit_model(self, monkeypatch):
+        from providers.openai_compat import OpenAICompatProvider
+
+        monkeypatch.setenv("MANTISFETCH_LLM_VENDOR", "volcengine")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "doubao-pro")
+        assert OpenAICompatProvider()._model == "doubao-pro"
+
     def test_openai_compat_summarize_calls_openai_sdk(self, monkeypatch):
         """OpenAICompatProvider.summarize() uses the official OpenAI SDK."""
         monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
@@ -409,9 +434,10 @@ class TestVendorProfiles:
         assert profile.default_text_model is None
         assert profile.default_ocr_model is None
 
-    def test_unknown_vendor_falls_back_to_openai(self):
-        profile = get_vendor_profile("unknown")
-        assert profile.name == "openai"
+    def test_unknown_vendor_raises_fast(self):
+        # A8: a misspelled vendor must fail loudly, not silently route to OpenAI.
+        with pytest.raises(RuntimeError, match="unknown MANTISFETCH_LLM_VENDOR"):
+            get_vendor_profile("unknown")
 
 
 # ── AC-4: provider caching ────────────────────────────────────────────────────

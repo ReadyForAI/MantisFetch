@@ -37,11 +37,12 @@ class OpenAICompatProvider(LLMProvider):
         self._api_key = os.environ.get("MANTISFETCH_LLM_API_KEY", "")
         base_url = os.environ.get("MANTISFETCH_LLM_BASE_URL") or self._vendor.base_url
         self._base_url = base_url.rstrip("/")
-        self._model = (
-            os.environ.get("MANTISFETCH_LLM_MODEL")
-            or self._vendor.default_text_model
-            or "gpt-4o-mini"
-        )
+        self._model = os.environ.get("MANTISFETCH_LLM_MODEL") or self._vendor.default_text_model
+        if not self._model:
+            raise RuntimeError(
+                f"vendor {self._vendor.name!r} has no default model; "
+                "set MANTISFETCH_LLM_MODEL to the model name to use."
+            )
         self._ocr_model = (
             os.environ.get("MANTISFETCH_OCR_MODEL")
             or self._vendor.default_ocr_model

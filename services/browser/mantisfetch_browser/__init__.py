@@ -22,6 +22,7 @@ from mantisfetch_common.atomic import _write_text as _write_text_atomic
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
     _doc_index_lock,
+    _doc_manifest_exists_anywhere,
     _doc_storage_rel_path,
     _get_docs_dir,
     _indexable_metadata,
@@ -1602,9 +1603,18 @@ def _next_web_doc_id(docs_dir: Path) -> str:
                 counter = int(counter_path.read_text(encoding="utf-8").strip())
             except ValueError:
                 counter = 1
-        doc_id = f"WEB-{counter:03d}"
+        # Skip ids already on disk (e.g. .web_counter was reset) so a counter mint
+        # can't silently overwrite an existing capture — mirrors docreader's
+        # _next_doc_id. Raise rather than return a colliding id if exhausted.
+        for _ in range(1_000_000):
+            doc_id = f"WEB-{counter:03d}"
+            counter += 1
+            if not _doc_manifest_exists_anywhere(docs_dir, doc_id):
+                break
+        else:
+            raise RuntimeError("web doc_id allocation exhausted: too many existing WEB ids")
         tmp = counter_path.with_suffix(".tmp")
-        tmp.write_text(str(counter + 1), encoding="utf-8")
+        tmp.write_text(str(counter), encoding="utf-8")
         os.replace(tmp, counter_path)
         return doc_id
 

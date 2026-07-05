@@ -56,6 +56,18 @@ def _doc_storage_dir(docs_dir: Path, doc_id: str, content_type: str | None = Non
     return docs_dir / _doc_storage_rel_path(doc_id, content_type)
 
 
+def _doc_manifest_exists_anywhere(docs_dir: Path, doc_id: str) -> bool:
+    """True if a document with this id already has a manifest on disk, whether in
+    the flat layout or under any content-type directory.
+
+    Used by both /doc and /web id allocation so a counter mint can't silently
+    overwrite an existing document (e.g. after a counter file is reset).
+    """
+    if (docs_dir / doc_id / "manifest.json").exists():
+        return True
+    return any((docs_dir / ct / doc_id / "manifest.json").exists() for ct in CONTENT_TYPE_DIRS)
+
+
 def _indexable_metadata(value: dict[str, Any]) -> dict[str, Any]:
     """Keep only shallow scalar metadata in doc-index for cheap filtering.
 

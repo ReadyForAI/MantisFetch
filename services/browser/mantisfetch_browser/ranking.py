@@ -261,32 +261,31 @@ def _apply_total_output_budget(
 
     ranked = _rank_actions(_dedup_actions(actions))
     packed: list[dict[str, Any]] = []
+    packed_idx: set[int] = set()
     used = 0
 
-    for a in ranked:
+    # Round 1: pack the highest-ranked actions up to min_actions_to_keep. Actions
+    # are already field-trimmed; if one still doesn't fit, skip it — never
+    # truncate a CSS selector to force a fit (a partial selector matches the wrong
+    # node or nothing), matching _trim_action_fields's drop-don't-truncate policy.
+    for i, a in enumerate(ranked):
         if len(packed) >= min_actions_to_keep:
             break
         size = _estimate_action_chars(a)
         if used + size <= remaining:
             packed.append(a)
+            packed_idx.add(i)
             used += size
-        else:
-            b = dict(a)
-            strat = dict(b.get("strategy") or {})
-            if strat.get("type") == "css":
-                strat["selector"] = (strat.get("selector") or "")[:40]
-                b["strategy"] = strat
-            b["name"] = _smart_truncate(b.get("name") or "", 40)
-            size2 = _estimate_action_chars(b)
-            if used + size2 <= remaining:
-                packed.append(b)
-                used += size2
 
-    for a in ranked[len(packed) :]:
-        size = _estimate_action_chars(a)
-        if used + size > remaining:
+    # Round 2: fill the remaining budget with actions not already packed (exclude
+    # by index so a round-1 pick can't be appended a second time).
+    for i, a in enumerate(ranked):
+        if i in packed_idx:
             continue
-        packed.append(a)
-        used += size
+        size = _estimate_action_chars(a)
+        if used + size <= remaining:
+            packed.append(a)
+            packed_idx.add(i)
+            used += size
 
     return sections, packed, meta
