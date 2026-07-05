@@ -316,7 +316,7 @@ async def _setup_routing(context: BrowserContext, block_resources: bool):
 # ============================================================
 # Added text density detection for div/section/td (better SPA scraping)
 DISTILL_SIMPLE_JS = r"""
-(extractTables, maxTableRows) => {
+({ extractTables, maxTableRows }) => {
   function visible(el) {
     const style = window.getComputedStyle(el);
     if (!style) return false;
@@ -484,7 +484,7 @@ READABILITY_EVAL = r"""
 
 # Standalone table extraction JS for Readability mode (Readability strips tables)
 EXTRACT_TABLES_JS = r"""
-(maxTableRows, maxTables) => {
+({ maxTableRows, maxTables }) => {
   function visible(el) {
     const style = window.getComputedStyle(el);
     if (!style) return false;
@@ -673,7 +673,7 @@ ACTIONS_DOM_JS = r"""
 """
 
 MAP_BOX_TO_ELEMENT = r"""
-(cx, cy) => {
+({ cx, cy }) => {
   const el = document.elementFromPoint(cx, cy);
   if (!el) return null;
 
@@ -872,7 +872,7 @@ WEBMCP_DISCOVER_JS = r"""
 """
 
 WEBMCP_INVOKE_IMPERATIVE_JS = r"""
-async (toolName, params) => {
+async ({ toolName, params }) => {
   const mc = navigator.modelContext;
   if (!mc) throw new Error("modelContext not available");
 
@@ -898,7 +898,7 @@ async (toolName, params) => {
 """
 
 WEBMCP_INVOKE_DECLARATIVE_JS = r"""
-async (toolName, params, autoSubmit) => {
+async ({ toolName, params, autoSubmit }) => {
   const form = document.querySelector('form[toolname="' + toolName + '"]');
   if (!form) throw new Error("form not found: " + toolName);
 
@@ -1178,7 +1178,7 @@ async def _extract_actions_vision(page: Page, req: DistillRequest) -> list[dict[
         x1, y1, x2, y2 = d["bbox"]
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
 
-        info = await page.evaluate(MAP_BOX_TO_ELEMENT, cx, cy)
+        info = await page.evaluate(MAP_BOX_TO_ELEMENT, {"cx": cx, "cy": cy})
         if not info:
             continue
 
@@ -1276,11 +1276,14 @@ async def _invoke_webmcp_tool(
     url_before = session.page.url
     try:
         if tool["source"] == "webmcp_imperative":
-            result = await session.page.evaluate(WEBMCP_INVOKE_IMPERATIVE_JS, tool_name, params)
+            result = await session.page.evaluate(
+                WEBMCP_INVOKE_IMPERATIVE_JS, {"toolName": tool_name, "params": params}
+            )
         elif tool["source"] == "webmcp_declarative":
             auto_submit = tool.get("auto_submit", False)
             result = await session.page.evaluate(
-                WEBMCP_INVOKE_DECLARATIVE_JS, tool_name, params, auto_submit
+                WEBMCP_INVOKE_DECLARATIVE_JS,
+                {"toolName": tool_name, "params": params, "autoSubmit": auto_submit},
             )
         else:
             return {"success": False, "error": f"unknown source: {tool['source']}"}
@@ -1360,7 +1363,11 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
                     try:
                         extracted_tables = (
                             await page.evaluate(
-                                EXTRACT_TABLES_JS, req.max_table_rows, req.max_tables
+                                EXTRACT_TABLES_JS,
+                                {
+                                    "maxTableRows": req.max_table_rows,
+                                    "maxTables": req.max_tables,
+                                },
                             )
                             or []
                         )
@@ -1368,7 +1375,10 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
                         extracted_tables = []
 
     if mode == "simple":
-        dist = await page.evaluate(DISTILL_SIMPLE_JS, req.extract_tables, req.max_table_rows)
+        dist = await page.evaluate(
+            DISTILL_SIMPLE_JS,
+            {"extractTables": req.extract_tables, "maxTableRows": req.max_table_rows},
+        )
         blocks = dist.get("blocks") or []
         extracted_tables = dist.get("tables") or []
         url = dist.get("url") or page.url
