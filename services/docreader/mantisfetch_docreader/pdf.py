@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -239,8 +241,13 @@ def parse_pdf(
         local_ocr_results: dict[int, str] = {}
         llm_ocr_results: dict[int, str] = {}
         local_ocr_layout_pages: dict[int, OCRPageBlocks] = {}
-        local_tasks: list[tuple[int, bytes]] = []
-        llm_tasks: list[tuple[int, bytes]] = []
+        # B4: spill each rendered page PNG to a scratch file and queue its PATH,
+        # not its bytes, so we never hold every target page's pixmap in memory at
+        # once (a few-hundred-page scan at 3x is multiple GB). Each OCR worker
+        # reads its PNG, then deletes it; resident PNG memory stays ~O(concurrency).
+        local_tasks: list[tuple[int, Path]] = []
+        llm_tasks: list[tuple[int, Path]] = []
+        ocr_png_scratch = Path(tempfile.mkdtemp(prefix="mf_ocr_png_"))
         render_meta: dict[str, Any] = {
             "local_ocr_render_scale": processing_policy.local_ocr_render_scale,
             "llm_ocr_render_scale": processing_policy.llm_ocr_render_scale,
@@ -340,68 +347,81 @@ def parse_pdf(
                             local_ocr_results[page_num] = cached
                         logger.info("Page %d/%d: %s OCR cache hit", page_num, total_pages, cache_key)
                         continue
+            # Cache miss: spill the PNG to disk and queue only its path. img_bytes
+            # is released on the next iteration, so at most one pixmap is resident
+            # during rendering.
+            png_path = ocr_png_scratch / f"ocr_p{page_num:04d}.{cache_key}.png"
+            png_path.write_bytes(img_bytes)
             if page_num in llm_ocr_set:
-                llm_tasks.append((page_num, img_bytes))
+                llm_tasks.append((page_num, png_path))
             else:
-                local_tasks.append((page_num, img_bytes))
+                local_tasks.append((page_num, png_path))
 
     finally:
         doc.close()
 
-    if local_tasks:
-        logger.info(
-            "Concurrent local OCR: %d pages (%d workers, backend=%s)...",
-            len(local_tasks),
-            LOCAL_OCR_CONCURRENCY,
-            ocr_plan["local_backend"],
-        )
+    try:
+        if local_tasks:
+            logger.info(
+                "Concurrent local OCR: %d pages (%d workers, backend=%s)...",
+                len(local_tasks),
+                LOCAL_OCR_CONCURRENCY,
+                ocr_plan["local_backend"],
+            )
 
-        def _do_local_ocr(args):
-            pn, img_b = args
-            text, page_blocks = local_ocr_with_layout(img_b, pn, ocr_plan["local_backend"])
-            return pn, img_b, text, page_blocks
+            def _do_local_ocr(args):
+                pn, png_path = args
+                try:
+                    img_b = png_path.read_bytes()
+                    text, page_blocks = local_ocr_with_layout(img_b, pn, ocr_plan["local_backend"])
+                    if (
+                        cache_dir
+                        and profile
+                        and profile.cache_policy.page_ocr
+                        and not _is_ocr_failed_text(text)
+                    ):
+                        _ocr_cache_variant_path(
+                            cache_dir,
+                            f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_b)}.txt",
+                        ).write_text(text, encoding="utf-8")
+                    return pn, text, page_blocks
+                finally:
+                    png_path.unlink(missing_ok=True)
 
-        with ThreadPoolExecutor(max_workers=LOCAL_OCR_CONCURRENCY) as pool:
-            futures = {pool.submit(_do_local_ocr, task): task for task in local_tasks}
-            for fut in as_completed(futures):
-                pn, img_b, result, page_blocks = fut.result()
-                local_ocr_results[pn] = result
-                if page_blocks is not None and not _is_ocr_failed_text(result):
-                    local_ocr_layout_pages[pn] = page_blocks
-                logger.info(f"Page {pn}/{total_pages}: local OCR done")
-                if cache_dir and profile and profile.cache_policy.page_ocr:
-                    if _is_ocr_failed_text(result):
-                        logger.info("Page %d/%d: not caching failed local OCR result", pn, total_pages)
-                        continue
-                    cache_path = _ocr_cache_variant_path(
-                        cache_dir,
-                        f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_b)}.txt",
-                    )
-                    cache_path.write_text(result, encoding="utf-8")
+            with ThreadPoolExecutor(max_workers=LOCAL_OCR_CONCURRENCY) as pool:
+                futures = {pool.submit(_do_local_ocr, task): task for task in local_tasks}
+                for fut in as_completed(futures):
+                    pn, result, page_blocks = fut.result()
+                    local_ocr_results[pn] = result
+                    if page_blocks is not None and not _is_ocr_failed_text(result):
+                        local_ocr_layout_pages[pn] = page_blocks
+                    logger.info(f"Page {pn}/{total_pages}: local OCR done")
 
-    # Concurrent LLM OCR
-    if llm_tasks:
-        logger.info(f"Concurrent LLM OCR: {len(llm_tasks)} pages ({concurrency} workers)...")
+        # Concurrent LLM OCR
+        if llm_tasks:
+            logger.info(f"Concurrent LLM OCR: {len(llm_tasks)} pages ({concurrency} workers)...")
 
-        def _do_ocr(args):
-            pn, img_b = args
-            result = gemini_ocr(img_b, pn, proofread=ocr_plan["proofread"])
-            return pn, img_b, result
+            def _do_ocr(args):
+                pn, png_path = args
+                try:
+                    img_b = png_path.read_bytes()
+                    result = gemini_ocr(img_b, pn, proofread=ocr_plan["proofread"])
+                    if cache_dir and not _is_ocr_failed_text(result):
+                        _ocr_cache_path(cache_dir, pn).with_suffix(
+                            f".{_ocr_cache_key(img_b)}.txt"
+                        ).write_text(result, encoding="utf-8")
+                    return pn, result
+                finally:
+                    png_path.unlink(missing_ok=True)
 
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            futures = {pool.submit(_do_ocr, task): task for task in llm_tasks}
-            for fut in as_completed(futures):
-                pn, img_b, result = fut.result()
-                llm_ocr_results[pn] = result
-                logger.info(f"Page {pn}/{total_pages}: LLM OCR done")
-                if cache_dir:
-                    if _is_ocr_failed_text(result):
-                        logger.info("Page %d/%d: not caching failed LLM OCR result", pn, total_pages)
-                    else:
-                        cp = _ocr_cache_path(cache_dir, pn)
-                        ck = _ocr_cache_key(img_b)
-                        ck_path = cp.with_suffix(f".{ck}.txt")
-                        ck_path.write_text(result, encoding="utf-8")
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = {pool.submit(_do_ocr, task): task for task in llm_tasks}
+                for fut in as_completed(futures):
+                    pn, result = fut.result()
+                    llm_ocr_results[pn] = result
+                    logger.info(f"Page {pn}/{total_pages}: LLM OCR done")
+    finally:
+        shutil.rmtree(ocr_png_scratch, ignore_errors=True)
 
     pages: list[PageContent] = []
     ocr_table_count = 0
