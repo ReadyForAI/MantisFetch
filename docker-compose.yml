@@ -53,6 +53,17 @@ services:
       MANTISFETCH_SEARCH_API_KEY: ${MANTISFETCH_SEARCH_API_KEY:-}
       MANTISFETCH_SEARCH_MAX_RESULTS: ${MANTISFETCH_SEARCH_MAX_RESULTS:-10}
       MANTISFETCH_SEARCH_MIN_INTERVAL_SEC: ${MANTISFETCH_SEARCH_MIN_INTERVAL_SEC:-2}
+    # Hardening: the app binds a high port (9898), launches Chromium with
+    # --no-sandbox, and only writes paths it owns, so it needs no privilege
+    # escalation and (almost) no Linux capabilities. DAC_OVERRIDE is kept so the
+    # container's root can still write a bind-mounted docs volume that is owned by
+    # a *different* host user (e.g. ~/.mantisfetch/docs created by a prior local
+    # run) — otherwise the default `docker compose up` would fail to persist. A
+    # fully hardened deployment with an aligned volume owner can drop it too; see
+    # DEPLOYMENT.md.
+    cap_drop: ["ALL"]
+    cap_add: ["DAC_OVERRIDE"]
+    security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
 
   # Zero-cost self-hosted metasearch for MANTISFETCH_SEARCH_PROVIDER=searxng.
