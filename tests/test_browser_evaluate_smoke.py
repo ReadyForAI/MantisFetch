@@ -47,11 +47,11 @@ PAGE_HTML = """<!DOCTYPE html>
      remain stable and marketing spend stays within the approved annual budget.</p>
   <table>
     <caption>Revenue by region</caption>
-    <tr><th>Region</th><th>Date</th><th>Amount</th></tr>
-    <tr><td>North</td><td>2024-01-15</td><td>100</td></tr>
-    <tr><td>South</td><td>2024-02-15</td><td>200</td></tr>
-    <tr><td>East</td><td>2024-03-15</td><td>300</td></tr>
-    <tr><td>West</td><td>2024-04-15</td><td>400</td></tr>
+    <tr><th>Region</th><th>Date</th><th>Amount</th><th>Rate</th></tr>
+    <tr><td>North</td><td>2024-01-15</td><td>100</td><td>.5</td></tr>
+    <tr><td>South</td><td>2024-02-15</td><td>200</td><td>1.5</td></tr>
+    <tr><td>East</td><td>2024-03-15</td><td>300</td><td>2.</td></tr>
+    <tr><td>West</td><td>2024-04-15</td><td>400</td><td>.75</td></tr>
   </table>
   <form toolname="subscribe" tooldescription="Subscribe to the report">
     <input name="email" type="text" toolparamdescription="Email address" />
@@ -123,6 +123,7 @@ async def test_table_stats_exclude_date_column(page) -> None:
     assert tables
     stats = (tables[0].get("table_meta") or {}).get("stats") or {}
     assert "Amount" in stats, stats  # the real numeric column is counted
+    assert "Rate" in stats, stats  # decimal-only cells (.5, 2.) still count
     assert "Date" not in stats, stats  # dates must not be coerced into stats
 
 

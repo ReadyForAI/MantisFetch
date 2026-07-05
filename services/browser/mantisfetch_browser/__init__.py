@@ -440,7 +440,7 @@ DISTILL_SIMPLE_JS = r"""
             // Only whole-cell numbers count toward stats — reject dates (2024-01-15)
             // and ids (No.42) that parseFloat would otherwise coerce to a number.
             const cleaned = row.cells[ci].replace(/[,$%¥€£\s]/g, "");
-            if (!/^-?\d+(\.\d+)?$/.test(cleaned)) continue;
+            if (!/^-?(\d+\.?\d*|\.\d+)$/.test(cleaned)) continue;
             nums.push(parseFloat(cleaned));
           }
           if (nums.length > allRows.length * 0.5) {
@@ -563,7 +563,7 @@ EXTRACT_TABLES_JS = r"""
           // Only whole-cell numbers count toward stats — reject dates (2024-01-15)
           // and ids (No.42) that parseFloat would otherwise coerce to a number.
           const cleaned = row.cells[ci].replace(/[,$%¥€£\s]/g, "");
-          if (!/^-?\d+(\.\d+)?$/.test(cleaned)) continue;
+          if (!/^-?(\d+\.?\d*|\.\d+)$/.test(cleaned)) continue;
           nums.push(parseFloat(cleaned));
         }
         if (nums.length > allRows.length * 0.5) {
