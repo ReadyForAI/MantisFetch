@@ -73,19 +73,23 @@ def gemini_summarize(text: str, summarize_prompt: str, max_retries: int = 2) -> 
     sleep and the network call run outside the lock. Throughput scales with the
     configured concurrency while min-interval-between-starts is preserved.
 
-    The semaphore is acquired *before* the slot reservation so the reservation is
-    coupled to the actual call: otherwise a burst of semaphore releases could let
-    several already-reserved calls start within less than the min-interval.
+    The slot is claimed against the *current* time immediately before the call
+    (sleep-then-recheck loop), so the min-interval holds between actual request
+    starts even if a thread is delayed after sleeping (CPU starvation, process
+    suspend/resume) — a stale reservation can't let several calls fire back to
+    back.
     """
     from providers import get_provider
 
     global _summary_llm_next_allowed_at
     with _summary_llm_sem:
-        with _summary_llm_lock:
-            start_at = max(time.monotonic(), _summary_llm_next_allowed_at)
-            _summary_llm_next_allowed_at = start_at + SUMMARY_REQUEST_MIN_INTERVAL_SEC
-        wait_sec = start_at - time.monotonic()
-        if wait_sec > 0:
+        while True:
+            with _summary_llm_lock:
+                now = time.monotonic()
+                if now >= _summary_llm_next_allowed_at:
+                    _summary_llm_next_allowed_at = now + SUMMARY_REQUEST_MIN_INTERVAL_SEC
+                    break
+                wait_sec = _summary_llm_next_allowed_at - now
             time.sleep(wait_sec)
         return get_provider().summarize(text, summarize_prompt, max_retries=max_retries)
 
