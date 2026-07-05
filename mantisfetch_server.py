@@ -13,6 +13,7 @@ Final API surface (single port 9898):
   GET  /doc/library/{doc_id}/{digest,brief,full,sections,section/{sid},table/{tid},manifest}
 """
 
+import logging
 import os
 import sys
 from collections.abc import AsyncGenerator
@@ -21,6 +22,8 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+
+logger = logging.getLogger("mantisfetch")
 
 # Add service directories to sys.path so modules can be imported by name.
 # Must precede the service imports below.
@@ -34,10 +37,30 @@ from mantisfetch_docreader import app as doc_app  # noqa: E402
 from mantisfetch_mcp import mcp, mcp_app  # noqa: E402
 
 
+def _warn_legacy_env() -> None:
+    """Warn about pre-rename ``LARKSCOUT_*`` environment variables.
+
+    MantisFetch reads only ``MANTISFETCH_*``; a leftover ``LARKSCOUT_*`` config
+    from the LarkScout era would otherwise fail silently (the service would run
+    on defaults). Surfacing it at startup turns a silent misconfiguration into a
+    visible one.
+    """
+    legacy = sorted(k for k in os.environ if k.startswith("LARKSCOUT_"))
+    if legacy:
+        logger.warning(
+            "Ignoring %d legacy LARKSCOUT_* environment variable(s): %s. "
+            "MantisFetch reads MANTISFETCH_* only — rename them "
+            "(e.g. LARKSCOUT_LLM_API_KEY -> MANTISFETCH_LLM_API_KEY).",
+            len(legacy),
+            ", ".join(legacy),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Start sub-application lifespans (browser Playwright init, docreader startup
     tasks) plus the MCP server's streamable-HTTP session manager."""
+    _warn_legacy_env()
     async with browser_app.router.lifespan_context(browser_app):
         async with doc_app.router.lifespan_context(doc_app):
             async with mcp.session_manager.run():

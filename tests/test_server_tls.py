@@ -1,6 +1,25 @@
 """Tests for the unified server's optional TLS env wiring (_ssl_kwargs)."""
 
+import logging
+import os
+
 import mantisfetch_server as srv
+
+
+def test_warn_legacy_env_logs_when_larkscout_set(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("LARKSCOUT_LLM_API_KEY", "leftover")
+    with caplog.at_level(logging.WARNING, logger="mantisfetch"):
+        srv._warn_legacy_env()
+    assert any("LARKSCOUT_LLM_API_KEY" in r.message for r in caplog.records)
+
+
+def test_warn_legacy_env_silent_without_legacy(monkeypatch, caplog) -> None:
+    for key in list(os.environ):
+        if key.startswith("LARKSCOUT_"):
+            monkeypatch.delenv(key, raising=False)
+    with caplog.at_level(logging.WARNING, logger="mantisfetch"):
+        srv._warn_legacy_env()
+    assert not caplog.records
 
 
 def test_ssl_kwargs_empty_without_env(monkeypatch) -> None:
