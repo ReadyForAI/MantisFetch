@@ -990,6 +990,21 @@ def _build_doc_meta(
     }
 
 
+def _manifest_content_hash(doc_dir: Path) -> str | None:
+    """Read the content_hash recorded in an existing manifest, or None if absent."""
+    try:
+        with (doc_dir / "manifest.json").open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    prov = data.get("provenance")
+    if isinstance(prov, dict):
+        value = prov.get("content_hash")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def write_output(
     doc_id: str,
     parsed: ParsedDocument,
@@ -1003,11 +1018,35 @@ def write_output(
     source_record: dict[str, Any] | None = None,
     content_type: str | None = None,
     preserve_extracted: bool = False,
+    guard_stale_generation: bool = False,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
+
+    # v3: content_hash (computed early — the generation guard must run before any
+    # disk mutation so a stale deferred writer can't wipe a newer parse's output).
+    full_text = "\n".join(sec.text for sec in parsed.sections)
+    content_hash = (
+        "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
+    )
+    # B1: a background deferred-summary thread holds a snapshot of `parsed`. If the
+    # same doc_id was re-parsed (replace=true) while the LLM ran, the on-disk
+    # manifest now carries a different content_hash; writing here would roll the
+    # doc back to the stale content. Skip instead.
+    if guard_stale_generation:
+        existing = _manifest_content_hash(doc_dir)
+        if existing is not None and existing != content_hash:
+            logger.warning(
+                "Skipping stale deferred summary write for %s: on-disk content_hash "
+                "%s != expected %s (a newer parse replaced this doc)",
+                doc_id,
+                existing,
+                content_hash,
+            )
+            return
+
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
     sections_dir.mkdir(exist_ok=True)
@@ -1071,13 +1110,7 @@ def write_output(
         _write_text(sections_dir / sec_filename, sec_content)
     logger.info(f"sections/ ({len(parsed.sections)} files)")
 
-    # v3: content_hash
-    full_text = "\n".join(sec.text for sec in parsed.sections)
-    content_hash = (
-        "sha256:" + hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
-    )
-
-    # manifest.json + v3 provenance
+    # manifest.json + v3 provenance (content_hash computed at function top)
     manifest = {
         "doc_id": doc_id,
         "filename": parsed.filename,
@@ -1320,14 +1353,18 @@ def _generate_deferred_summary(
                 "running", locale=_parsed_document_locale(parsed)
             ),
         )
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                generate_summaries,
-                parsed,
-                concurrency,
-                False,
-            )
+        # Impose a wall-clock bound WITHOUT the `with` block's shutdown(wait=True):
+        # on timeout, exiting the context manager would join the worker and block
+        # until the (串行 + rate-limited) LLM call actually finished, defeating the
+        # timeout and pinning the deferred-summary semaphore. Shut the pool down
+        # non-blocking instead; the worker leaks until it finishes but we return
+        # promptly to write the timeout status and release the semaphore. (A3)
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(generate_summaries, parsed, concurrency, False)
             digest_text, brief_text, _ = future.result(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
         _set_summary_metadata(parsed, mode="defer", status="completed", attempts=attempts)
         write_output(
             doc_id,
@@ -1342,6 +1379,7 @@ def _generate_deferred_summary(
             source_record=source_record,
             content_type=content_type,
             preserve_extracted=preserve_extracted,
+            guard_stale_generation=True,
         )
         logger.info("Deferred summary complete: %s", doc_id)
     except Exception as exc:
