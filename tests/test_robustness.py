@@ -179,7 +179,7 @@ class TestPDFParse:
         class Page:
             rect = Rect()
 
-        scale, pixels, capped = _resolve_ocr_render_scale(
+        scale, pixels, capped, skip = _resolve_ocr_render_scale(
             Page(),
             requested_scale=2.0,
             max_pixels=4_000_000,
@@ -187,8 +187,31 @@ class TestPDFParse:
         )
 
         assert capped is True
+        assert skip is False
         assert scale < 2.0
         assert pixels <= 4_000_000
+
+    def test_resolve_ocr_render_scale_skips_oversized_pages(self):
+        # B5: a huge page that can't fit max_pixels even at min_scale must be
+        # skipped, not clamped up to min_scale (which would breach the budget).
+        from mantisfetch_docreader import _resolve_ocr_render_scale
+
+        class Rect:
+            width = 20000
+            height = 20000
+
+        class Page:
+            rect = Rect()
+
+        _, _, capped, skip = _resolve_ocr_render_scale(
+            Page(),
+            requested_scale=2.0,
+            max_pixels=4_000_000,
+            min_scale=1.25,
+        )
+
+        assert capped is True
+        assert skip is True
 
     def test_assess_contract_quality_detects_scan_only_pdf(self):
         from mantisfetch_docreader import _assess_contract_quality, _load_document_profile

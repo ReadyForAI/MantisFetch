@@ -21,11 +21,14 @@ Cross-module wiring:
 from __future__ import annotations
 
 import logging
+import os
 import posixpath
 import re
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+from fastapi import HTTPException
 
 from .models import DocumentProfile, EmbeddedImage, PageContent, ParsedDocument, Section
 from .ocr.tables import _extract_markdown_table_blocks
@@ -37,6 +40,43 @@ from .sectioning import (
 )
 
 logger = logging.getLogger("mantisfetch_docreader")
+
+# Decompression-bomb guard for DOCX (a zip): a few KB can inflate to GBs, and
+# both MarkItDown and the embedded-image extractor zf.read() entries whole.
+_MAX_DOCX_ENTRY_BYTES = int(os.environ.get("MANTISFETCH_MAX_DOCX_ENTRY_MB", "64")) * 1024 * 1024
+_MAX_DOCX_UNZIP_BYTES = int(os.environ.get("MANTISFETCH_MAX_DOCX_UNZIP_MB", "512")) * 1024 * 1024
+
+
+def _check_docx_unzip_budget(filepath: Path) -> None:
+    """Reject DOCX zip bombs before anything decompresses an entry.
+
+    ZipInfo.file_size comes from the central directory, so this reads no
+    compressed data. Runs as a pre-flight in parse_word, ahead of MarkItDown and
+    the image extractor.
+    """
+    if filepath.suffix.lower() != ".docx":
+        return
+    try:
+        with zipfile.ZipFile(filepath) as zf:
+            total = 0
+            for info in zf.infolist():
+                if info.file_size > _MAX_DOCX_ENTRY_BYTES:
+                    raise HTTPException(
+                        422,
+                        f"DOCX entry {info.filename!r} uncompresses to "
+                        f"{info.file_size} bytes, over the "
+                        f"{_MAX_DOCX_ENTRY_BYTES}-byte per-entry limit",
+                    )
+                total += info.file_size
+                if total > _MAX_DOCX_UNZIP_BYTES:
+                    raise HTTPException(
+                        422,
+                        "DOCX total uncompressed size exceeds the "
+                        f"{_MAX_DOCX_UNZIP_BYTES}-byte limit",
+                    )
+    except zipfile.BadZipFile:
+        return  # not a valid zip — let MarkItDown surface a clearer parse error
+
 
 WORD_XML_NS = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -147,6 +187,10 @@ def _count_word_embedded_image_references(filepath: Path) -> int:
     """Count embedded Word image references that would be processed for image OCR."""
     if filepath.suffix.lower() != ".docx":
         return 0
+    # /doc/parse calls this before parse_word when extract_images=true, and it
+    # zf.read()s document.xml — enforce the zip-bomb budget here too (outside the
+    # try below, which would otherwise swallow the 422).
+    _check_docx_unzip_budget(filepath)
     try:
         with zipfile.ZipFile(filepath) as zf:
             document_xml = zf.read("word/document.xml")
@@ -303,6 +347,7 @@ def parse_word(
     from . import _convert_to_markdown, _section_sid
 
     logger.info(f"Parsing Word: {filepath.name}")
+    _check_docx_unzip_budget(filepath)
     source_size_bytes = filepath.stat().st_size
     markdown_text = _convert_to_markdown(filepath)
     logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")

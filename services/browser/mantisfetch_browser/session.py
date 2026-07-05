@@ -112,11 +112,18 @@ class SessionManager:
 
     @staticmethod
     async def _close_session(sess: Session):
+        # Mark closed first so new operations reject, then wait for any in-flight
+        # goto/distill/act (which holds sess.lock) to finish before closing the
+        # context — otherwise it hits a random Playwright TargetClosed mid-op.
+        # Safe from deadlock: _close_session always runs outside the manager lock,
+        # and endpoints acquire the manager lock (via get) before sess.lock, never
+        # the reverse.
         sess.closed = True
-        try:
-            await sess.context.close()
-        except Exception:
-            pass
+        async with sess.lock:
+            try:
+                await sess.context.close()
+            except Exception:
+                pass
 
 
 sessions = SessionManager()

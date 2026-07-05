@@ -248,6 +248,7 @@ def parse_pdf(
             "max_llm_ocr_pixels": processing_policy.max_llm_ocr_pixels,
             "min_ocr_render_scale": processing_policy.min_ocr_render_scale,
             "pages_capped": [],
+            "pages_skipped": [],
         }
 
         for page in doc:
@@ -262,12 +263,34 @@ def parse_pdf(
                 requested_scale = processing_policy.local_ocr_render_scale
                 max_pixels = processing_policy.max_local_ocr_pixels
                 cache_key = f"local-{ocr_plan['local_backend']}"
-            scale, render_pixels, capped = _resolve_ocr_render_scale(
+            scale, render_pixels, capped, skip = _resolve_ocr_render_scale(
                 page,
                 requested_scale=requested_scale,
                 max_pixels=max_pixels,
                 min_scale=processing_policy.min_ocr_render_scale,
             )
+            if skip:
+                logger.warning(
+                    "Page %d/%d: skipping %s OCR — page too large to render within "
+                    "the %d-pixel budget even at min scale",
+                    page_num,
+                    total_pages,
+                    cache_key,
+                    max_pixels,
+                )
+                render_meta["pages_skipped"].append(
+                    {
+                        "page_num": page_num,
+                        "backend": cache_key,
+                        "requested_scale": requested_scale,
+                        "max_pixels": max_pixels,
+                    }
+                )
+                # Drop from the OCR sets so ocr_page_count / is_ocr don't report a
+                # page we never rendered as OCR'd.
+                local_ocr_set.discard(page_num)
+                llm_ocr_set.discard(page_num)
+                continue
             if capped:
                 logger.info(
                     "Page %d/%d: capped %s OCR render scale %.2f -> %.2f (%d px)",
