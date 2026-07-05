@@ -18,7 +18,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1398,27 +1397,40 @@ def _generate_deferred_summary(
             ),
             guard_stale_generation=True,
         )
-        # Impose a wall-clock bound WITHOUT the `with` block's shutdown(wait=True):
-        # on timeout, exiting the context manager would join the worker and block
-        # until the (串行 + rate-limited) LLM call actually finished, defeating the
-        # timeout. Instead we bound future.result and, on timeout, return promptly
-        # to write the status. The (non-cancellable) worker keeps the concurrency
-        # slot via its completion callback until it truly finishes, so a hung
-        # backend can't let deferred jobs pile up past DEFERRED_SUMMARY_MAX_CONCURRENT
-        # (A3, plus the report's "信号量语义要重新审视" note).
-        pool = ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(generate_summaries, parsed, concurrency, False)
+        # Bound the wall-clock wait with a daemon worker instead of future.result
+        # on a ThreadPoolExecutor: the executor's threads are non-daemon and its
+        # atexit join would let a hung LLM backend block process shutdown. The
+        # daemon worker owns releasing the concurrency slot when it truly finishes,
+        # so on timeout we return promptly to write the status while the slot stays
+        # held until the (non-cancellable) call ends — a hung backend can neither
+        # pile deferred jobs past DEFERRED_SUMMARY_MAX_CONCURRENT nor keep the
+        # process alive (A3 + the report's "信号量语义要重新审视" note).
+        summary_result: dict[str, Any] = {}
+        summary_done = threading.Event()
 
-        def _release_slot(_f: Future, pool: ThreadPoolExecutor = pool) -> None:
-            pool.shutdown(wait=False)
+        def _run_summary() -> None:
             try:
-                _deferred_summary_sem.release()
-            except ValueError:
-                pass
+                summary_result["value"] = generate_summaries(parsed, concurrency, False)
+            except Exception as exc:  # noqa: BLE001 - surfaced on the caller thread
+                summary_result["error"] = exc
+            finally:
+                summary_done.set()
+                try:
+                    _deferred_summary_sem.release()
+                except ValueError:
+                    pass
 
-        future.add_done_callback(_release_slot)
-        acquired = False  # slot ownership handed to the completion callback
-        digest_text, brief_text, _ = future.result(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC)
+        threading.Thread(
+            target=_run_summary, name=f"deferred-summary-{doc_id}", daemon=True
+        ).start()
+        acquired = False  # the worker thread now owns releasing the concurrency slot
+        if not summary_done.wait(timeout=DEFERRED_SUMMARY_TIMEOUT_SEC):
+            raise TimeoutError(f"summary timed out after {DEFERRED_SUMMARY_TIMEOUT_SEC}s")
+        if "error" in summary_result:
+            raise summary_result["error"]
+        if "value" not in summary_result:
+            raise RuntimeError("deferred summary worker produced no result")
+        digest_text, brief_text, _ = summary_result["value"]
         _set_summary_metadata(parsed, mode="defer", status="completed", attempts=attempts)
         write_output(
             doc_id,
