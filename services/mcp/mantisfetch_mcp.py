@@ -126,6 +126,10 @@ async def _doc_post(path: str, payload: dict[str, Any]) -> Any:
     return _unwrap(await _doc_client.post(path, json=payload))
 
 
+async def _doc_delete(path: str) -> Any:
+    return _unwrap(await _doc_client.delete(path))
+
+
 # ── injection boundary (untrusted web page text) ───────────────────────────────
 
 
@@ -602,6 +606,15 @@ async def doc_manifest(doc_id: str) -> Any:
     doc_not_found means it is not ingested yet (parse it). Prefer this over
     doc_digest for a presence check — a digest can lag when summaries are deferred."""
     return await _doc_get(f"/library/{doc_id}/manifest")
+
+
+@mcp.tool()
+async def doc_delete(doc_id: str) -> Any:
+    """Delete a document from the library by doc_id (removes its index entry +
+    parsed products). Idempotent: deleting an unknown doc_id succeeds (returns
+    deleted=false), so retries and cleanup passes are side-effect-free. Used by the
+    chat-attachment lifecycle (session archive/reset + retention GC)."""
+    return await _doc_delete(f"/library/{doc_id}")
 
 
 @mcp.tool()

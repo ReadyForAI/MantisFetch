@@ -20,6 +20,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import threading
 import weakref
 from datetime import UTC, datetime
@@ -174,6 +175,41 @@ def _load_doc_tags(docs_dir: Path, doc_id: str) -> list[str]:
                 return [str(tag) for tag in tags]
             return []
     return []
+
+
+def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
+    """Remove a document's doc-index entry and all on-disk products, serialized on
+    the shared doc-index lock so it can't race a concurrent capture/parse index
+    write. Idempotent: returns True if anything existed and was removed, False if
+    the doc_id was absent everywhere — callers treat both as success.
+
+    Products may live under any content-type dir or the legacy flat layout, so
+    every candidate location is removed. doc_id is validated by the caller
+    (`_validate_doc_id`) before this runs, so the joined paths can't escape docs_dir.
+    """
+    removed = False
+    with _doc_index_lock:
+        index_path = docs_dir / "doc-index.json"
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                index = None
+            if isinstance(index, dict) and isinstance(index.get("documents"), list):
+                kept = [d for d in index["documents"] if d.get("id") != doc_id]
+                if len(kept) != len(index["documents"]):
+                    index["documents"] = kept
+                    index["version"] = 2
+                    index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _write_json(index_path, index)
+                    removed = True
+        product_dirs = [_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS]
+        product_dirs.append(docs_dir / doc_id)  # legacy flat layout
+        for candidate in product_dirs:
+            if candidate.exists():
+                shutil.rmtree(candidate, ignore_errors=True)
+                removed = True
+    return removed
 
 
 # ═══════════════════════════════════════════

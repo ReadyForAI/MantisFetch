@@ -466,6 +466,9 @@ from .storage import (
     _DOC_ID_RE as _DOC_ID_RE,
 )
 from .storage import (
+    _delete_doc as _delete_doc,
+)
+from .storage import (
     _doc_content_type as _doc_content_type,
 )
 from .storage import (
@@ -3499,6 +3502,20 @@ async def get_full(doc_id: str):
     if not p.exists():
         raise HTTPException(404, t("full_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
+
+
+@app.delete("/library/{doc_id}")
+async def delete_document(doc_id: str):
+    """Delete a document from the library by doc_id: removes its doc-index entry
+    and all on-disk products, atomically under the shared index lock.
+
+    Idempotent — deleting a doc_id that isn't in the library succeeds (200,
+    deleted=false) rather than 404, so a caller's retries and periodic GC sweeps
+    are side-effect-free (a doc already gone stays a success). Drives the chat
+    attachment lifecycle (session archive/reset delete + retention sweep)."""
+    _validate_doc_id(doc_id)
+    removed = _delete_doc(_get_docs_dir(), doc_id)
+    return {"doc_id": doc_id, "deleted": removed}
 
 
 @app.get("/library/{doc_id}/section/{sid}")

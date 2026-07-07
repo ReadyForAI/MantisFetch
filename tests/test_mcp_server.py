@@ -23,7 +23,7 @@ EXPECTED_TOOLS = {
     "web_scroll",
     "web_navigate",
     "web_session_close",
-    # doc (13)
+    # doc (14)
     "doc_parse",
     "doc_digest",
     "doc_brief",
@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
     "doc_table",
     "doc_chunks",
     "doc_manifest",
+    "doc_delete",
     "doc_summary",
 }
 
@@ -205,6 +206,15 @@ def test_doc_sections_batch_delegates(monkeypatch) -> None:
     assert args[0] == "/library/DOC-1/sections/batch"
     assert args[1] == {"sids": ["s1", "s9"]}
     assert out["missing"] == ["s9"]
+
+
+def test_doc_delete_delegates(monkeypatch) -> None:
+    fake = {"doc_id": "F-abc", "deleted": True}
+    monkeypatch.setattr(mm, "_doc_delete", AsyncMock(return_value=fake))
+    out = asyncio.run(mm.doc_delete("F-abc"))
+    args, _ = mm._doc_delete.call_args
+    assert args[0] == "/library/F-abc"
+    assert out == fake
 
 
 def test_unwrap_raises_tool_error_on_4xx() -> None:
