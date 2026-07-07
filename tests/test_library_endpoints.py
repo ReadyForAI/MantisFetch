@@ -1261,3 +1261,143 @@ class TestParseReplaceProtection:
                         "Early OCR check 422'd before clamping max_images — "
                         f"Codex P2 regression. Body: {resp.text}"
                     )
+
+
+class TestLibraryDelete:
+    """IRP 20260707-chat-attachment-library-gc D2: DELETE /library/{doc_id} is
+    atomic (index entry + products) and idempotent (unknown id -> success)."""
+
+    def test_delete_removes_entry_and_products_then_idempotent(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp)
+            doc_dir = _setup_doc(docs)
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs):
+                resp = client.delete("/doc/library/DOC-001")
+                assert resp.status_code == 200
+                assert resp.json() == {"doc_id": "DOC-001", "deleted": True}
+                # products removed
+                assert not doc_dir.exists()
+                # index entry removed
+                index = json.loads((docs / "doc-index.json").read_text(encoding="utf-8"))
+                assert all(d["id"] != "DOC-001" for d in index["documents"])
+                # tier read now 404
+                assert client.get("/doc/library/DOC-001/digest").status_code == 404
+                # second delete is idempotent success (deleted=false)
+                resp2 = client.delete("/doc/library/DOC-001")
+                assert resp2.status_code == 200
+                assert resp2.json() == {"doc_id": "DOC-001", "deleted": False}
+
+    def test_delete_unknown_doc_id_is_idempotent_success(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.delete("/doc/library/DOC-999")
+        assert resp.status_code == 200
+        assert resp.json() == {"doc_id": "DOC-999", "deleted": False}
+
+    def test_delete_rejects_invalid_doc_id(self, client: TestClient):
+        # ABCDEF has no digit -> fails _DOC_ID_RE -> 400 (path-traversal guard).
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.delete("/doc/library/ABCDEF")
+        assert resp.status_code == 400
+
+    def test_delete_under_content_type_dir(self, client: TestClient):
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp)
+            doc_dir = _setup_doc(docs, doc_id="DOC-777", content_type="Contract")
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=docs):
+                resp = client.delete("/doc/library/DOC-777")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] is True
+        assert not doc_dir.exists()
+
+    def test_delete_holds_per_doc_lock(self, client: TestClient, monkeypatch):
+        # Regression guard: the delete must run under the per-doc_id parse lock so
+        # it can't race a concurrent same-doc /doc/parse (a parse writes its product
+        # dir before its index entry).
+        import mantisfetch_docreader as md
+
+        seen = []
+        real = md._optional_doc_id_lock
+
+        def _spy(doc_id):
+            seen.append(doc_id)
+            return real(doc_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))
+            monkeypatch.setattr(md, "_optional_doc_id_lock", _spy)
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.delete("/doc/library/DOC-001")
+        assert resp.status_code == 200
+        assert "DOC-001" in seen
+
+    def test_delete_removes_migrated_storage_path(self, tmp_path):
+        # A doc whose index storage_path resolves outside the current content-type
+        # dirs (migrated/legacy library) must still have its products removed, not
+        # just the four known layouts.
+        import mantisfetch_docreader.storage as st
+
+        migrated = tmp_path / "Archive" / "DOC-500"
+        migrated.mkdir(parents=True)
+        (migrated / "manifest.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "doc-index.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "documents": [
+                        {"id": "DOC-500", "storage_path": "Archive/DOC-500", "content_type": "General"}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert st._delete_doc(tmp_path, "DOC-500") is True
+        assert not migrated.exists()
+        index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
+        assert all(d["id"] != "DOC-500" for d in index["documents"])
+
+    def test_delete_ignores_dangerous_indexed_storage_path(self, tmp_path):
+        # A malformed/stale storage_path (here a whole content-type dir) must NOT be
+        # rmtree'd — only the doc's own …/{doc_id} product dir. Sibling docs and the
+        # content-type dir itself must survive.
+        import mantisfetch_docreader.storage as st
+
+        survivor = tmp_path / "General" / "DOC-OTHER"
+        survivor.mkdir(parents=True)
+        (survivor / "manifest.json").write_text("{}", encoding="utf-8")
+        own = tmp_path / "General" / "DOC-500"
+        own.mkdir(parents=True)
+        (own / "manifest.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "doc-index.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    # storage_path points at the whole General dir (dangerous)
+                    "documents": [{"id": "DOC-500", "storage_path": "General"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        st._delete_doc(tmp_path, "DOC-500")
+        # the content-type dir and the sibling doc survive
+        assert (tmp_path / "General").exists()
+        assert survivor.exists()
+        # DOC-500's own dir is still cleaned via the safe …/{doc_id} candidate
+        assert not own.exists()
+
+    def test_delete_raises_on_rmtree_failure_and_keeps_index(self, tmp_path, monkeypatch):
+        # A real filesystem failure must surface (not a silent deleted=true) and
+        # leave the index entry intact so the doc stays resolvable + retryable.
+        import mantisfetch_docreader.storage as st
+
+        _setup_doc(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk on fire")
+
+        monkeypatch.setattr(st.shutil, "rmtree", _boom)
+        with pytest.raises(OSError):
+            st._delete_doc(tmp_path, "DOC-001")
+        index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
+        assert any(d["id"] == "DOC-001" for d in index["documents"])

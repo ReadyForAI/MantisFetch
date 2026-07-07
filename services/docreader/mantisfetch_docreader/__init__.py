@@ -466,6 +466,9 @@ from .storage import (
     _DOC_ID_RE as _DOC_ID_RE,
 )
 from .storage import (
+    _delete_doc as _delete_doc,
+)
+from .storage import (
     _doc_content_type as _doc_content_type,
 )
 from .storage import (
@@ -1043,7 +1046,19 @@ def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
     now carries a different generation token; any write here (success, running, or
     failed placeholder) would roll the doc back to the stale parse. Detect that and
     skip. Must run before any disk mutation (e.g. _reset_generated_output_dirs).
+
+    Also skip when the manifest is gone: every guarded write is a deferred-summary
+    update of a doc whose parse already wrote the manifest synchronously (see the
+    un-guarded write_output_extract_only before the deferred thread is spawned), so
+    a missing manifest here means the doc was deleted (DELETE /library/{doc_id})
+    mid-flight — writing would resurrect it after the delete reported success. A
+    manifest that exists but carries no generation token (legacy) is not a deletion.
     """
+    if not (doc_dir / "manifest.json").exists():
+        logger.warning(
+            "Skipping deferred write for %s: doc was deleted while its summary ran", doc_id
+        )
+        return True
     existing = _manifest_generation(doc_dir)
     if existing is not None and existing != generation:
         logger.warning(
@@ -3499,6 +3514,25 @@ async def get_full(doc_id: str):
     if not p.exists():
         raise HTTPException(404, t("full_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
+
+
+@app.delete("/library/{doc_id}")
+async def delete_document(doc_id: str):
+    """Delete a document from the library by doc_id: removes its doc-index entry
+    and all on-disk products, atomically under the shared index lock.
+
+    Idempotent — deleting a doc_id that isn't in the library succeeds (200,
+    deleted=false) rather than 404, so a caller's retries and periodic GC sweeps
+    are side-effect-free (a doc already gone stays a success). Drives the chat
+    attachment lifecycle (session archive/reset delete + retention sweep)."""
+    _validate_doc_id(doc_id)
+    # Hold the per-doc_id parse lock so a delete can't race a concurrent same-doc
+    # /doc/parse: parse writes its product dir under this lock but its index entry
+    # only at the end, so a delete holding only _doc_index_lock could rmtree the
+    # just-written dir and leave the index pointing at missing artifacts.
+    async with _optional_doc_id_lock(doc_id):
+        removed = _delete_doc(_get_docs_dir(), doc_id)
+    return {"doc_id": doc_id, "deleted": removed}
 
 
 @app.get("/library/{doc_id}/section/{sid}")

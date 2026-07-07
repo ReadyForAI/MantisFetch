@@ -20,6 +20,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import threading
 import weakref
 from datetime import UTC, datetime
@@ -174,6 +175,61 @@ def _load_doc_tags(docs_dir: Path, doc_id: str) -> list[str]:
                 return [str(tag) for tag in tags]
             return []
     return []
+
+
+def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
+    """Remove a document's doc-index entry and all on-disk products, serialized on
+    the shared doc-index lock so it can't race a concurrent capture/parse index
+    write. Idempotent: returns True if anything existed and was removed, False if
+    the doc_id was absent everywhere — callers treat both as success.
+
+    Products are removed *before* the index entry, so a filesystem failure leaves
+    the entry intact (the doc stays resolvable) and surfaces as a raised error the
+    caller can retry — never a dangling index pointing at missing artifacts, and
+    never a false "deleted" while products remain on disk. The removal set is the
+    index entry's own resolved storage_path (covers migrated/legacy layouts where
+    it isn't one of the current content-type dirs) plus every known content-type
+    dir and the legacy flat path. rmtree is allowed to raise on a real error
+    (permission/IO); ignoring it would report success while leaking products.
+    doc_id is validated by the caller (`_validate_doc_id`), so joins can't escape.
+    """
+    with _doc_index_lock:
+        entry = _find_doc_index_entry(docs_dir, doc_id)
+        product_dirs: list[Path] = []
+        if entry is not None:
+            resolved = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
+            # Only trust the indexed path if it actually names THIS doc's product
+            # dir (…/{doc_id}). A malformed/stale storage_path like "General" or "."
+            # stays inside docs_dir but resolves to a whole content-type dir or the
+            # docs root — rmtree'ing it would wipe unrelated documents. The known
+            # layout candidates below are built as …/{doc_id}, so they're already safe.
+            if resolved is not None and resolved.name == doc_id:
+                product_dirs.append(resolved)
+        product_dirs.extend(_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS)
+        product_dirs.append(docs_dir / doc_id)  # legacy flat layout
+
+        removed = False
+        for candidate in product_dirs:
+            if candidate.exists():
+                shutil.rmtree(candidate)  # raise on real failure -> caller retries
+                removed = True
+
+        # Drop the index entry only after products are gone.
+        index_path = docs_dir / "doc-index.json"
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                index = None
+            if isinstance(index, dict) and isinstance(index.get("documents"), list):
+                kept = [d for d in index["documents"] if d.get("id") != doc_id]
+                if len(kept) != len(index["documents"]):
+                    index["documents"] = kept
+                    index["version"] = 2
+                    index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _write_json(index_path, index)
+                    removed = True
+        return removed
 
 
 # ═══════════════════════════════════════════
