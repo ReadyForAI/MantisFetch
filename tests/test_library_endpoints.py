@@ -1310,3 +1310,24 @@ class TestLibraryDelete:
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
         assert not doc_dir.exists()
+
+    def test_delete_holds_per_doc_lock(self, client: TestClient, monkeypatch):
+        # Regression guard: the delete must run under the per-doc_id parse lock so
+        # it can't race a concurrent same-doc /doc/parse (a parse writes its product
+        # dir before its index entry).
+        import mantisfetch_docreader as md
+
+        seen = []
+        real = md._optional_doc_id_lock
+
+        def _spy(doc_id):
+            seen.append(doc_id)
+            return real(doc_id)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _setup_doc(Path(tmp))
+            monkeypatch.setattr(md, "_optional_doc_id_lock", _spy)
+            with patch("mantisfetch_docreader._get_docs_dir", return_value=Path(tmp)):
+                resp = client.delete("/doc/library/DOC-001")
+        assert resp.status_code == 200
+        assert "DOC-001" in seen

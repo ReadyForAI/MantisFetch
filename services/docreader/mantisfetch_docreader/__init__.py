@@ -3514,7 +3514,12 @@ async def delete_document(doc_id: str):
     are side-effect-free (a doc already gone stays a success). Drives the chat
     attachment lifecycle (session archive/reset delete + retention sweep)."""
     _validate_doc_id(doc_id)
-    removed = _delete_doc(_get_docs_dir(), doc_id)
+    # Hold the per-doc_id parse lock so a delete can't race a concurrent same-doc
+    # /doc/parse: parse writes its product dir under this lock but its index entry
+    # only at the end, so a delete holding only _doc_index_lock could rmtree the
+    # just-written dir and leave the index pointing at missing artifacts.
+    async with _optional_doc_id_lock(doc_id):
+        removed = _delete_doc(_get_docs_dir(), doc_id)
     return {"doc_id": doc_id, "deleted": removed}
 
 
