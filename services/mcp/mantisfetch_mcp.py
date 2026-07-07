@@ -228,12 +228,14 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
     rel = Path(rel_path)
     if rel.is_absolute():
         raise ToolError("rel_path must be relative to the allowed doc root, not absolute")
+    inside_root = False
     for root in roots:
         candidate = (root / rel).resolve(strict=False)
         try:
             candidate.relative_to(root)
         except ValueError:
             continue  # escapes this root — try the next
+        inside_root = True
         if candidate.is_file():
             # Reject oversized files by stat() *before* reading, so an allowed but
             # huge resource file can't spike memory ahead of the docreader's own
@@ -244,7 +246,22 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
                     f"document too large: {size} bytes (max {_doc_mod.MAX_UPLOAD_BYTES})"
                 )
             return candidate.name, candidate.read_bytes()
-    raise ToolError(f"rel_path not found within an allowed doc root: {rel_path!r}")
+    # Split "resolved inside an allowed root but the file is absent" from "escaped
+    # every root". The former is the expected shape when a chat attachment has
+    # passed its staging TTL between upload and the read — the caller should ask
+    # the user to re-upload, NOT retry the same rel_path; the latter is a
+    # containment (path-fence) rejection. Keeping the two distinguishable lets the
+    # agent act correctly instead of guessing what "not found" meant.
+    if inside_root:
+        raise ToolError(
+            f"attachment not found at rel_path {rel_path!r}: no such file under the "
+            "allowed doc root (a chat attachment may have passed its staging TTL — "
+            "ask the user to re-upload it)"
+        )
+    raise ToolError(
+        f"rel_path {rel_path!r} resolves outside every allowed doc root "
+        "(rejected by the path fence)"
+    )
 
 
 # NOTE: a remote `url` document source (IRP ① option (b)) is intentionally NOT
@@ -463,7 +480,15 @@ async def doc_parse(
     library; returns doc_id + structure. Provide exactly one source:
     - rel_path: a path relative to the configured allowlist root (shared/resource)
     - content_b64: small inline bytes (with filename for the extension).
-    (A remote `url` source is a planned follow-up — see the note above.)"""
+    (A remote `url` source is a planned follow-up — see the note above.)
+
+    Chat attachments: when a message references one as
+    `[附件 doc: chat-attachment/... (doc_id=X)]`, probe with doc_manifest(X) FIRST
+    (the ingest-existence check) and only call doc_parse(rel_path=..., doc_id=X)
+    when that misses. A 409 "already exists" from this call means it is already in
+    the library — stop and read it by doc_id; do NOT pass replace= or mint a new
+    id. A "passed its staging TTL" error means the attachment expired: ask the user
+    to re-upload."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
@@ -500,13 +525,17 @@ async def doc_parse(
 
 @mcp.tool()
 async def doc_digest(doc_id: str) -> Any:
-    """Digest tier (~200 tokens): the cheapest overview of a parsed document."""
+    """Digest tier (~200 tokens): the cheapest overview of a parsed document.
+    A 404 digest_not_found can mean the summary is still being generated (deferred),
+    not that the doc is absent — confirm with doc_manifest before re-parsing."""
     return await _doc_get(f"/library/{doc_id}/digest")
 
 
 @mcp.tool()
 async def doc_brief(doc_id: str) -> Any:
-    """Brief tier (~1.5k tokens): section headings + snippets."""
+    """Brief tier (~1.5k tokens): section headings + snippets.
+    A 404 may mean the summary is still generating (deferred), not "not ingested" —
+    check doc_manifest before re-parsing."""
     return await _doc_get(f"/library/{doc_id}/brief")
 
 
@@ -567,7 +596,11 @@ async def doc_chunks(doc_id: str, include_text: bool = False) -> Any:
 
 @mcp.tool()
 async def doc_manifest(doc_id: str) -> Any:
-    """Return the document's provenance manifest (source, hash, timestamps)."""
+    """Return the document's provenance manifest (source, hash, timestamps).
+    Also the ingest-existence probe: a 200 means the doc is in the library (the
+    manifest is written the moment parse completes, before any summary), a 404
+    doc_not_found means it is not ingested yet (parse it). Prefer this over
+    doc_digest for a presence check — a digest can lag when summaries are deferred."""
     return await _doc_get(f"/library/{doc_id}/manifest")
 
 
