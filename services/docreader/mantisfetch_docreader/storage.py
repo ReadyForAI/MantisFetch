@@ -183,12 +183,33 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
     write. Idempotent: returns True if anything existed and was removed, False if
     the doc_id was absent everywhere — callers treat both as success.
 
-    Products may live under any content-type dir or the legacy flat layout, so
-    every candidate location is removed. doc_id is validated by the caller
-    (`_validate_doc_id`) before this runs, so the joined paths can't escape docs_dir.
+    Products are removed *before* the index entry, so a filesystem failure leaves
+    the entry intact (the doc stays resolvable) and surfaces as a raised error the
+    caller can retry — never a dangling index pointing at missing artifacts, and
+    never a false "deleted" while products remain on disk. The removal set is the
+    index entry's own resolved storage_path (covers migrated/legacy layouts where
+    it isn't one of the current content-type dirs) plus every known content-type
+    dir and the legacy flat path. rmtree is allowed to raise on a real error
+    (permission/IO); ignoring it would report success while leaking products.
+    doc_id is validated by the caller (`_validate_doc_id`), so joins can't escape.
     """
-    removed = False
     with _doc_index_lock:
+        entry = _find_doc_index_entry(docs_dir, doc_id)
+        product_dirs: list[Path] = []
+        if entry is not None:
+            resolved = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
+            if resolved is not None:
+                product_dirs.append(resolved)
+        product_dirs.extend(_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS)
+        product_dirs.append(docs_dir / doc_id)  # legacy flat layout
+
+        removed = False
+        for candidate in product_dirs:
+            if candidate.exists():
+                shutil.rmtree(candidate)  # raise on real failure -> caller retries
+                removed = True
+
+        # Drop the index entry only after products are gone.
         index_path = docs_dir / "doc-index.json"
         if index_path.exists():
             try:
@@ -203,13 +224,7 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
                     index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                     _write_json(index_path, index)
                     removed = True
-        product_dirs = [_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS]
-        product_dirs.append(docs_dir / doc_id)  # legacy flat layout
-        for candidate in product_dirs:
-            if candidate.exists():
-                shutil.rmtree(candidate, ignore_errors=True)
-                removed = True
-    return removed
+        return removed
 
 
 # ═══════════════════════════════════════════

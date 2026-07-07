@@ -1331,3 +1331,44 @@ class TestLibraryDelete:
                 resp = client.delete("/doc/library/DOC-001")
         assert resp.status_code == 200
         assert "DOC-001" in seen
+
+    def test_delete_removes_migrated_storage_path(self, tmp_path):
+        # A doc whose index storage_path resolves outside the current content-type
+        # dirs (migrated/legacy library) must still have its products removed, not
+        # just the four known layouts.
+        import mantisfetch_docreader.storage as st
+
+        migrated = tmp_path / "Archive" / "DOC-500"
+        migrated.mkdir(parents=True)
+        (migrated / "manifest.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "doc-index.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "documents": [
+                        {"id": "DOC-500", "storage_path": "Archive/DOC-500", "content_type": "General"}
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert st._delete_doc(tmp_path, "DOC-500") is True
+        assert not migrated.exists()
+        index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
+        assert all(d["id"] != "DOC-500" for d in index["documents"])
+
+    def test_delete_raises_on_rmtree_failure_and_keeps_index(self, tmp_path, monkeypatch):
+        # A real filesystem failure must surface (not a silent deleted=true) and
+        # leave the index entry intact so the doc stays resolvable + retryable.
+        import mantisfetch_docreader.storage as st
+
+        _setup_doc(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("disk on fire")
+
+        monkeypatch.setattr(st.shutil, "rmtree", _boom)
+        with pytest.raises(OSError):
+            st._delete_doc(tmp_path, "DOC-001")
+        index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
+        assert any(d["id"] == "DOC-001" for d in index["documents"])
