@@ -2570,8 +2570,8 @@ async def api_parse_doc(
     if will_replace and not replace:
         raise HTTPException(
             409,
-            f"doc_id '{doc_id}' already exists. "
-            f"Pass replace=true to overwrite, or omit doc_id to get a fresh one.",
+            f"doc_id '{doc_id}' already exists in the library — read it directly by "
+            f"doc_id (doc_manifest / doc_digest). Pass replace=true only to overwrite.",
         )
     dedup_status = "replaced" if will_replace else "miss"
 
@@ -2680,8 +2680,9 @@ async def api_parse_doc(
                 if exists_now and not replace:
                     raise HTTPException(
                         409,
-                        f"doc_id '{doc_id}' already exists. "
-                        f"Pass replace=true to overwrite, or omit doc_id to get a fresh one.",
+                        f"doc_id '{doc_id}' already exists in the library — read it "
+                        f"directly by doc_id (doc_manifest / doc_digest). Pass "
+                        f"replace=true only to overwrite.",
                     )
                 if exists_now and not will_replace:
                     will_replace = True

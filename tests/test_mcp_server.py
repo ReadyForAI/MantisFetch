@@ -14,12 +14,29 @@ import pytest
 
 EXPECTED_TOOLS = {
     # web (9)
-    "web_capture", "web_session_open", "web_goto", "web_distill", "web_read_sections",
-    "web_act", "web_scroll", "web_navigate", "web_session_close",
+    "web_capture",
+    "web_session_open",
+    "web_goto",
+    "web_distill",
+    "web_read_sections",
+    "web_act",
+    "web_scroll",
+    "web_navigate",
+    "web_session_close",
     # doc (13)
-    "doc_parse", "doc_digest", "doc_brief", "doc_sections", "doc_section",
-    "doc_sections_batch", "doc_full", "doc_search", "doc_search_sections", "doc_table",
-    "doc_chunks", "doc_manifest", "doc_summary",
+    "doc_parse",
+    "doc_digest",
+    "doc_brief",
+    "doc_sections",
+    "doc_section",
+    "doc_sections_batch",
+    "doc_full",
+    "doc_search",
+    "doc_search_sections",
+    "doc_table",
+    "doc_chunks",
+    "doc_manifest",
+    "doc_summary",
 }
 
 
@@ -123,6 +140,20 @@ def test_resolve_local_doc_disabled_without_root(monkeypatch) -> None:
         mm._resolve_local_doc("a.pdf")
 
 
+def test_resolve_local_doc_missing_inside_root_distinguishable(tmp_path, monkeypatch) -> None:
+    # A4②: a rel_path that resolves inside the allowed root but has no file (e.g. a
+    # chat attachment past its staging TTL) must be distinguishable from a path-fence
+    # rejection, so the agent re-uploads rather than retrying or treating it as a breach.
+    root = tmp_path / "resource"
+    root.mkdir()
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    with pytest.raises(mm.ToolError, match="staging TTL") as missing:
+        mm._resolve_local_doc("chat-attachment/F-abc123_gone.pdf")
+    with pytest.raises(mm.ToolError, match="path fence") as escaped:
+        mm._resolve_local_doc("../secret.txt")
+    assert str(missing.value) != str(escaped.value)
+
+
 # ── doc_parse source validation ────────────────────────────────────────────────
 
 
@@ -198,7 +229,8 @@ def _drive_gate(client_addr, headers=None):
 
     gate = mm._McpAuthGate(inner)
     scope = {
-        "type": "http", "client": client_addr,
+        "type": "http",
+        "client": client_addr,
         "headers": [(k.encode(), v.encode()) for k, v in (headers or {}).items()],
     }
     sent = []
