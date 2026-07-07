@@ -1357,6 +1357,35 @@ class TestLibraryDelete:
         index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
         assert all(d["id"] != "DOC-500" for d in index["documents"])
 
+    def test_delete_ignores_dangerous_indexed_storage_path(self, tmp_path):
+        # A malformed/stale storage_path (here a whole content-type dir) must NOT be
+        # rmtree'd — only the doc's own …/{doc_id} product dir. Sibling docs and the
+        # content-type dir itself must survive.
+        import mantisfetch_docreader.storage as st
+
+        survivor = tmp_path / "General" / "DOC-OTHER"
+        survivor.mkdir(parents=True)
+        (survivor / "manifest.json").write_text("{}", encoding="utf-8")
+        own = tmp_path / "General" / "DOC-500"
+        own.mkdir(parents=True)
+        (own / "manifest.json").write_text("{}", encoding="utf-8")
+        (tmp_path / "doc-index.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    # storage_path points at the whole General dir (dangerous)
+                    "documents": [{"id": "DOC-500", "storage_path": "General"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        st._delete_doc(tmp_path, "DOC-500")
+        # the content-type dir and the sibling doc survive
+        assert (tmp_path / "General").exists()
+        assert survivor.exists()
+        # DOC-500's own dir is still cleaned via the safe …/{doc_id} candidate
+        assert not own.exists()
+
     def test_delete_raises_on_rmtree_failure_and_keeps_index(self, tmp_path, monkeypatch):
         # A real filesystem failure must surface (not a silent deleted=true) and
         # leave the index entry intact so the doc stays resolvable + retryable.

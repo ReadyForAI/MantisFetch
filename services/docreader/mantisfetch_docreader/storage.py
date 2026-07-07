@@ -198,7 +198,12 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
         product_dirs: list[Path] = []
         if entry is not None:
             resolved = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
-            if resolved is not None:
+            # Only trust the indexed path if it actually names THIS doc's product
+            # dir (…/{doc_id}). A malformed/stale storage_path like "General" or "."
+            # stays inside docs_dir but resolves to a whole content-type dir or the
+            # docs root — rmtree'ing it would wipe unrelated documents. The known
+            # layout candidates below are built as …/{doc_id}, so they're already safe.
+            if resolved is not None and resolved.name == doc_id:
                 product_dirs.append(resolved)
         product_dirs.extend(_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS)
         product_dirs.append(docs_dir / doc_id)  # legacy flat layout
