@@ -117,7 +117,11 @@ def test_extract_only_guard_skips_stale_placeholder_write(tmp_path: Path) -> Non
     assert after == before, "stale failed placeholder overwrote a newer parse"
 
 
-def test_guard_allows_first_write_when_no_manifest(tmp_path: Path) -> None:
+def test_guard_skips_write_when_manifest_missing(tmp_path: Path) -> None:
+    # A guarded write is only ever a deferred-summary update of a doc whose parse
+    # already wrote the manifest synchronously; a missing manifest means the doc was
+    # deleted (DELETE /library/{doc_id}) mid-flight, so the guard must skip rather
+    # than resurrect it. Non-deferred first writes never set guard_stale_generation.
     from mantisfetch_docreader import write_output
 
     write_output(
@@ -129,7 +133,7 @@ def test_guard_allows_first_write_when_no_manifest(tmp_path: Path) -> None:
         source="upload",
         guard_stale_generation=True,
     )
-    assert (tmp_path / "DOC-G3" / "manifest.json").exists()
+    assert not (tmp_path / "DOC-G3" / "manifest.json").exists()
 
 
 # ---------------------------------------------------------------- A3 timeout
@@ -147,6 +151,11 @@ def test_deferred_summary_timeout_does_not_block_on_worker(
 
     monkeypatch.setattr(dr, "generate_summaries", slow)
     monkeypatch.setattr(dr, "DEFERRED_SUMMARY_TIMEOUT_SEC", 0.2)
+
+    # The parse writes the manifest synchronously before the deferred thread runs;
+    # mirror that so the thread's guarded writes update an existing doc (a missing
+    # manifest now means the doc was deleted, which the guard skips).
+    dr.write_output_extract_only("DOC-T1", _parsed("timeout content"), tmp_path, source="upload")
 
     t0 = time.monotonic()
     dr._generate_deferred_summary("DOC-T1", _parsed("timeout content"), tmp_path, 1, None, None, None)
@@ -177,6 +186,10 @@ def test_semaphore_held_until_worker_finishes_after_timeout(
         return ("d", "b", None)
 
     monkeypatch.setattr(dr, "generate_summaries", slow)
+
+    # Manifest written synchronously by the parse before the deferred thread (a
+    # missing manifest now means the doc was deleted, which the guard skips).
+    dr.write_output_extract_only("DOC-T2", _parsed("x"), tmp_path, source="upload")
 
     dr._generate_deferred_summary("DOC-T2", _parsed("x"), tmp_path, 1, None, None, None)
 

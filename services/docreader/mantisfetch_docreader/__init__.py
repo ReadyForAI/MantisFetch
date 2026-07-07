@@ -1046,7 +1046,19 @@ def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
     now carries a different generation token; any write here (success, running, or
     failed placeholder) would roll the doc back to the stale parse. Detect that and
     skip. Must run before any disk mutation (e.g. _reset_generated_output_dirs).
+
+    Also skip when the manifest is gone: every guarded write is a deferred-summary
+    update of a doc whose parse already wrote the manifest synchronously (see the
+    un-guarded write_output_extract_only before the deferred thread is spawned), so
+    a missing manifest here means the doc was deleted (DELETE /library/{doc_id})
+    mid-flight — writing would resurrect it after the delete reported success. A
+    manifest that exists but carries no generation token (legacy) is not a deletion.
     """
+    if not (doc_dir / "manifest.json").exists():
+        logger.warning(
+            "Skipping deferred write for %s: doc was deleted while its summary ran", doc_id
+        )
+        return True
     existing = _manifest_generation(doc_dir)
     if existing is not None and existing != generation:
         logger.warning(
