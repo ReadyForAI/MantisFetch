@@ -145,6 +145,15 @@ def test_resolve_rejects_dotdot(tmp_path: Path) -> None:
     assert md._resolve("../escape", tmp_path) is None
 
 
+def test_resolve_rejects_nul_byte(tmp_path: Path) -> None:
+    """An embedded NUL makes resolve() raise; it must be a miss, not a 500."""
+    assert md._resolve("a\x00b", tmp_path) is None
+
+
+def test_nul_byte_path_is_404(client: TestClient, root: Path) -> None:
+    assert client.get("/deliverables/%00").status_code == 404
+
+
 def test_resolve_hits_regular_file(tmp_path: Path) -> None:
     (tmp_path / "a").mkdir()
     f = tmp_path / "a" / "b.txt"

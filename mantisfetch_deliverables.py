@@ -80,7 +80,10 @@ def _resolve(rel_path: str, root: Path) -> Path | None:
     rel = Path(rel_path)
     if rel.is_absolute() or ".." in rel.parts:
         return None
-    candidate = (root / rel).resolve(strict=False)
+    try:
+        candidate = (root / rel).resolve(strict=False)
+    except (OSError, ValueError):
+        return None  # invalid path (e.g. an embedded NUL byte) → a uniform miss
     if not candidate.is_relative_to(root):
         return None
     if not candidate.is_file():
