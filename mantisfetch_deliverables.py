@@ -19,12 +19,34 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+# No docs/openapi routes: this is a byte face, not a browsable API. Their default
+# paths would also 200 while the fence is disabled (contradicting the unset → 404
+# contract) and shadow deliverables literally named ``docs`` / ``openapi.json``.
 deliverables_app = FastAPI(
     title="MantisFetch deliverables",
     description="Read-only deliverable byte endpoint.",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 _CHUNK = 64 * 1024
+
+# Content types safe to render inline (passive — the browser won't execute them).
+# Anything else requested inline is coerced to attachment so untrusted, agent-
+# generated deliverable HTML/SVG can never run as active same-origin content on
+# the loopback-open :9898 surface (where it could reach /web and /doc).
+_SAFE_INLINE_TYPES = frozenset(
+    {
+        "application/pdf",
+        "text/plain",
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+    }
+)
 
 
 def _fence_root() -> Path | None:
@@ -85,8 +107,10 @@ async def get_deliverable(
 ) -> StreamingResponse:
     """Stream one deliverable file's bytes from under the fence root.
 
-    ``disposition`` is ``attachment`` (default) or ``inline`` (browser-native PDF
-    preview). Streams in chunks — no whole-file read; Range is not served in v1.
+    ``disposition`` is ``attachment`` (default) or ``inline``; ``inline`` is
+    honored only for passive types (``_SAFE_INLINE_TYPES``) and otherwise coerced
+    to ``attachment``. Streams in chunks — no whole-file read; Range is not
+    served in v1.
     """
     root = _fence_root()
     if root is None:
@@ -105,6 +129,8 @@ async def get_deliverable(
             "MANTISFETCH_DELIVERABLES_MAX_MB or fetch the file out of band)",
         )
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if disposition == "inline" and media_type not in _SAFE_INLINE_TYPES:
+        disposition = "attachment"  # never serve active content as same-origin inline
     headers = {
         "Content-Length": str(size),
         "Content-Disposition": _content_disposition(disposition, target.name),

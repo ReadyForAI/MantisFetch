@@ -52,6 +52,38 @@ def test_invalid_disposition_422(client: TestClient, root: Path) -> None:
     assert resp.status_code == 422
 
 
+def test_inline_active_type_coerced_to_attachment(client: TestClient, root: Path) -> None:
+    """Untrusted HTML/SVG must never be served inline (active same-origin content)."""
+    (root / "evil.html").write_text("<script>fetch('/web/session/new')</script>", encoding="utf-8")
+    (root / "vector.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>", encoding="utf-8")
+    for name in ("evil.html", "vector.svg"):
+        resp = client.get(f"/deliverables/{name}?disposition=inline")
+        assert resp.status_code == 200
+        assert resp.headers["content-disposition"].startswith("attachment;"), name
+
+
+def test_inline_pdf_preserved(client: TestClient, root: Path) -> None:
+    """A passive type (PDF) keeps inline for browser-native preview."""
+    (root / "report.pdf").write_bytes(b"%PDF-1.4 minimal")
+    resp = client.get("/deliverables/report.pdf?disposition=inline")
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"].startswith("inline;")
+
+
+def test_docs_routes_disabled(client: TestClient, root: Path) -> None:
+    """The byte face exposes no docs/openapi routes; those paths are just misses."""
+    for path in ("docs", "redoc", "openapi.json"):
+        assert client.get(f"/deliverables/{path}").status_code == 404
+
+
+def test_reserved_name_is_a_transparent_deliverable(client: TestClient, root: Path) -> None:
+    """A deliverable literally named openapi.json is served, not shadowed by docs."""
+    (root / "openapi.json").write_text('{"real":"deliverable"}', encoding="utf-8")
+    resp = client.get("/deliverables/openapi.json")
+    assert resp.status_code == 200
+    assert resp.json() == {"real": "deliverable"}
+
+
 def test_unknown_extension_octet_stream(client: TestClient, root: Path) -> None:
     (root / "blob.unknownext").write_bytes(b"\x00\x01\x02")
     resp = client.get("/deliverables/blob.unknownext")
