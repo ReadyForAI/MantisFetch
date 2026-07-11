@@ -12,6 +12,7 @@ Bearer gate (loopback-open; token-gated off-host), the same credential as upload
 
 import mimetypes
 import os
+import stat
 import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
@@ -87,15 +88,21 @@ def _resolve(rel_path: str, root: Path) -> Path | None:
     return candidate
 
 
-def _iter_file(path: Path) -> Iterator[bytes]:
-    with path.open("rb") as fh:
+def _iter_fd(fd: int) -> Iterator[bytes]:
+    with os.fdopen(fd, "rb") as fh:
         while chunk := fh.read(_CHUNK):
             yield chunk
 
 
 def _content_disposition(disposition: str, filename: str) -> str:
-    """Build a Content-Disposition value with an ASCII fallback + RFC 5987 form."""
-    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace('"', "")
+    """Build a Content-Disposition value with an ASCII fallback + RFC 5987 form.
+
+    Control characters are stripped from the ASCII fallback so an agent-chosen
+    filename with CR/LF can't split or corrupt the response headers; the RFC 5987
+    ``filename*`` form percent-encodes them already.
+    """
+    ascii_name = filename.encode("ascii", "replace").decode("ascii")
+    ascii_name = "".join(ch for ch in ascii_name if ch.isprintable()).replace('"', "")
     quoted = urllib.parse.quote(filename)
     return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
 
@@ -120,20 +127,34 @@ async def get_deliverable(
     target = _resolve(rel_path, root)
     if target is None:
         raise HTTPException(404, "not found")
-    max_bytes = _max_bytes()
-    size = target.stat().st_size
-    if size > max_bytes:
-        raise HTTPException(
-            413,
-            f"deliverable too large: {size} bytes (max {max_bytes}; raise "
-            "MANTISFETCH_DELIVERABLES_MAX_MB or fetch the file out of band)",
-        )
-    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-    if disposition == "inline" and media_type not in _SAFE_INLINE_TYPES:
-        disposition = "attachment"  # never serve active content as same-origin inline
-    headers = {
-        "Content-Length": str(size),
-        "Content-Disposition": _content_disposition(disposition, target.name),
-        "X-Content-Type-Options": "nosniff",
-    }
-    return StreamingResponse(_iter_file(target), media_type=media_type, headers=headers)
+    # Open once with O_NOFOLLOW and validate through the descriptor, then stream
+    # from it. Closes the window where the checked path is swapped for an escaping
+    # symlink between _resolve() and the read, and makes the size cap authoritative
+    # for the exact bytes served. fd ownership passes to _iter_fd only on success.
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise HTTPException(404, "not found") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise HTTPException(404, "not found")
+        max_bytes = _max_bytes()
+        if st.st_size > max_bytes:
+            raise HTTPException(
+                413,
+                f"deliverable too large: {st.st_size} bytes (max {max_bytes}; raise "
+                "MANTISFETCH_DELIVERABLES_MAX_MB or fetch the file out of band)",
+            )
+        media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if disposition == "inline" and media_type not in _SAFE_INLINE_TYPES:
+            disposition = "attachment"  # never serve active content as same-origin inline
+        headers = {
+            "Content-Length": str(st.st_size),
+            "Content-Disposition": _content_disposition(disposition, target.name),
+            "X-Content-Type-Options": "nosniff",
+        }
+        return StreamingResponse(_iter_fd(fd), media_type=media_type, headers=headers)
+    except Exception:
+        os.close(fd)
+        raise

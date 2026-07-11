@@ -118,6 +118,15 @@ def test_symlink_escape_404(client: TestClient, root: Path) -> None:
     assert b"leaked" not in resp.content
 
 
+def test_infence_symlink_served(client: TestClient, root: Path) -> None:
+    """A symlink to an in-fence regular file still serves (no O_NOFOLLOW regression)."""
+    (root / "real.txt").write_text("real bytes", encoding="utf-8")
+    (root / "alias.txt").symlink_to(root / "real.txt")
+    resp = client.get("/deliverables/alias.txt")
+    assert resp.status_code == 200
+    assert resp.content == b"real bytes"
+
+
 def test_oversized_413(client: TestClient, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A file past the cap → 413 (a 0 MB cap makes any non-empty file too large)."""
     monkeypatch.setenv("MANTISFETCH_DELIVERABLES_MAX_MB", "0")
@@ -147,6 +156,14 @@ def test_fence_root_unset_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert md._fence_root() is None
     monkeypatch.setenv("MANTISFETCH_DELIVERABLES_ROOT", "   ")
     assert md._fence_root() is None
+
+
+def test_content_disposition_strips_control_chars() -> None:
+    """CR/LF (and quotes) must not reach the filename= fallback and split headers."""
+    cd = md._content_disposition("attachment", 'a\r\nb"c.txt')
+    assert "\r" not in cd and "\n" not in cd
+    assert 'filename="abc.txt"' in cd
+    assert "filename*=UTF-8''" in cd  # RFC 5987 form carries the real (encoded) name
 
 
 # ── auth wiring: the shared Bearer gate covers /deliverables ──────────────────
