@@ -6,6 +6,7 @@ awkward to express through URL encoding are unit-tested against ``_resolve``
 directly. Off-host auth wiring is checked with a non-loopback TestClient.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -156,6 +157,30 @@ def test_fence_root_unset_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert md._fence_root() is None
     monkeypatch.setenv("MANTISFETCH_DELIVERABLES_ROOT", "   ")
     assert md._fence_root() is None
+
+
+def test_open_within_serves_nested_regular_file(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "a" / "b").mkdir(parents=True)
+    (root / "a" / "b" / "c.txt").write_text("nested", encoding="utf-8")
+    fd = md._open_within(root, (root / "a" / "b" / "c.txt").resolve())
+    with os.fdopen(fd, "rb") as fh:
+        assert fh.read() == b"nested"
+
+
+def test_open_within_refuses_symlinked_parent(tmp_path: Path) -> None:
+    """A symlinked directory component (as if swapped in post-resolve) is refused."""
+    root = tmp_path / "root"
+    real = root / "real"
+    real.mkdir(parents=True)
+    (real / "f.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f.txt").write_text("leaked", encoding="utf-8")
+    (root / "sub").symlink_to(outside)  # 'sub' is a symlink dir below the root
+    # Walk the (attacker-shaped) path whose 'sub' component is a symlink → OSError.
+    with pytest.raises(OSError):
+        md._open_within(root, root / "sub" / "f.txt")
 
 
 def test_content_disposition_strips_control_chars() -> None:

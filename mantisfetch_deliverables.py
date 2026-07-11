@@ -88,6 +88,30 @@ def _resolve(rel_path: str, root: Path) -> Path | None:
     return candidate
 
 
+def _open_within(root: Path, target: Path) -> int:
+    """Open ``target`` for reading by descending from ``root`` one component at a
+    time, each with ``O_NOFOLLOW``, and return the file descriptor.
+
+    ``target`` must be ``root`` or a canonical path under it (a ``_resolve``
+    result). Walking component-by-component with no-follow means no path element
+    below the root can be a symlink — closing the race where a component checked by
+    ``_resolve`` is swapped for a symlink to outside the fence before the open,
+    which plain ``os.open(target)`` (or leaf-only ``O_NOFOLLOW``) would follow.
+    Raises ``OSError`` if any component is a symlink, is missing, or is not the
+    expected file/directory.
+    """
+    rel_parts = target.relative_to(root).parts
+    dir_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in rel_parts[:-1]:
+            nxt = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = nxt
+        return os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def _iter_fd(fd: int) -> Iterator[bytes]:
     with os.fdopen(fd, "rb") as fh:
         while chunk := fh.read(_CHUNK):
@@ -127,13 +151,13 @@ async def get_deliverable(
     target = _resolve(rel_path, root)
     if target is None:
         raise HTTPException(404, "not found")
-    # Open once with O_NOFOLLOW and validate through the descriptor, then stream
-    # from it. Closes the window where the checked path is swapped for an escaping
-    # symlink between _resolve() and the read, and makes the size cap authoritative
-    # for the exact bytes served. fd ownership passes to _iter_fd only on success.
+    # Open via a no-follow descriptor walk (race-free against symlink swaps at any
+    # component), validate through the descriptor, then stream from it. The size cap
+    # is authoritative for the exact bytes served; fd ownership passes to _iter_fd
+    # only on success.
     try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
+        fd = _open_within(root, target)
+    except (OSError, ValueError):
         raise HTTPException(404, "not found") from None
     try:
         st = os.fstat(fd)
