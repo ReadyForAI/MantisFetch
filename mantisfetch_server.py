@@ -11,6 +11,7 @@ Final API surface (single port 9898):
   POST /doc/parse                            — upload and parse document
   GET  /doc/library/search                   — search document library
   GET  /doc/library/{doc_id}/{digest,brief,full,sections,section/{sid},table/{tid},manifest}
+  GET  /deliverables/{rel_path}              — read-only deliverable byte face
 """
 
 import logging
@@ -23,6 +24,8 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+
+from mantisfetch_deliverables import deliverables_app
 
 logger = logging.getLogger("mantisfetch")
 
@@ -70,7 +73,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="MantisFetch",
-    version="1.3.0",
+    version="1.4.0",
     description="Open-source data collection and document parsing platform by ReadyForAI.",
     lifespan=lifespan,
 )
@@ -81,7 +84,7 @@ async def health() -> dict:
     """Return aggregated health status for all mounted services."""
     return {
         "ok": True,
-        "version": "1.3.0",
+        "version": "1.4.0",
         "services": {
             "browser": "mounted at /web",
             "docreader": "mounted at /doc",
@@ -90,8 +93,9 @@ async def health() -> dict:
 
 
 class _RestAuthGate:
-    """Pure-ASGI Bearer gate for the /web and /doc HTTP surface (SSE-safe — only
-    ever emits its own response on deny, otherwise passes through untouched).
+    """Pure-ASGI Bearer gate for the /web, /doc and /deliverables HTTP surface
+    (SSE-safe — only ever emits its own response on deny, otherwise passes through
+    untouched).
 
     The same browser-driving / doc-parsing capabilities the MCP gate locks down
     are reachable directly on /web/* and /doc/*; once the server binds 0.0.0.0
@@ -131,7 +135,7 @@ class _RestAuthGate:
         token = os.environ.get("MANTISFETCH_MCP_TOKEN")
         if not token:
             return 403, (
-                b'{"error":"forbidden: /web and /doc are loopback-only; '
+                b'{"error":"forbidden: this surface is loopback-only; '
                 b'set MANTISFETCH_MCP_TOKEN to allow non-loopback clients"}'
             )
         headers = dict(scope.get("headers") or [])
@@ -158,6 +162,11 @@ class _RestAuthGate:
 # directly, behind the REST Bearer gate (loopback-open; token-gated off-host).
 app.mount("/web", _RestAuthGate(browser_app))
 app.mount("/doc", _RestAuthGate(doc_app))
+
+# Read-only deliverable byte face (IRP 20260711): serves agent deliverables from
+# under MANTISFETCH_DELIVERABLES_ROOT for AULO's BFF to proxy. Same Bearer gate as
+# /web /doc; the fence is unrelated to the library (deliverables carry no doc_id).
+app.mount("/deliverables", _RestAuthGate(deliverables_app))
 
 # MCP server (streamable-HTTP) — a thin front-end exposing /web + /doc as Model
 # Context Protocol tools. Its session manager is started in the lifespan above.

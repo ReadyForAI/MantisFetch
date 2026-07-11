@@ -272,9 +272,11 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `LANG` | `en` | UI language (`en` or `zh`) |
 | `MANTISFETCH_TLS_CERTFILE` | — | TLS certificate path; set **with** `MANTISFETCH_TLS_KEYFILE` to serve HTTPS (setting only one is ignored) |
 | `MANTISFETCH_TLS_KEYFILE` | — | TLS private key path (paired with `MANTISFETCH_TLS_CERTFILE`) |
-| `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp`, `/web` and `/doc` surfaces; without it they are **loopback-only** (non-loopback callers get 403) |
+| `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp`, `/web`, `/doc` and `/deliverables` surfaces; without it they are **loopback-only** (non-loopback callers get 403) |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | Extra hosts/origins (comma-separated) for the MCP DNS-rebinding guard |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | Allowlist roots for the MCP `doc_parse` `rel_path` source; unset disables local-path parsing over MCP |
+| `MANTISFETCH_DELIVERABLES_ROOT` | — | Fence root for the read-only `GET /deliverables/{rel_path}` byte face; unset disables it (every request 404s). Must not overlap `MANTISFETCH_DOCS_DIR` or `MANTISFETCH_ALLOWED_DOC_ROOTS` |
+| `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | Size cap for a single deliverable download; larger files get 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |
 | `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | Reuse a prior `/web/capture` of the same URL + content_type made within this many hours instead of re-fetching; `0` disables (default). `force_refresh=true` always bypasses |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | Maximum concurrent section-summary LLM batches per document |
@@ -551,6 +553,8 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_MCP_TOKEN` | — | `/mcp` 接口的 bearer token；不设置则 `/mcp` 仅 loopback 可达 |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | MCP DNS-rebinding 防护的额外 host/origin（逗号分隔） |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | MCP `doc_parse` `rel_path` source 的 allowlist 根目录；不设置则禁用 MCP 上的本地路径解析 |
+| `MANTISFETCH_DELIVERABLES_ROOT` | — | 只读 `GET /deliverables/{rel_path}` 字节接口的围栏根目录；不设置则禁用（所有请求返回 404）。不得与 `MANTISFETCH_DOCS_DIR` 或 `MANTISFETCH_ALLOWED_DOC_ROOTS` 重叠 |
+| `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | 单个交付物下载的大小上限；超出返回 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | 文档目录命名策略：`counter` 保持 `DOC-xxx`；`source_filename` 基于上传文件名生成安全目录名 |
 | `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | 在这么多小时内对同一 URL + content_type 的 `/web/capture` 直接复用已有结果而不重抓；`0` 关闭（默认）。`force_refresh=true` 始终绕过 |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | 单文档 section 摘要的最大 LLM batch 并发数 |

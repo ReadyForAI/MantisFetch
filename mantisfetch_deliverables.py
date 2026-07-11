@@ -1,0 +1,113 @@
+"""Read-only deliverable byte endpoint (IRP 20260711-deliverable-preview-download).
+
+Serves agent deliverable files from under a configured fence root so AULO's BFF
+can proxy previews/downloads. This is the PC-standalone counterpart to the
+full-stack Harness ``GET /api/deliverables/*`` endpoint; both are byte faces only.
+The deliverable never enters the MantisFetch library/index (no doc_id, orthogonal
+to parse/GC). Read-only: no write or delete surface.
+
+Mounted at ``/deliverables`` on the unified :9898 app behind the shared REST
+Bearer gate (loopback-open; token-gated off-host), the same credential as upload.
+"""
+
+import mimetypes
+import os
+import urllib.parse
+from collections.abc import Iterator
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
+
+deliverables_app = FastAPI(
+    title="MantisFetch deliverables",
+    description="Read-only deliverable byte endpoint.",
+)
+
+_CHUNK = 64 * 1024
+
+
+def _fence_root() -> Path | None:
+    """The deliverable fence root, or ``None`` when unset/empty.
+
+    No default — an unconfigured root means the download face does not exist
+    (every request 404s, fail-closed). Deliberately distinct from
+    ``MANTISFETCH_DOCS_DIR`` (library storage) and ``MANTISFETCH_ALLOWED_DOC_ROOTS``
+    (the ``doc_parse`` fence); deployment must not point this root inside either.
+    """
+    raw = os.environ.get("MANTISFETCH_DELIVERABLES_ROOT", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve(strict=False)
+
+
+def _max_bytes() -> int:
+    return int(os.environ.get("MANTISFETCH_DELIVERABLES_MAX_MB", "200")) * 1024 * 1024
+
+
+def _resolve(rel_path: str, root: Path) -> Path | None:
+    """Resolve ``rel_path`` under ``root`` with containment, or ``None``.
+
+    Returns ``None`` (→ a uniform 404) for an absolute path, any ``..`` component,
+    an escape past the root after symlink resolution, or a target that is not a
+    regular file. The uniform miss is intentional: unlike the ingest protocol
+    (#166, which distinguishes TTL-expired from fenced), a public byte endpoint
+    must not leak which paths exist.
+    """
+    rel = Path(rel_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    candidate = (root / rel).resolve(strict=False)
+    if not candidate.is_relative_to(root):
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _iter_file(path: Path) -> Iterator[bytes]:
+    with path.open("rb") as fh:
+        while chunk := fh.read(_CHUNK):
+            yield chunk
+
+
+def _content_disposition(disposition: str, filename: str) -> str:
+    """Build a Content-Disposition value with an ASCII fallback + RFC 5987 form."""
+    ascii_name = filename.encode("ascii", "replace").decode("ascii").replace('"', "")
+    quoted = urllib.parse.quote(filename)
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
+
+
+@deliverables_app.get("/{rel_path:path}")
+async def get_deliverable(
+    rel_path: str,
+    disposition: str = Query("attachment"),
+) -> StreamingResponse:
+    """Stream one deliverable file's bytes from under the fence root.
+
+    ``disposition`` is ``attachment`` (default) or ``inline`` (browser-native PDF
+    preview). Streams in chunks — no whole-file read; Range is not served in v1.
+    """
+    root = _fence_root()
+    if root is None:
+        raise HTTPException(404, "not found")
+    if disposition not in ("inline", "attachment"):
+        raise HTTPException(422, "disposition must be 'inline' or 'attachment'")
+    target = _resolve(rel_path, root)
+    if target is None:
+        raise HTTPException(404, "not found")
+    max_bytes = _max_bytes()
+    size = target.stat().st_size
+    if size > max_bytes:
+        raise HTTPException(
+            413,
+            f"deliverable too large: {size} bytes (max {max_bytes}; raise "
+            "MANTISFETCH_DELIVERABLES_MAX_MB or fetch the file out of band)",
+        )
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    headers = {
+        "Content-Length": str(size),
+        "Content-Disposition": _content_disposition(disposition, target.name),
+        "X-Content-Type-Options": "nosniff",
+    }
+    return StreamingResponse(_iter_file(target), media_type=media_type, headers=headers)
