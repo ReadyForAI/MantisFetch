@@ -55,13 +55,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Ret
 # Install Python dependencies
 COPY requirements.txt requirements-ocr-linux-x86_64.txt requirements-ocr-arm64.txt ./
 COPY scripts/install_ocr_deps.sh ./scripts/install_ocr_deps.sh
+# Local-OCR variant switch:
+#   WITH_LOCAL_OCR=true  (default) — bundle the offline PaddleOCR stack
+#     (paddlepaddle / opencv / onnxruntime, ~1 GB uncompressed).
+#   WITH_LOCAL_OCR=false — skip it, for a ~1 GB smaller image. OCR then runs only
+#     through the configured LLM/vision provider; image_ocr_backend=auto falls back
+#     to it when the local worker is absent. The startup prewarm env is pinned to
+#     the same value so the slim image doesn't try (and log) a missing local worker.
+ARG WITH_LOCAL_OCR=true
+ENV MANTISFETCH_PREWARM_LOCAL_OCR=${WITH_LOCAL_OCR}
+LABEL com.readyforai.mantisfetch.local-ocr="${WITH_LOCAL_OCR}"
 # build-essential is needed only to compile C-extension wheels (e.g. stringzilla,
 # which no longer ships a prebuilt wheel) during pip install. Install it in this
 # same layer and purge it afterward so the compiler toolchain never ships in the
 # runtime image (keeps it slim + smaller attack surface).
 RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 build-essential \
     && pip install --no-cache-dir -r requirements.txt \
-    && sh ./scripts/install_ocr_deps.sh \
+    && if [ "$WITH_LOCAL_OCR" = "true" ]; then sh ./scripts/install_ocr_deps.sh; else echo "WITH_LOCAL_OCR=$WITH_LOCAL_OCR — skipping local OCR deps"; fi \
     && apt-get purge -y build-essential \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*

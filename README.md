@@ -66,6 +66,18 @@ python mantisfetch_server.py     # listens on port 9898
 
 The `docker-compose.yml` provides a single-service setup. By default, the document library is bind-mounted to the current user's `~/.mantisfetch/docs` directory on the host. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for container hardening, shared-volume ownership (SMB/NFS), and the single-process boundary.
 
+**Image variants (`WITH_LOCAL_OCR` build arg):** the offline PaddleOCR stack is ~1 GB of the image. Build with or without it:
+
+```bash
+# Full — bundled offline OCR (default)
+docker build -t readyforai/mantisfetch:latest .
+
+# Slim — ~1 GB smaller, no local OCR; OCR runs via the configured LLM provider
+docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
+```
+
+With `WITH_LOCAL_OCR=false`, `image_ocr_backend=auto` (the default) falls back to LLM/vision OCR, so **an LLM provider must be configured** for the slim image to OCR at all; an explicit `image_ocr_backend=local` request returns a failed status (no local worker). Startup prewarm is auto-disabled to match. Inspect a running image with `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>`.
+
 ```yaml
 # docker-compose.yml (excerpt)
 services:
@@ -345,6 +357,18 @@ python mantisfetch_server.py     # 监听 9898 端口
 ### Docker 配置
 
 `docker-compose.yml` 提供单服务部署方案。默认会把文档库 bind mount 到宿主机当前用户的 `~/.mantisfetch/docs` 目录。
+
+**镜像变体（`WITH_LOCAL_OCR` 构建参数）：** 离线 PaddleOCR 栈约占镜像 1 GB。可选择带或不带：
+
+```bash
+# 完整版 —— 内置离线 OCR（默认）
+docker build -t readyforai/mantisfetch:latest .
+
+# 精简版 —— 体积小约 1 GB，不含本地 OCR；OCR 走配置的 LLM provider
+docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
+```
+
+设 `WITH_LOCAL_OCR=false` 时，`image_ocr_backend=auto`（默认值）会 fallback 到 LLM/vision OCR，因此精简版**必须配置 LLM provider** 才能做 OCR；若显式请求 `image_ocr_backend=local` 则返回失败状态（无本地 worker）。启动期 prewarm 会随之自动关闭。用 `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>` 查看某镜像是哪种变体。
 
 ```yaml
 # docker-compose.yml（节选）
