@@ -24,6 +24,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from .models import DocumentProfile, QualityPolicy
+from .ocr.engines import LOCAL_OCR_ENABLED
 
 
 def _parse_page_range(spec: str, total_pages: int) -> set[int]:
@@ -260,6 +261,14 @@ def _plan_pdf_ocr(
         proofread = True
     if explicit_ocr_pages or force_ocr:
         proofread = True
+
+    if not LOCAL_OCR_ENABLED and local_ocr_pages:
+        # No local OCR worker in this build/config — OCR these pages via the LLM
+        # provider instead of the local path (which would emit failed markers with
+        # no fallback). region_llm is moot without local layout to refine.
+        llm_ocr_pages |= local_ocr_pages
+        local_ocr_pages = set()
+        region_llm = False
 
     return {
         "parse_mode": parse_mode,

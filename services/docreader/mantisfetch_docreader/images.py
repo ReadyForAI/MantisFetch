@@ -21,7 +21,7 @@ import tempfile
 from pathlib import Path
 
 from .models import EmbeddedImage
-from .ocr.engines import _is_ocr_failed_text, gemini_ocr, local_ocr
+from .ocr.engines import LOCAL_OCR_ENABLED, _is_ocr_failed_text, gemini_ocr, local_ocr
 
 _RASTER_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"}
 _VECTOR_IMAGE_EXTENSIONS = {".emf", ".wmf"}
@@ -193,7 +193,7 @@ def _ocr_embedded_image(image: EmbeddedImage, backend: str) -> tuple[str, str, s
     if not image.rendered_bytes:
         return "", selected, "failed", "image was not rendered"
 
-    if selected in {"auto", "local"}:
+    if selected in {"auto", "local"} and LOCAL_OCR_ENABLED:
         text = local_ocr(image.rendered_bytes, image.order, "paddleocr")
         if text and not _is_ocr_failed_text(text):
             return _cleanup_ocr_text(text), "local-paddleocr", "ok", ""

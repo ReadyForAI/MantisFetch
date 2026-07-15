@@ -66,6 +66,18 @@ python mantisfetch_server.py     # listens on port 9898
 
 The `docker-compose.yml` provides a single-service setup. By default, the document library is bind-mounted to the current user's `~/.mantisfetch/docs` directory on the host. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for container hardening, shared-volume ownership (SMB/NFS), and the single-process boundary.
 
+**Image variants (`WITH_LOCAL_OCR` build arg):** the offline PaddleOCR stack is ~1 GB of the image. Build with or without it:
+
+```bash
+# Full — bundled offline OCR (default)
+docker build -t readyforai/mantisfetch:latest .
+
+# Slim — ~1 GB smaller, no local OCR; OCR runs via the configured LLM provider
+docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
+```
+
+With `WITH_LOCAL_OCR=false` the image bakes `MANTISFETCH_LOCAL_OCR_ENABLED=false`, so all OCR routing skips the (absent) local worker and uses the LLM/vision provider — embedded images **and** scanned-PDF pages (which otherwise have no per-page local→LLM fallback). **An LLM provider must therefore be configured** for the slim image to OCR at all; startup prewarm is skipped to match. Inspect a running image with `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>`.
+
 ```yaml
 # docker-compose.yml (excerpt)
 services:
@@ -345,6 +357,18 @@ python mantisfetch_server.py     # 监听 9898 端口
 ### Docker 配置
 
 `docker-compose.yml` 提供单服务部署方案。默认会把文档库 bind mount 到宿主机当前用户的 `~/.mantisfetch/docs` 目录。
+
+**镜像变体（`WITH_LOCAL_OCR` 构建参数）：** 离线 PaddleOCR 栈约占镜像 1 GB。可选择带或不带：
+
+```bash
+# 完整版 —— 内置离线 OCR（默认）
+docker build -t readyforai/mantisfetch:latest .
+
+# 精简版 —— 体积小约 1 GB，不含本地 OCR；OCR 走配置的 LLM provider
+docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
+```
+
+设 `WITH_LOCAL_OCR=false` 时镜像会烙入 `MANTISFETCH_LOCAL_OCR_ENABLED=false`，所有 OCR 路由都跳过（不存在的）本地 worker、改用 LLM/vision provider——包括内嵌图片**以及扫描版 PDF 页**（后者本身没有逐页 local→LLM 兜底）。因此精简版**必须配置 LLM provider** 才能做 OCR；启动期 prewarm 也随之跳过。用 `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>` 查看某镜像是哪种变体。
 
 ```yaml
 # docker-compose.yml（节选）

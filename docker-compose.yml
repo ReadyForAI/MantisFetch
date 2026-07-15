@@ -39,6 +39,10 @@ services:
       MANTISFETCH_MAX_CONCURRENT_PARSE: ${MANTISFETCH_MAX_CONCURRENT_PARSE:-2}
       MANTISFETCH_LOCAL_OCR_CONCURRENCY: ${MANTISFETCH_LOCAL_OCR_CONCURRENCY:-1}
       MANTISFETCH_PREWARM_LOCAL_OCR: ${MANTISFETCH_PREWARM_LOCAL_OCR:-true}
+      # Note: the local-OCR master switch MANTISFETCH_LOCAL_OCR_ENABLED is intentionally
+      # NOT set here — it is baked into the image by the WITH_LOCAL_OCR build arg (false
+      # in the slim variant). Prewarm is gated on it too, so the line above is a no-op
+      # for the slim image. Override at runtime with `-e` if you need to force it.
       MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT: ${MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT:-1}
       MANTISFETCH_SUMMARY_BATCH_CONCURRENCY: ${MANTISFETCH_SUMMARY_BATCH_CONCURRENCY:-1}
       MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC: ${MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC:-2.0}
