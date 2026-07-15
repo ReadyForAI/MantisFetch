@@ -269,6 +269,32 @@ class TestPDFParse:
         assert plan["llm_ocr_pages"] == []
         assert plan["region_llm"] is True
 
+    def test_plan_pdf_ocr_routes_to_llm_when_local_disabled(self, monkeypatch):
+        # Slim build (MANTISFETCH_LOCAL_OCR_ENABLED=false): scan pages that would go
+        # local must route to LLM instead — the local page path has no per-page
+        # local->LLM fallback, so leaving them local would drop OCR text.
+        from mantisfetch_docreader import _load_document_profile, _plan_pdf_ocr, pdf_planning
+
+        monkeypatch.setattr(pdf_planning, "LOCAL_OCR_ENABLED", False)
+        profile = _load_document_profile("contract_cn", None)
+        plan = _plan_pdf_ocr(
+            profile=profile,
+            parse_mode="accurate",
+            force_ocr=False,
+            explicit_ocr_pages=None,
+            assessment={
+                "document_quality": "scan_only",
+                "scan_like_pages": [1, 2, 3],
+                "sparse_pages": [1, 2, 3],
+                "image_pages": [1, 2, 3],
+                "page_signals": [{"page_num": 1}, {"page_num": 2}, {"page_num": 3}],
+            },
+        )
+
+        assert plan["local_ocr_pages"] == []
+        assert plan["llm_ocr_pages"] == [1, 2, 3]
+        assert plan["region_llm"] is False
+
     def test_plan_pdf_ocr_force_ocr_uses_llm_full_path(self):
         from mantisfetch_docreader import _load_document_profile, _plan_pdf_ocr
 

@@ -58,12 +58,12 @@ COPY scripts/install_ocr_deps.sh ./scripts/install_ocr_deps.sh
 # Local-OCR variant switch:
 #   WITH_LOCAL_OCR=true  (default) — bundle the offline PaddleOCR stack
 #     (paddlepaddle / opencv / onnxruntime, ~1 GB uncompressed).
-#   WITH_LOCAL_OCR=false — skip it, for a ~1 GB smaller image. OCR then runs only
-#     through the configured LLM/vision provider; image_ocr_backend=auto falls back
-#     to it when the local worker is absent. The startup prewarm env is pinned to
-#     the same value so the slim image doesn't try (and log) a missing local worker.
+#   WITH_LOCAL_OCR=false — skip it, for a ~1.5 GB smaller image. MANTISFETCH_LOCAL_OCR_ENABLED
+#     is baked to match so OCR routing skips the (absent) local worker entirely and
+#     uses the configured LLM/vision provider — including PDF page OCR, which has no
+#     per-page local→LLM fallback of its own. An LLM provider is required to OCR.
 ARG WITH_LOCAL_OCR=true
-ENV MANTISFETCH_PREWARM_LOCAL_OCR=${WITH_LOCAL_OCR}
+ENV MANTISFETCH_LOCAL_OCR_ENABLED=${WITH_LOCAL_OCR}
 LABEL com.readyforai.mantisfetch.local-ocr="${WITH_LOCAL_OCR}"
 # build-essential is needed only to compile C-extension wheels (e.g. stringzilla,
 # which no longer ships a prebuilt wheel) during pip install. Install it in this

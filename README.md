@@ -76,7 +76,7 @@ docker build -t readyforai/mantisfetch:latest .
 docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
 ```
 
-With `WITH_LOCAL_OCR=false`, `image_ocr_backend=auto` (the default) falls back to LLM/vision OCR, so **an LLM provider must be configured** for the slim image to OCR at all; an explicit `image_ocr_backend=local` request returns a failed status (no local worker). Startup prewarm is auto-disabled to match. Inspect a running image with `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>`.
+With `WITH_LOCAL_OCR=false` the image bakes `MANTISFETCH_LOCAL_OCR_ENABLED=false`, so all OCR routing skips the (absent) local worker and uses the LLM/vision provider — embedded images **and** scanned-PDF pages (which otherwise have no per-page local→LLM fallback). **An LLM provider must therefore be configured** for the slim image to OCR at all; startup prewarm is skipped to match. Inspect a running image with `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>`.
 
 ```yaml
 # docker-compose.yml (excerpt)
@@ -368,7 +368,7 @@ docker build -t readyforai/mantisfetch:latest .
 docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
 ```
 
-设 `WITH_LOCAL_OCR=false` 时，`image_ocr_backend=auto`（默认值）会 fallback 到 LLM/vision OCR，因此精简版**必须配置 LLM provider** 才能做 OCR；若显式请求 `image_ocr_backend=local` 则返回失败状态（无本地 worker）。启动期 prewarm 会随之自动关闭。用 `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>` 查看某镜像是哪种变体。
+设 `WITH_LOCAL_OCR=false` 时镜像会烙入 `MANTISFETCH_LOCAL_OCR_ENABLED=false`，所有 OCR 路由都跳过（不存在的）本地 worker、改用 LLM/vision provider——包括内嵌图片**以及扫描版 PDF 页**（后者本身没有逐页 local→LLM 兜底）。因此精简版**必须配置 LLM provider** 才能做 OCR；启动期 prewarm 也随之跳过。用 `docker inspect --format '{{index .Config.Labels "com.readyforai.mantisfetch.local-ocr"}}' <image>` 查看某镜像是哪种变体。
 
 ```yaml
 # docker-compose.yml（节选）

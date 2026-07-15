@@ -36,6 +36,16 @@ from ..models import OCRPageBlocks, OCRTextBlock, _normalize_layout_bbox
 logger = logging.getLogger("mantisfetch_docreader")
 
 # ── Local OCR worker config (worker-only; tests patch these here) ──
+# Master switch for the offline (PaddleOCR) worker. False (set in the slim image,
+# which ships no PaddleOCR) makes OCR routing skip the local worker entirely and
+# use the LLM/vision provider instead — so PDF page OCR falls back rather than
+# emitting failed markers, and no missing worker is prewarmed/attempted.
+LOCAL_OCR_ENABLED = os.environ.get("MANTISFETCH_LOCAL_OCR_ENABLED", "true").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC = float(
     os.environ.get("MANTISFETCH_LOCAL_OCR_WORKER_STARTUP_TIMEOUT_SEC", "180")
 )

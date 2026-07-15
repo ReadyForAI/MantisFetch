@@ -126,6 +126,7 @@ from .models import (
     _normalize_layout_bbox as _normalize_layout_bbox,
 )
 from .ocr.engines import (
+    LOCAL_OCR_ENABLED,
     _get_local_ocr_worker,
     _local_ocr_worker_initializing,
     _local_ocr_worker_lock,
@@ -1691,7 +1692,7 @@ PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").stri
 
 
 async def _startup_prewarm_local_ocr() -> None:
-    if not PREWARM_LOCAL_OCR:
+    if not PREWARM_LOCAL_OCR or not LOCAL_OCR_ENABLED:
         return
     try:
         with _local_ocr_worker_lock:
