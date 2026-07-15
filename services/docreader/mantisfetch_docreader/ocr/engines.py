@@ -296,6 +296,11 @@ def local_ocr_with_layout(
         return "", None
     if name != "paddleocr":
         raise RuntimeError(f"unsupported local OCR backend: {backend}")
+    if not LOCAL_OCR_ENABLED:
+        # Local OCR is switched off (e.g. the slim image ships no PaddleOCR). Never
+        # spawn the worker — a defensive choke point so any caller, including ones
+        # without their own LLM fallback, gets a clean miss instead of a crash.
+        return t("ocr_failed", page=page_num), None
     with _local_ocr_worker_lock:
         try:
             proc = _get_local_ocr_worker()

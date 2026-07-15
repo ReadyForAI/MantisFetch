@@ -204,6 +204,35 @@ def test_rerun_region_ocr_rejects_invalid_region(tmp_path):
     assert "outside page_points bounds" in str(exc.value.detail)
 
 
+def test_region_ocr_backend_routes_to_llm_when_local_disabled(monkeypatch):
+    from mantisfetch_docreader import _normalize_region_ocr_backend, regions
+
+    # Default (local enabled): local/paddleocr requests use the local worker.
+    assert _normalize_region_ocr_backend("paddleocr") == ("local", "paddleocr")
+
+    # Slim build (local disabled): local requests fall back to the LLM provider so
+    # region OCR still works without the (absent) PaddleOCR worker.
+    monkeypatch.setattr(regions, "LOCAL_OCR_ENABLED", False)
+    assert _normalize_region_ocr_backend("paddleocr") == ("llm", "gemini")
+    assert _normalize_region_ocr_backend("local") == ("llm", "gemini")
+    assert _normalize_region_ocr_backend("llm") == ("llm", "gemini")
+
+
+def test_local_ocr_with_layout_short_circuits_when_disabled(monkeypatch):
+    from mantisfetch_docreader import local_ocr_with_layout
+    from mantisfetch_docreader.ocr import engines
+    from mantisfetch_docreader.ocr.engines import _is_ocr_failed_text
+
+    def _must_not_start():
+        raise AssertionError("local OCR worker must not start when disabled")
+
+    monkeypatch.setattr(engines, "LOCAL_OCR_ENABLED", False)
+    monkeypatch.setattr(engines, "_get_local_ocr_worker", _must_not_start)
+    text, blocks = local_ocr_with_layout(b"imagebytes", 1, "paddleocr")
+    assert blocks is None
+    assert _is_ocr_failed_text(text)
+
+
 def test_generate_visual_debug_artifacts_is_opt_in_and_annotates_overlays(tmp_path):
     from mantisfetch_docreader import generate_visual_debug_artifacts
 

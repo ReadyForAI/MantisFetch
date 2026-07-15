@@ -35,7 +35,7 @@ from .models import (
     OCRPageBlocks,
     _normalize_layout_bbox,
 )
-from .ocr.engines import gemini_ocr
+from .ocr.engines import LOCAL_OCR_ENABLED, gemini_ocr
 
 CROP_ARTIFACT_DIR = "derived/crops"
 REGION_OCR_ARTIFACT_DIR = "derived/region_ocr"
@@ -259,6 +259,11 @@ def export_pdf_region_crop(
 def _normalize_region_ocr_backend(backend: str) -> tuple[str, str]:
     name = (backend or "").strip().lower()
     if name in {"", "paddleocr", "local", "local-paddleocr"}:
+        if not LOCAL_OCR_ENABLED:
+            # Local OCR is off in this build — serve the region via the LLM provider
+            # instead of a local worker that isn't there (response reports both the
+            # requested and the selected backend).
+            return "llm", "gemini"
         return "local", "paddleocr"
     if name in {"llm", "gemini"}:
         return "llm", "gemini"
