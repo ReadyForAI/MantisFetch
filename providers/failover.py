@@ -47,20 +47,40 @@ class FailoverProvider(LLMProvider):
         self._role = role
 
     def summarize(self, text: str, prompt: str, max_retries: int = 2) -> str:
-        result = self._primary.summarize(text, prompt, max_retries=max_retries)
-        if not _summary_failed(result):
-            return result
-        logger.warning(
-            "summary primary provider failed; failing over to the fallback provider"
-        )
+        try:
+            result = self._primary.summarize(text, prompt, max_retries=max_retries)
+            failed = _summary_failed(result)
+        except Exception as exc:
+            # Some primary paths raise instead of returning the sentinel (e.g.
+            # GeminiProvider._init() when the SDK is missing). Route those to the
+            # fallback too — that is exactly when failover should kick in.
+            logger.warning(
+                "summary primary provider raised (%s); failing over to the fallback provider",
+                exc,
+            )
+        else:
+            if not failed:
+                return result
+            logger.warning(
+                "summary primary provider failed; failing over to the fallback provider"
+            )
         return self._fallback.summarize(text, prompt, max_retries=max_retries)
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
-        result = self._primary.ocr(image_bytes, page_num, proofread=proofread)
-        if not _ocr_failed(result):
-            return result
-        logger.warning(
-            "OCR primary provider failed for page %d; failing over to the fallback provider",
-            page_num,
-        )
+        try:
+            result = self._primary.ocr(image_bytes, page_num, proofread=proofread)
+            failed = _ocr_failed(result)
+        except Exception as exc:
+            logger.warning(
+                "OCR primary provider raised for page %d (%s); failing over to the fallback provider",
+                page_num,
+                exc,
+            )
+        else:
+            if not failed:
+                return result
+            logger.warning(
+                "OCR primary provider failed for page %d; failing over to the fallback provider",
+                page_num,
+            )
         return self._fallback.ocr(image_bytes, page_num, proofread=proofread)

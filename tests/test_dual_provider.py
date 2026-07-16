@@ -146,6 +146,19 @@ class _StubProvider:
         return self.out
 
 
+class _RaisingProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def summarize(self, text, prompt, max_retries=2):
+        self.calls += 1
+        raise RuntimeError("primary boom")
+
+    def ocr(self, image_bytes, page_num, proofread=None):
+        self.calls += 1
+        raise RuntimeError("primary boom")
+
+
 def test_failover_summarize_uses_fallback_on_sentinel():
     from providers.failover import FailoverProvider
 
@@ -197,6 +210,29 @@ def test_failover_ocr_treats_blank_page_as_success():
     fp = FailoverProvider(primary, fallback, role="ocr")
     assert fp.ocr(b"\x89PNG", 3) == ""
     assert fallback.calls == 0
+
+
+def test_failover_summarize_on_primary_exception():
+    """A primary that raises (not just returns a sentinel) still fails over."""
+    from providers.failover import FailoverProvider
+
+    primary = _RaisingProvider()
+    fallback = _StubProvider("recovered")
+    fp = FailoverProvider(primary, fallback, role="summary")
+    assert fp.summarize("t", "p") == "recovered"
+    assert primary.calls == 1
+    assert fallback.calls == 1
+
+
+def test_failover_ocr_on_primary_exception():
+    from providers.failover import FailoverProvider
+
+    primary = _RaisingProvider()
+    fallback = _StubProvider("page text")
+    fp = FailoverProvider(primary, fallback, role="ocr")
+    assert fp.ocr(b"\x89PNG", 3) == "page text"
+    assert primary.calls == 1
+    assert fallback.calls == 1
 
 
 def test_get_provider_wires_failover_when_fallback_set(monkeypatch):
