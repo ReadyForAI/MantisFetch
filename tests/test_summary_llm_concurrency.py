@@ -27,7 +27,7 @@ def test_gemini_summarize_runs_concurrently(monkeypatch):
                 state["active"] -= 1
             return "ok"
 
-    monkeypatch.setattr("providers.get_provider", lambda: _Provider())
+    monkeypatch.setattr("providers.get_provider", lambda *a, **k: _Provider())
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = [pool.submit(s.gemini_summarize, "text", "prompt") for _ in range(4)]
@@ -53,7 +53,7 @@ def test_gemini_summarize_still_spaces_request_starts(monkeypatch):
                 starts.append(time.monotonic())
             return "ok"
 
-    monkeypatch.setattr("providers.get_provider", lambda: _Provider())
+    monkeypatch.setattr("providers.get_provider", lambda *a, **k: _Provider())
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         list(pool.map(lambda _: s.gemini_summarize("text", "prompt"), range(6)))

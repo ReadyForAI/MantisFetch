@@ -26,25 +26,55 @@ logger = logging.getLogger(__name__)
 _OCR_TRANSCRIBE_PROMPT = OCR_TRANSCRIBE_PROMPT
 _OCR_PROOFREAD_PROMPT = OCR_PROOFREAD_PROMPT
 
+# Distinguishes "argument not passed → read the legacy env var" from an explicit
+# value (including None) supplied by the dual-slot factory. A plain None default
+# could not tell those apart.
+_UNSET = object()
+
 
 class OpenAICompatProvider(LLMProvider):
-    """LLM provider backed by the official OpenAI SDK."""
+    """LLM provider backed by the official OpenAI SDK.
 
-    def __init__(self) -> None:
+    Called with no arguments it reads the legacy ``MANTISFETCH_LLM_*`` env vars.
+    The dual-slot factory instead passes ``vendor``/``api_key``/``base_url``/
+    ``model``/``ocr_model`` explicitly so one process can hold several providers
+    pointed at different vendors.
+    """
+
+    def __init__(
+        self,
+        *,
+        vendor=_UNSET,
+        api_key=_UNSET,
+        base_url=_UNSET,
+        model=_UNSET,
+        ocr_model=_UNSET,
+    ) -> None:
         from openai import OpenAI
 
-        self._vendor = get_vendor_profile(os.environ.get("MANTISFETCH_LLM_VENDOR"))
-        self._api_key = os.environ.get("MANTISFETCH_LLM_API_KEY", "")
-        base_url = os.environ.get("MANTISFETCH_LLM_BASE_URL") or self._vendor.base_url
-        self._base_url = base_url.rstrip("/")
-        self._model = os.environ.get("MANTISFETCH_LLM_MODEL") or self._vendor.default_text_model
+        base_url_in = (
+            os.environ.get("MANTISFETCH_LLM_BASE_URL") if base_url is _UNSET else base_url
+        )
+        vendor_in = (
+            os.environ.get("MANTISFETCH_LLM_VENDOR") if vendor is _UNSET else vendor
+        )
+        self._vendor = get_vendor_profile(vendor_in, fallback_base_url=base_url_in)
+        self._api_key = (
+            os.environ.get("MANTISFETCH_LLM_API_KEY", "") if api_key is _UNSET else api_key
+        ) or ""
+        self._base_url = (base_url_in or self._vendor.base_url).rstrip("/")
+        model_in = os.environ.get("MANTISFETCH_LLM_MODEL") if model is _UNSET else model
+        self._model = model_in or self._vendor.default_text_model
         if not self._model:
             raise RuntimeError(
                 f"vendor {self._vendor.name!r} has no default model; "
                 "set MANTISFETCH_LLM_MODEL to the model name to use."
             )
+        ocr_model_in = (
+            os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
+        )
         self._ocr_model = (
-            os.environ.get("MANTISFETCH_OCR_MODEL")
+            ocr_model_in
             or self._vendor.default_ocr_model
             or self._model
         )

@@ -53,14 +53,25 @@ _VENDOR_PROFILES: dict[str, VendorProfile] = {
 }
 
 
-def get_vendor_profile(name: str | None) -> VendorProfile:
-    """Return a vendor profile. Defaults to OpenAI only when unset; an unknown
-    vendor name raises rather than silently sending requests to api.openai.com."""
+def get_vendor_profile(
+    name: str | None, *, fallback_base_url: str | None = None
+) -> VendorProfile:
+    """Return a vendor profile. Defaults to OpenAI only when unset.
+
+    An unknown vendor name raises rather than silently sending requests to
+    api.openai.com — unless ``fallback_base_url`` is given, in which case a
+    generic OpenAI-compatible profile is synthesized against that URL. This
+    lets the dual-slot scheme point a slot at any OpenAI-compatible endpoint
+    without needing a registered profile, while the legacy single-provider
+    path (no base_url override) still fails loudly on a typo'd vendor.
+    """
     key = (name or "openai").strip().lower()
     profile = _VENDOR_PROFILES.get(key)
-    if profile is None:
-        allowed = ", ".join(sorted(_VENDOR_PROFILES))
-        raise RuntimeError(
-            f"unknown MANTISFETCH_LLM_VENDOR {name!r}; must be one of: {allowed}"
-        )
-    return profile
+    if profile is not None:
+        return profile
+    if fallback_base_url:
+        return VendorProfile(name=key, base_url=fallback_base_url.rstrip("/"))
+    allowed = ", ".join(sorted(_VENDOR_PROFILES))
+    raise RuntimeError(
+        f"unknown MANTISFETCH_LLM_VENDOR {name!r}; must be one of: {allowed}"
+    )
