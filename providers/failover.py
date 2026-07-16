@@ -29,8 +29,12 @@ def _summary_failed(text: str | None) -> bool:
 
 
 def _ocr_failed(text: str | None) -> bool:
+    # Mirror ocr.engines._is_ocr_failed_text: an empty/blank result is a
+    # genuinely blank page, NOT a failure. Only the explicit sentinel fails over
+    # — otherwise a blank page would needlessly hit the fallback, which might
+    # hallucinate text for it.
     if not text:
-        return True
+        return False
     return text.strip().startswith(("[OCR failed", "[OCR 失败"))
 
 

@@ -187,6 +187,18 @@ def test_failover_ocr_skips_fallback_on_success():
     assert fallback.calls == 0
 
 
+def test_failover_ocr_treats_blank_page_as_success():
+    """A genuinely blank page (empty OCR text) must NOT trigger failover — the
+    fallback could hallucinate text for it. Mirrors _is_ocr_failed_text."""
+    from providers.failover import FailoverProvider
+
+    primary = _StubProvider("")  # blank page
+    fallback = _StubProvider("hallucinated text")
+    fp = FailoverProvider(primary, fallback, role="ocr")
+    assert fp.ocr(b"\x89PNG", 3) == ""
+    assert fallback.calls == 0
+
+
 def test_get_provider_wires_failover_when_fallback_set(monkeypatch):
     _dual(
         monkeypatch,
