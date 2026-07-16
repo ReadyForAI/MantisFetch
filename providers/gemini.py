@@ -18,13 +18,23 @@ _DEFAULT_MODEL = "gemini-2.5-flash"
 _OCR_TRANSCRIBE_PROMPT = OCR_TRANSCRIBE_PROMPT
 _OCR_PROOFREAD_PROMPT = OCR_PROOFREAD_PROMPT
 
+# See providers.openai_compat._UNSET — tells "not passed" from an explicit value.
+_UNSET = object()
+
 
 class GeminiProvider(LLMProvider):
-    """LLM provider backed by the Google Gemini API (google-genai SDK)."""
+    """LLM provider backed by the Google Gemini API (google-genai SDK).
 
-    def __init__(self) -> None:
+    With no arguments it reads the legacy env vars (``MANTISFETCH_LLM_MODEL`` +
+    ``GEMINI_API_KEY``/``GOOGLE_API_KEY``). The dual-slot factory passes
+    ``model``/``api_key`` explicitly for a ``gemini/<model>`` slot.
+    """
+
+    def __init__(self, *, api_key=_UNSET, model=_UNSET) -> None:
         self._client = None
-        self._model = os.environ.get("MANTISFETCH_LLM_MODEL") or _DEFAULT_MODEL
+        model_in = os.environ.get("MANTISFETCH_LLM_MODEL") if model is _UNSET else model
+        self._model = model_in or _DEFAULT_MODEL
+        self._api_key_override = None if api_key is _UNSET else (api_key or None)
         self._ocr_proofread = os.environ.get("MANTISFETCH_OCR_PROOFREAD", "true").strip().lower() not in {
             "0",
             "false",
@@ -44,7 +54,11 @@ class GeminiProvider(LLMProvider):
                 "google-genai is not installed. Run: pip install google-genai"
             ) from exc
 
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        api_key = (
+            self._api_key_override
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+        )
         if not api_key:
             raise RuntimeError(
                 "Gemini API key not set. Export GEMINI_API_KEY or GOOGLE_API_KEY."

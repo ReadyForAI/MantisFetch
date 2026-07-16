@@ -165,6 +165,53 @@ MANTISFETCH_OCR_IMAGE_INPUT_MODE=plain_base64
 `remote_url_only` is recognized but currently fails fast in the built-in OCR pipeline,
 because MantisFetch renders pages in-memory and does not yet upload them to a hosted URL.
 
+#### Per-role providers + failover (dual-slot)
+
+The variables above configure **one** provider shared by both roles (summarisation
+and OCR). To run the two roles on **different vendors** — e.g. cheap text
+summaries on one vendor, a strong vision model for OCR on another — and to fail
+over to a backup when a call fails, set `MANTISFETCH_LLM_DEFAULT`. That switches
+MantisFetch into the dual-slot scheme:
+
+- Two credential **slots**, `DEFAULT` and `EXTRA`. Each slot's value is the vendor
+  tag; its base URL and API key are read from the environment (nothing is baked
+  into the image — point a slot at any OpenAI-compatible endpoint by setting its
+  `_BASE_URL`).
+- Each **role** picks a primary and an optional fallback model, written
+  `<vendor>/<model>`. The vendor prefix routes the call to the slot with that tag.
+- **Failover**: if the primary model's call fails, the same call is retried once
+  against the role's `_FALLBACK` model. A `gemini/<model>` prefix uses the Gemini
+  backend; any other prefix uses the OpenAI-compatible backend.
+
+```bash
+# Slot DEFAULT = Zhipu (strong OCR VLM); slot EXTRA = DeepSeek (cheap text)
+MANTISFETCH_LLM_DEFAULT=zhipu
+MANTISFETCH_LLM_DEFAULT_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+MANTISFETCH_LLM_DEFAULT_API_KEY=your_zhipu_key
+MANTISFETCH_LLM_EXTRA=deepseek
+MANTISFETCH_LLM_EXTRA_BASE_URL=https://api.deepseek.com/v1
+MANTISFETCH_LLM_EXTRA_API_KEY=your_deepseek_key
+
+# Summaries on DeepSeek, OCR on Zhipu; each with a cross-vendor fallback
+MANTISFETCH_SUM_MODEL_DEFAULT=deepseek/deepseek-chat
+MANTISFETCH_SUM_MODEL_FALLBACK=zhipu/glm-4.6
+MANTISFETCH_OCR_MODEL_DEFAULT=zhipu/glm-4.6v
+MANTISFETCH_OCR_MODEL_FALLBACK=deepseek/deepseek-chat
+```
+
+| Variable | Description |
+|---|---|
+| `MANTISFETCH_LLM_DEFAULT` | Vendor tag of the primary slot (enables the dual-slot scheme) |
+| `MANTISFETCH_LLM_DEFAULT_BASE_URL` / `_API_KEY` | Base URL + key for the DEFAULT slot |
+| `MANTISFETCH_LLM_EXTRA` | Vendor tag of the second slot |
+| `MANTISFETCH_LLM_EXTRA_BASE_URL` / `_API_KEY` | Base URL + key for the EXTRA slot |
+| `MANTISFETCH_SUM_MODEL_DEFAULT` / `_FALLBACK` | Summary primary / fallback model, `<vendor>/<model>` |
+| `MANTISFETCH_OCR_MODEL_DEFAULT` / `_FALLBACK` | OCR primary / fallback model, `<vendor>/<model>` |
+
+Failover triggers on the provider's failure signal (each provider already retries
+transient errors internally, then reports a failure sentinel). Leave
+`MANTISFETCH_LLM_DEFAULT` unset to keep the legacy single-provider behaviour.
+
 ### API
 
 All endpoints are served on port **9898**.
@@ -454,6 +501,41 @@ MANTISFETCH_OCR_IMAGE_INPUT_MODE=plain_base64
 ```
 
 其中 `remote_url_only` 目前只做了显式报错路径：MantisFetch 现在是把 PDF 页渲染到内存里直接上送，还没有内建“先上传图片再传远程 URL”的流程。
+
+#### 分角色 provider + 故障切换（双槽位）
+
+上面的变量配置的是**一个** provider，摘要和 OCR 共用。若想让两个角色跑在**不同厂商**上（比如摘要用便宜的文本模型、OCR 用能力强的视觉模型），并在调用失败时切到备用，设置 `MANTISFETCH_LLM_DEFAULT` 即可切换到双槽位方案：
+
+- 两个凭据**槽位** `DEFAULT` 和 `EXTRA`。槽位的值是厂商标签，其 base_url 和 API key **从环境变量读取**（不写死进镜像——给槽位设 `_BASE_URL` 即可指向任意 OpenAI 兼容端点）。
+- 每个**角色**各配一个主用和一个可选的备用模型，写成两段式 `<厂商>/<模型>`。前段厂商标签决定路由到哪个槽位。
+- **故障切换**：主用模型调用失败时，同一次调用会用该角色的 `_FALLBACK` 模型再试一次。前段是 `gemini/<模型>` 走 Gemini 后端，其它走 OpenAI 兼容后端。
+
+```bash
+# 槽位 DEFAULT = 智谱（视觉 OCR 强）；槽位 EXTRA = DeepSeek（文本便宜）
+MANTISFETCH_LLM_DEFAULT=zhipu
+MANTISFETCH_LLM_DEFAULT_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+MANTISFETCH_LLM_DEFAULT_API_KEY=你的智谱key
+MANTISFETCH_LLM_EXTRA=deepseek
+MANTISFETCH_LLM_EXTRA_BASE_URL=https://api.deepseek.com/v1
+MANTISFETCH_LLM_EXTRA_API_KEY=你的deepseek_key
+
+# 摘要走 DeepSeek，OCR 走智谱；各自配一个跨厂商备用
+MANTISFETCH_SUM_MODEL_DEFAULT=deepseek/deepseek-chat
+MANTISFETCH_SUM_MODEL_FALLBACK=zhipu/glm-4.6
+MANTISFETCH_OCR_MODEL_DEFAULT=zhipu/glm-4.6v
+MANTISFETCH_OCR_MODEL_FALLBACK=deepseek/deepseek-chat
+```
+
+| 变量 | 说明 |
+|---|---|
+| `MANTISFETCH_LLM_DEFAULT` | 主槽位的厂商标签（设置后即启用双槽位方案） |
+| `MANTISFETCH_LLM_DEFAULT_BASE_URL` / `_API_KEY` | DEFAULT 槽位的 base_url + key |
+| `MANTISFETCH_LLM_EXTRA` | 第二个槽位的厂商标签 |
+| `MANTISFETCH_LLM_EXTRA_BASE_URL` / `_API_KEY` | EXTRA 槽位的 base_url + key |
+| `MANTISFETCH_SUM_MODEL_DEFAULT` / `_FALLBACK` | 摘要的主用 / 备用模型，`<厂商>/<模型>` |
+| `MANTISFETCH_OCR_MODEL_DEFAULT` / `_FALLBACK` | OCR 的主用 / 备用模型，`<厂商>/<模型>` |
+
+切换在 provider 报出失败信号时触发（每个 provider 自身已先重试瞬时错误，再返回失败哨兵）。不设 `MANTISFETCH_LLM_DEFAULT` 则保持原有的单 provider 行为。
 
 ### API 接口
 

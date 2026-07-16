@@ -69,7 +69,7 @@ def gemini_ocr(image_bytes: bytes, page_num: int, *, proofread: bool | None = No
     from providers import get_provider
 
     try:
-        return get_provider().ocr(image_bytes, page_num, proofread=proofread)
+        return get_provider("ocr").ocr(image_bytes, page_num, proofread=proofread)
     except Exception as exc:
         logger.warning("OCR unavailable for page %d: %s", page_num, exc)
         return t("ocr_failed", page=page_num)
