@@ -146,18 +146,24 @@ def _build_slot_provider(spec: str, slots: dict[str, _Slot]) -> LLMProvider:
             f"configured slot; set MANTISFETCH_LLM_DEFAULT/_EXTRA to it. "
             f"Configured slots: {sorted(slots)}."
         )
-    if vendor == "gemini":
-        from providers.gemini import GeminiProvider
-
-        return GeminiProvider(api_key=slot.api_key or None, model=model)
-
-    from providers.openai_compat import OpenAICompatProvider
-
     if not slot.api_key:
+        # Require the slot's own key up front for both backends. For gemini this
+        # also stops GeminiProvider from silently falling back to the legacy
+        # GEMINI_API_KEY/GOOGLE_API_KEY (cross-slot credential leak), and makes a
+        # keyless gemini fallback fail to build → discarded like any other bad
+        # fallback, instead of raising only at first use.
         raise RuntimeError(
             f"slot for vendor {vendor!r} has no API key; "
             f"set MANTISFETCH_LLM_{slot.label}_API_KEY."
         )
+
+    if vendor == "gemini":
+        from providers.gemini import GeminiProvider
+
+        return GeminiProvider(api_key=slot.api_key, model=model)
+
+    from providers.openai_compat import OpenAICompatProvider
+
     return OpenAICompatProvider(
         vendor=vendor,
         api_key=slot.api_key,

@@ -278,6 +278,35 @@ def test_openai_slot_without_api_key_raises(monkeypatch):
         get_provider("summary")
 
 
+def test_gemini_slot_without_api_key_raises(monkeypatch):
+    """A gemini slot must supply its own key — no silent GEMINI_API_KEY fallback."""
+    _dual(
+        monkeypatch,
+        MANTISFETCH_LLM_DEFAULT="gemini",  # no slot API key
+        MANTISFETCH_SUM_MODEL_DEFAULT="gemini/gemini-2.5-pro",
+    )
+    with pytest.raises(RuntimeError, match="MANTISFETCH_LLM_DEFAULT_API_KEY"):
+        get_provider("summary")
+
+
+def test_keyless_gemini_fallback_degrades_to_primary(monkeypatch):
+    """A keyless gemini fallback fails to build and is discarded (like any bad
+    fallback), rather than building and only raising at first use."""
+    _dual(
+        monkeypatch,
+        MANTISFETCH_LLM_DEFAULT="zhipu",
+        MANTISFETCH_LLM_DEFAULT_API_KEY="zk",
+        MANTISFETCH_LLM_EXTRA="gemini",  # no gemini key
+        MANTISFETCH_SUM_MODEL_DEFAULT="zhipu/glm-5.1",
+        MANTISFETCH_SUM_MODEL_FALLBACK="gemini/gemini-2.5-pro",
+    )
+    from providers.openai_compat import OpenAICompatProvider
+
+    with _mock_openai():
+        p = get_provider("summary")
+    assert isinstance(p, OpenAICompatProvider)  # bare primary, no failover wrapper
+
+
 def test_invalid_role_raises():
     with pytest.raises(ValueError, match="role must be one of"):
         get_provider("translate")
