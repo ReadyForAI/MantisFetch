@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import weakref
@@ -1730,116 +1731,137 @@ def _persist_web_capture(
     """
     normalized_content_type = _normalize_content_type(content_type)
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
-    doc_dir = docs_dir / storage_path
-    sections_dir = doc_dir / "sections"
-    tables_dir = doc_dir / "tables"
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    sections_dir.mkdir(exist_ok=True)
+    final_dir = docs_dir / storage_path
+    # Stage outside the shared index lock so bulk section/table writes don't
+    # block DELETE (and thus the event loop) for the whole capture. Publish is
+    # rename + index under the lock — same critical section as _delete_doc.
+    staging_root = docs_dir / ".upload-tmp"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = staging_root / f"web-{doc_id}-{secrets.token_hex(4)}"
+    sections_dir = staging_dir / "sections"
+    tables_dir = staging_dir / "tables"
 
     now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     text_sections = [s for s in sections if s.get("type") != "table"]
     table_sections = [s for s in sections if s.get("type") == "table"]
 
-    # digest.md
-    _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest}\n")
+    try:
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        sections_dir.mkdir(exist_ok=True)
 
-    # sections/
-    for i, sec in enumerate(text_sections, 1):
-        sid = sec.get("sid", f"s_{i:03d}")
-        h = sec.get("h") or ""
-        body = sec.get("t", "")
-        safe_h = _safe_heading(h)
-        fname = f"{i:02d}-{sid}-{safe_h}.md"
-        header = f"## {h}\n\n" if h else ""
-        _write_text_atomic(sections_dir / fname, f"{header}{body}\n")
+        # digest.md
+        _write_text_atomic(staging_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest}\n")
 
-    # tables/
-    if table_sections:
-        tables_dir.mkdir(exist_ok=True)
-        for i, tbl in enumerate(table_sections, 1):
-            h = tbl.get("h") or f"Table {i}"
-            body = tbl.get("t", "")
-            meta = tbl.get("table_meta") or {}
-            meta_comment = f"\n<!-- table_meta: {json.dumps(meta)} -->\n" if meta else ""
-            _write_text_atomic(tables_dir / f"table-{i:02d}.md", f"# {h}\n\n{body}\n{meta_comment}")
+        # sections/
+        for i, sec in enumerate(text_sections, 1):
+            sid = sec.get("sid", f"s_{i:03d}")
+            h = sec.get("h") or ""
+            body = sec.get("t", "")
+            safe_h = _safe_heading(h)
+            fname = f"{i:02d}-{sid}-{safe_h}.md"
+            header = f"## {h}\n\n" if h else ""
+            _write_text_atomic(sections_dir / fname, f"{header}{body}\n")
 
-    # manifest.json
-    manifest: dict[str, Any] = {
-        "doc_id": doc_id,
-        "filename": title or url,
-        "file_type": "web_capture",
-        "source": "web_capture",
-        "content_type": normalized_content_type,
-        "storage_path": storage_path,
-        "tags": list(tags) if tags else [],
-        "metadata": dict(metadata) if metadata else {},
-        "paths": {
-            "digest": "digest.md",
-            "sections_dir": "sections/",
-            **({"tables_dir": "tables/"} if table_sections else {}),
-        },
-        "sections": _build_manifest_sections(text_sections, table_sections),
-        "provenance": {
+        # tables/
+        if table_sections:
+            tables_dir.mkdir(exist_ok=True)
+            for i, tbl in enumerate(table_sections, 1):
+                h = tbl.get("h") or f"Table {i}"
+                body = tbl.get("t", "")
+                meta = tbl.get("table_meta") or {}
+                meta_comment = f"\n<!-- table_meta: {json.dumps(meta)} -->\n" if meta else ""
+                _write_text_atomic(
+                    tables_dir / f"table-{i:02d}.md", f"# {h}\n\n{body}\n{meta_comment}"
+                )
+
+        # manifest.json
+        manifest: dict[str, Any] = {
+            "doc_id": doc_id,
+            "filename": title or url,
+            "file_type": "web_capture",
             "source": "web_capture",
-            "source_url": url,
-            "created_at": now_str,
-            "content_hash": content_hash,
-        },
-    }
-    if summary_mode == "defer":
-        # Report status under parse_metadata.summary so /doc/library/{id}/summary
-        # reports web captures the same way it does uploaded docs.
-        manifest["parse_metadata"] = {"summary": {"mode": "defer", "status": "pending"}}
-    _write_text_atomic(
-        doc_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
-    )
-
-    # doc-index.json (v2, shared with docreader) — shared lock + atomic write
-    with _doc_index_lock:
-        index_path = docs_dir / "doc-index.json"
-        if index_path.exists():
-            try:
-                with open(index_path, encoding="utf-8") as f:
-                    index: dict[str, Any] = json.load(f)
-            except (OSError, ValueError):
-                index = {"version": 2, "documents": []}
-        else:
-            index = {"version": 2, "documents": []}
-
-        index["version"] = 2
-        if not isinstance(index.get("documents"), list):
-            index["documents"] = []
-        index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
-        index_entry: dict[str, Any] = (
-            {"summary_mode": "defer", "summary_status": "pending"} if summary_mode == "defer" else {}
-        )
-        index_entry.update(
-            {
-                "id": doc_id,
-                "filename": title or url,
-                "file_type": "web_capture",
-                "content_type": normalized_content_type,
-                "storage_path": storage_path,
+            "content_type": normalized_content_type,
+            "storage_path": storage_path,
+            "tags": list(tags) if tags else [],
+            "metadata": dict(metadata) if metadata else {},
+            "paths": {
+                "digest": "digest.md",
+                "sections_dir": "sections/",
+                **({"tables_dir": "tables/"} if table_sections else {}),
+            },
+            "sections": _build_manifest_sections(text_sections, table_sections),
+            "provenance": {
                 "source": "web_capture",
                 "source_url": url,
-                "pages": 1,
-                "sections": len(text_sections),
-                "ocr_pages": 0,
-                "tables": len(table_sections),
-                "digest": digest[:200],
-                "digest_path": f"docs/{storage_path}/digest.md",
-                "tags": tags,
                 "created_at": now_str,
                 "content_hash": content_hash,
-                "extract_tables": extract_tables,
-                "requested_url": requested_url or url,
-                "lang": lang,
-                "metadata": _indexable_metadata(metadata or {}),
-            }
+            },
+        }
+        if summary_mode == "defer":
+            # Report status under parse_metadata.summary so /doc/library/{id}/summary
+            # reports web captures the same way it does uploaded docs.
+            manifest["parse_metadata"] = {"summary": {"mode": "defer", "status": "pending"}}
+        _write_text_atomic(
+            staging_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
         )
-        index["documents"].append(index_entry)
-        index["last_updated"] = now_str
-        _write_json(index_path, index)
+
+        with _doc_index_lock:
+            final_dir.parent.mkdir(parents=True, exist_ok=True)
+            if final_dir.exists():
+                shutil.rmtree(final_dir)
+            os.replace(staging_dir, final_dir)
+            staging_dir = None  # published; don't cleanup in finally
+
+            # doc-index.json (v2, shared with docreader)
+            index_path = docs_dir / "doc-index.json"
+            if index_path.exists():
+                try:
+                    with open(index_path, encoding="utf-8") as f:
+                        index: dict[str, Any] = json.load(f)
+                except (OSError, ValueError):
+                    index = {"version": 2, "documents": []}
+            else:
+                index = {"version": 2, "documents": []}
+
+            index["version"] = 2
+            if not isinstance(index.get("documents"), list):
+                index["documents"] = []
+            index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
+            index_entry: dict[str, Any] = (
+                {"summary_mode": "defer", "summary_status": "pending"}
+                if summary_mode == "defer"
+                else {}
+            )
+            index_entry.update(
+                {
+                    "id": doc_id,
+                    "filename": title or url,
+                    "file_type": "web_capture",
+                    "content_type": normalized_content_type,
+                    "storage_path": storage_path,
+                    "source": "web_capture",
+                    "source_url": url,
+                    "pages": 1,
+                    "sections": len(text_sections),
+                    "ocr_pages": 0,
+                    "tables": len(table_sections),
+                    "digest": digest[:200],
+                    "digest_path": f"docs/{storage_path}/digest.md",
+                    "tags": tags,
+                    "created_at": now_str,
+                    "content_hash": content_hash,
+                    "extract_tables": extract_tables,
+                    "requested_url": requested_url or url,
+                    "lang": lang,
+                    "metadata": _indexable_metadata(metadata or {}),
+                }
+            )
+            index["documents"].append(index_entry)
+            index["last_updated"] = now_str
+            _write_json(index_path, index)
+    finally:
+        if staging_dir is not None and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def _set_web_summary_status(
@@ -2601,8 +2623,10 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
         await sessions.put(sid, sess)
 
         try:
-            # Hold sess.lock across goto→distill so SessionManager maxsize eviction
-            # cannot close the context mid-capture (#158 close-under-lock + A7).
+            # Hold sess.lock only for browser I/O so SessionManager maxsize eviction
+            # cannot close the context mid-goto/distill (#158 + A7). Disk writes run
+            # outside the lock in a worker thread (A3) so they never block the loop
+            # or serialize other sessions behind fsync of a large capture.
             async with sess.lock:
                 try:
                     await sess.page.goto(
@@ -2625,13 +2649,14 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 except Exception as e:
                     raise HTTPException(500, f"capture distill failed: {e}")
 
-                url = out["url"]
-                title = out.get("title")
-                sections: list[dict[str, Any]] = out["sections"]
-                content_hash: str = out["content_hash"]
-                table_sections = [s for s in sections if s.get("type") == "table"]
+            url = out["url"]
+            title = out.get("title")
+            sections: list[dict[str, Any]] = out["sections"]
+            content_hash: str = out["content_hash"]
+            table_sections = [s for s in sections if s.get("type") == "table"]
+            digest = _build_web_digest(title, sections)
 
-                digest = _build_web_digest(title, sections)
+            def _alloc_and_persist() -> str:
                 doc_id = _next_web_doc_id(docs_dir)
                 _persist_web_capture(
                     doc_id=doc_id,
@@ -2649,26 +2674,29 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                     metadata=req.metadata,
                     summary_mode=req.summary_mode,
                 )
+                return doc_id
 
-                summary_status: str | None = None
-                if req.summary_mode == "defer":
-                    threading.Thread(
-                        target=_defer_web_summary,
-                        args=(doc_id, sections, docs_dir, content_type, title, url),
-                        daemon=True,
-                        name=f"web-summary-{doc_id}",
-                    ).start()
-                    summary_status = "pending"
+            doc_id = await asyncio.to_thread(_alloc_and_persist)
 
-                return CaptureResponse(
-                    doc_id=doc_id,
-                    content_type=content_type,
-                    storage_path=_doc_storage_rel_path(doc_id, content_type),
-                    digest=digest,
-                    section_count=len(sections),
-                    table_count=len(table_sections),
-                    summary_status=summary_status,
-                )
+            summary_status: str | None = None
+            if req.summary_mode == "defer":
+                threading.Thread(
+                    target=_defer_web_summary,
+                    args=(doc_id, sections, docs_dir, content_type, title, url),
+                    daemon=True,
+                    name=f"web-summary-{doc_id}",
+                ).start()
+                summary_status = "pending"
+
+            return CaptureResponse(
+                doc_id=doc_id,
+                content_type=content_type,
+                storage_path=_doc_storage_rel_path(doc_id, content_type),
+                digest=digest,
+                section_count=len(sections),
+                table_count=len(table_sections),
+                summary_status=summary_status,
+            )
         finally:
             await sessions.remove(sid)
 
@@ -2687,13 +2715,21 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     docs_dir = _get_docs_dir()
 
     # Fast path: a lock-free cache hit returns without taking the per-key lock or
-    # spinning up a browser.
+    # spinning up a browser. Index/digest reads run off the event loop (A3).
     if caching:
-        cached = _find_cached_capture(
-            docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+        cached = await asyncio.to_thread(
+            _find_cached_capture,
+            docs_dir,
+            req.url,
+            content_type,
+            req.extract_tables,
+            req.lang,
+            CAPTURE_TTL_HOURS,
         )
         if cached is not None:
-            return _cached_capture_response(cached, content_type, docs_dir, req.summary_mode)
+            return await asyncio.to_thread(
+                _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
+            )
 
     cache_key = (
         _capture_cache_key(req.url, content_type, req.extract_tables, req.lang) if caching else None
@@ -2702,11 +2738,19 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     # the first captures under the lock; the rest recheck the cache here and reuse it.
     async with _optional_capture_lock(cache_key):
         if caching:
-            cached = _find_cached_capture(
-                docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+            cached = await asyncio.to_thread(
+                _find_cached_capture,
+                docs_dir,
+                req.url,
+                content_type,
+                req.extract_tables,
+                req.lang,
+                CAPTURE_TTL_HOURS,
             )
             if cached is not None:
-                return _cached_capture_response(cached, content_type, docs_dir, req.summary_mode)
+                return await asyncio.to_thread(
+                    _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
+                )
         return await _capture_fresh(req, content_type, docs_dir)
 
 
