@@ -167,18 +167,28 @@ def _wrap_web_result(result: Any, origin: str) -> Any:
     return result
 
 
-def _wrap_schema_free_text(node: Any, nonce: str, origin: str) -> None:
-    """Wrap free-text ``description`` fields inside a JSON Schema tree in place.
+# JSON Schema annotation keys that carry free-text prose (wrap these).
+_SCHEMA_FREE_TEXT_KEYS = frozenset({"description", "title", "$comment"})
+# Application-data keys whose values are literals, not nested schemas — do not
+# recurse, or a const/default object with a "description" property would be
+# rewritten and break the invocation contract.
+_SCHEMA_LITERAL_KEYS = frozenset({"const", "default", "examples", "example", "enum"})
 
-    Leaves structural keys (type/enum/properties/required/name) untouched so the
-    schema remains usable for tool invocation.
+
+def _wrap_schema_free_text(node: Any, nonce: str, origin: str) -> None:
+    """Wrap free-text schema annotations in place; leave structural + literal data.
+
+    Walks properties/items/anyOf/etc., wraps description/title/$comment, and
+    skips const/default/examples/enum so application values are not mutated.
     """
     if isinstance(node, dict):
-        desc = node.get("description")
-        if isinstance(desc, str):
-            node["description"] = _wrap_text(desc, nonce, origin)
-        for value in node.values():
-            _wrap_schema_free_text(value, nonce, origin)
+        for key, value in list(node.items()):
+            if key in _SCHEMA_FREE_TEXT_KEYS and isinstance(value, str):
+                node[key] = _wrap_text(value, nonce, origin)
+            elif key in _SCHEMA_LITERAL_KEYS:
+                continue
+            else:
+                _wrap_schema_free_text(value, nonce, origin)
     elif isinstance(node, list):
         for item in node:
             _wrap_schema_free_text(item, nonce, origin)
