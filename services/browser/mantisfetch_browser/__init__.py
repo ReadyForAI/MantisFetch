@@ -1733,69 +1733,75 @@ def _persist_web_capture(
     doc_dir = docs_dir / storage_path
     sections_dir = doc_dir / "sections"
     tables_dir = doc_dir / "tables"
-    doc_dir.mkdir(parents=True, exist_ok=True)
-    sections_dir.mkdir(exist_ok=True)
 
     now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     text_sections = [s for s in sections if s.get("type") != "table"]
     table_sections = [s for s in sections if s.get("type") == "table"]
 
-    # digest.md
-    _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest}\n")
-
-    # sections/
-    for i, sec in enumerate(text_sections, 1):
-        sid = sec.get("sid", f"s_{i:03d}")
-        h = sec.get("h") or ""
-        body = sec.get("t", "")
-        safe_h = _safe_heading(h)
-        fname = f"{i:02d}-{sid}-{safe_h}.md"
-        header = f"## {h}\n\n" if h else ""
-        _write_text_atomic(sections_dir / fname, f"{header}{body}\n")
-
-    # tables/
-    if table_sections:
-        tables_dir.mkdir(exist_ok=True)
-        for i, tbl in enumerate(table_sections, 1):
-            h = tbl.get("h") or f"Table {i}"
-            body = tbl.get("t", "")
-            meta = tbl.get("table_meta") or {}
-            meta_comment = f"\n<!-- table_meta: {json.dumps(meta)} -->\n" if meta else ""
-            _write_text_atomic(tables_dir / f"table-{i:02d}.md", f"# {h}\n\n{body}\n{meta_comment}")
-
-    # manifest.json
-    manifest: dict[str, Any] = {
-        "doc_id": doc_id,
-        "filename": title or url,
-        "file_type": "web_capture",
-        "source": "web_capture",
-        "content_type": normalized_content_type,
-        "storage_path": storage_path,
-        "tags": list(tags) if tags else [],
-        "metadata": dict(metadata) if metadata else {},
-        "paths": {
-            "digest": "digest.md",
-            "sections_dir": "sections/",
-            **({"tables_dir": "tables/"} if table_sections else {}),
-        },
-        "sections": _build_manifest_sections(text_sections, table_sections),
-        "provenance": {
-            "source": "web_capture",
-            "source_url": url,
-            "created_at": now_str,
-            "content_hash": content_hash,
-        },
-    }
-    if summary_mode == "defer":
-        # Report status under parse_metadata.summary so /doc/library/{id}/summary
-        # reports web captures the same way it does uploaded docs.
-        manifest["parse_metadata"] = {"summary": {"mode": "defer", "status": "pending"}}
-    _write_text_atomic(
-        doc_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
-    )
-
-    # doc-index.json (v2, shared with docreader) — shared lock + atomic write
+    # Hold the shared index lock for products + index together. Persist now runs
+    # in a worker thread (A3); without this, DELETE can rmtree the tree after
+    # files land but before the index entry is appended → dangling index.
     with _doc_index_lock:
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        sections_dir.mkdir(exist_ok=True)
+
+        # digest.md
+        _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest}\n")
+
+        # sections/
+        for i, sec in enumerate(text_sections, 1):
+            sid = sec.get("sid", f"s_{i:03d}")
+            h = sec.get("h") or ""
+            body = sec.get("t", "")
+            safe_h = _safe_heading(h)
+            fname = f"{i:02d}-{sid}-{safe_h}.md"
+            header = f"## {h}\n\n" if h else ""
+            _write_text_atomic(sections_dir / fname, f"{header}{body}\n")
+
+        # tables/
+        if table_sections:
+            tables_dir.mkdir(exist_ok=True)
+            for i, tbl in enumerate(table_sections, 1):
+                h = tbl.get("h") or f"Table {i}"
+                body = tbl.get("t", "")
+                meta = tbl.get("table_meta") or {}
+                meta_comment = f"\n<!-- table_meta: {json.dumps(meta)} -->\n" if meta else ""
+                _write_text_atomic(
+                    tables_dir / f"table-{i:02d}.md", f"# {h}\n\n{body}\n{meta_comment}"
+                )
+
+        # manifest.json
+        manifest: dict[str, Any] = {
+            "doc_id": doc_id,
+            "filename": title or url,
+            "file_type": "web_capture",
+            "source": "web_capture",
+            "content_type": normalized_content_type,
+            "storage_path": storage_path,
+            "tags": list(tags) if tags else [],
+            "metadata": dict(metadata) if metadata else {},
+            "paths": {
+                "digest": "digest.md",
+                "sections_dir": "sections/",
+                **({"tables_dir": "tables/"} if table_sections else {}),
+            },
+            "sections": _build_manifest_sections(text_sections, table_sections),
+            "provenance": {
+                "source": "web_capture",
+                "source_url": url,
+                "created_at": now_str,
+                "content_hash": content_hash,
+            },
+        }
+        if summary_mode == "defer":
+            # Report status under parse_metadata.summary so /doc/library/{id}/summary
+            # reports web captures the same way it does uploaded docs.
+            manifest["parse_metadata"] = {"summary": {"mode": "defer", "status": "pending"}}
+        _write_text_atomic(
+            doc_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+        )
+
+        # doc-index.json (v2, shared with docreader)
         index_path = docs_dir / "doc-index.json"
         if index_path.exists():
             try:
