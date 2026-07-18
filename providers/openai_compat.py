@@ -143,6 +143,12 @@ class OpenAICompatProvider(LLMProvider):
 
     @staticmethod
     def _message_text(message_content) -> str:
+        # Some OpenAI-compatible backends (reasoning models, tool-only replies,
+        # content-filter drops) return content: null. str(None) would yield the
+        # literal "None", which is neither empty nor a failure sentinel and gets
+        # written into digests/OCR as real text.
+        if message_content is None:
+            return ""
         if isinstance(message_content, str):
             return message_content.strip()
         if isinstance(message_content, list):
@@ -154,6 +160,18 @@ class OpenAICompatProvider(LLMProvider):
                         parts.append(str(text).strip())
             return "\n".join(part for part in parts if part).strip()
         return str(message_content).strip()
+
+    @staticmethod
+    def _is_ocr_failure_sentinel(text: str | None) -> bool:
+        """True only for the explicit OCR failure sentinel (not any '[' prefix).
+
+        Gating proofread / failure-log on ``startswith("[")`` misclassifies real
+        page text that opens with ``[1]``, footnotes, or similar.
+        """
+        if not text:
+            return False
+        value = text.strip()
+        return value.startswith(("[OCR failed", "[OCR 失败"))
 
     def _build_ocr_image_part(self, image_bytes: bytes) -> dict:
         b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -252,7 +270,7 @@ class OpenAICompatProvider(LLMProvider):
             # raising, so the OCR pipeline detects it via _is_ocr_failed_text.
             logger.warning("OpenAI-compat OCR failed for page %d: %s", page_num, exc)
             return f"[OCR failed for page {page_num}]"
-        if do_proofread and result and not result.startswith("["):
+        if do_proofread and result and not self._is_ocr_failure_sentinel(result):
             review_messages = [
                 {
                     "role": "user",
@@ -275,8 +293,8 @@ class OpenAICompatProvider(LLMProvider):
             except Exception as exc:
                 logger.warning("OpenAI-compat OCR proofread skipped for page %d: %s", page_num, exc)
                 reviewed = ""
-            if reviewed and not reviewed.startswith("["):
+            if reviewed and not self._is_ocr_failure_sentinel(reviewed):
                 result = reviewed
-        if result.startswith("["):
+        if self._is_ocr_failure_sentinel(result):
             logger.warning("OpenAI-compat OCR may have failed for page %d", page_num)
         return result

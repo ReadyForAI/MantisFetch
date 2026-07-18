@@ -112,7 +112,11 @@ class GeminiProvider(LLMProvider):
                 result = response.text.strip()
                 # Proofread whenever transcription succeeded — gating on
                 # attempt == 0 skipped it for any page that needed a retry.
-                if do_proofread and result and not result.startswith("["):
+                # Only the explicit OCR failure sentinel counts — not any text
+                # that happens to start with '[' (e.g. "[1] footnote …").
+                if do_proofread and result and not result.strip().startswith(
+                    ("[OCR failed", "[OCR 失败")
+                ):
                     try:
                         review = self._client.models.generate_content(
                             model=self._model,
@@ -120,7 +124,9 @@ class GeminiProvider(LLMProvider):
                             config={"http_options": {"timeout": 60_000}},
                         )
                         reviewed = review.text.strip()
-                        if reviewed and not reviewed.startswith("["):
+                        if reviewed and not reviewed.strip().startswith(
+                            ("[OCR failed", "[OCR 失败")
+                        ):
                             result = reviewed
                     except Exception as exc:
                         logger.warning(

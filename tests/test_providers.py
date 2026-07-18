@@ -403,6 +403,45 @@ class TestOpenAICompatProvider:
             with pytest.raises(RuntimeError, match="MANTISFETCH_OCR_EXTRA_BODY_JSON"):
                 get_provider()
 
+    def test_message_text_null_content_returns_empty(self, monkeypatch):
+        """content=null must not become the literal string 'None'."""
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_OCR_PROOFREAD", "false")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content=None))]
+        )
+        mock_openai = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+
+        with patch.dict("sys.modules", {"openai": mock_openai}):
+            p = get_provider()
+            assert p.summarize("body", "prompt") == ""
+            assert p.ocr(b"\x89PNG", page_num=1) == ""
+
+    def test_ocr_bracketed_page_text_still_proofreads(self, monkeypatch):
+        """Real OCR text starting with '[1]' must not be treated as a failure."""
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        # proofread on (default): first call returns footnote-style text, second
+        # (proofread) returns the cleaned version — both must run.
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = [
+            MagicMock(choices=[MagicMock(message=MagicMock(content="[1] footnote line"))]),
+            MagicMock(choices=[MagicMock(message=MagicMock(content="cleaned footnote"))]),
+        ]
+        mock_openai = MagicMock()
+        mock_openai.OpenAI.return_value = mock_client
+
+        with patch.dict("sys.modules", {"openai": mock_openai}):
+            p = get_provider()
+            result = p.ocr(b"\x89PNG", page_num=1)
+
+        assert result == "cleaned footnote"
+        assert mock_client.chat.completions.create.call_count == 2
+
 
 class TestVendorProfiles:
     def test_openai_vendor_profile_defaults(self):
