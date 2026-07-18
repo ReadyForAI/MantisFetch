@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import weakref
@@ -1730,23 +1731,26 @@ def _persist_web_capture(
     """
     normalized_content_type = _normalize_content_type(content_type)
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
-    doc_dir = docs_dir / storage_path
-    sections_dir = doc_dir / "sections"
-    tables_dir = doc_dir / "tables"
+    final_dir = docs_dir / storage_path
+    # Stage outside the shared index lock so bulk section/table writes don't
+    # block DELETE (and thus the event loop) for the whole capture. Publish is
+    # rename + index under the lock — same critical section as _delete_doc.
+    staging_root = docs_dir / ".upload-tmp"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    staging_dir = staging_root / f"web-{doc_id}-{secrets.token_hex(4)}"
+    sections_dir = staging_dir / "sections"
+    tables_dir = staging_dir / "tables"
 
     now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     text_sections = [s for s in sections if s.get("type") != "table"]
     table_sections = [s for s in sections if s.get("type") == "table"]
 
-    # Hold the shared index lock for products + index together. Persist now runs
-    # in a worker thread (A3); without this, DELETE can rmtree the tree after
-    # files land but before the index entry is appended → dangling index.
-    with _doc_index_lock:
-        doc_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        staging_dir.mkdir(parents=True, exist_ok=True)
         sections_dir.mkdir(exist_ok=True)
 
         # digest.md
-        _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest}\n")
+        _write_text_atomic(staging_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest}\n")
 
         # sections/
         for i, sec in enumerate(text_sections, 1):
@@ -1798,54 +1802,66 @@ def _persist_web_capture(
             # reports web captures the same way it does uploaded docs.
             manifest["parse_metadata"] = {"summary": {"mode": "defer", "status": "pending"}}
         _write_text_atomic(
-            doc_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+            staging_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
         )
 
-        # doc-index.json (v2, shared with docreader)
-        index_path = docs_dir / "doc-index.json"
-        if index_path.exists():
-            try:
-                with open(index_path, encoding="utf-8") as f:
-                    index: dict[str, Any] = json.load(f)
-            except (OSError, ValueError):
+        with _doc_index_lock:
+            final_dir.parent.mkdir(parents=True, exist_ok=True)
+            if final_dir.exists():
+                shutil.rmtree(final_dir)
+            os.replace(staging_dir, final_dir)
+            staging_dir = None  # published; don't cleanup in finally
+
+            # doc-index.json (v2, shared with docreader)
+            index_path = docs_dir / "doc-index.json"
+            if index_path.exists():
+                try:
+                    with open(index_path, encoding="utf-8") as f:
+                        index: dict[str, Any] = json.load(f)
+                except (OSError, ValueError):
+                    index = {"version": 2, "documents": []}
+            else:
                 index = {"version": 2, "documents": []}
-        else:
-            index = {"version": 2, "documents": []}
 
-        index["version"] = 2
-        if not isinstance(index.get("documents"), list):
-            index["documents"] = []
-        index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
-        index_entry: dict[str, Any] = (
-            {"summary_mode": "defer", "summary_status": "pending"} if summary_mode == "defer" else {}
-        )
-        index_entry.update(
-            {
-                "id": doc_id,
-                "filename": title or url,
-                "file_type": "web_capture",
-                "content_type": normalized_content_type,
-                "storage_path": storage_path,
-                "source": "web_capture",
-                "source_url": url,
-                "pages": 1,
-                "sections": len(text_sections),
-                "ocr_pages": 0,
-                "tables": len(table_sections),
-                "digest": digest[:200],
-                "digest_path": f"docs/{storage_path}/digest.md",
-                "tags": tags,
-                "created_at": now_str,
-                "content_hash": content_hash,
-                "extract_tables": extract_tables,
-                "requested_url": requested_url or url,
-                "lang": lang,
-                "metadata": _indexable_metadata(metadata or {}),
-            }
-        )
-        index["documents"].append(index_entry)
-        index["last_updated"] = now_str
-        _write_json(index_path, index)
+            index["version"] = 2
+            if not isinstance(index.get("documents"), list):
+                index["documents"] = []
+            index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
+            index_entry: dict[str, Any] = (
+                {"summary_mode": "defer", "summary_status": "pending"}
+                if summary_mode == "defer"
+                else {}
+            )
+            index_entry.update(
+                {
+                    "id": doc_id,
+                    "filename": title or url,
+                    "file_type": "web_capture",
+                    "content_type": normalized_content_type,
+                    "storage_path": storage_path,
+                    "source": "web_capture",
+                    "source_url": url,
+                    "pages": 1,
+                    "sections": len(text_sections),
+                    "ocr_pages": 0,
+                    "tables": len(table_sections),
+                    "digest": digest[:200],
+                    "digest_path": f"docs/{storage_path}/digest.md",
+                    "tags": tags,
+                    "created_at": now_str,
+                    "content_hash": content_hash,
+                    "extract_tables": extract_tables,
+                    "requested_url": requested_url or url,
+                    "lang": lang,
+                    "metadata": _indexable_metadata(metadata or {}),
+                }
+            )
+            index["documents"].append(index_entry)
+            index["last_updated"] = now_str
+            _write_json(index_path, index)
+    finally:
+        if staging_dir is not None and staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 def _set_web_summary_status(
