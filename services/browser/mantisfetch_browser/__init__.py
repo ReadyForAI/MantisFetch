@@ -2808,9 +2808,11 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             # with the same body hash (different URL / tracking params / AMP).
             # force_refresh always forces a new doc_id. Skip empty bodies — every
             # blank page shares the same empty-body hash and must not collide.
-            meaningful_body = bool((title or "").strip() or any(
+            # Require non-empty section/table text — title alone is not enough
+            # (challenge/error pages often share "Just a moment..." titles).
+            meaningful_body = any(
                 (s.get("t") or "").strip() for s in sections if isinstance(s, dict)
-            ))
+            )
             legacy_hash = out.get("content_hash_legacy") if isinstance(out, dict) else None
             if not req.force_refresh and content_hash and meaningful_body:
                 # Serialize concurrent same-hash captures so two workers don't both miss.
