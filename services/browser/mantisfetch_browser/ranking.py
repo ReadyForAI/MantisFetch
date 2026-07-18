@@ -182,6 +182,26 @@ def _rank_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(actions, key=score, reverse=True)
 
 
+# WebMCP tools embed a full JSON Schema in strategy.input_schema. A single
+# complex form tool can be multi-KB; past this size we drop the schema body and
+# point the consumer at webmcp discovery for the full definition.
+_WEBMCP_SCHEMA_MAX_CHARS = 2048
+_WEBMCP_SCHEMA_NOTE = (
+    "schema truncated; full input_schema via POST /web/session/webmcp_discover "
+    "or MCP web_webmcp_discover"
+)
+
+
+def _webmcp_schema_chars(strat: dict[str, Any]) -> int:
+    schema = strat.get("input_schema")
+    if schema is None:
+        return 0
+    try:
+        return len(json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _trim_action_fields(a: dict[str, Any], name_max: int, selector_max: int) -> dict[str, Any]:
     a = dict(a)
     a["name"] = _smart_truncate(a.get("name") or "", name_max)  # word-boundary truncation
@@ -202,6 +222,13 @@ def _trim_action_fields(a: dict[str, Any], name_max: int, selector_max: int) -> 
         css = strat.get("css") or ""
         if len(css) > selector_max:
             strat.pop("css", None)
+    elif strat.get("type") == "webmcp":
+        # Oversized schemas punch a hole in total_output_budget_chars; replace
+        # with a stub so the action remains invokable (tool_name kept) without
+        # shipping multi-KB JSON in every distill.
+        if _webmcp_schema_chars(strat) > _WEBMCP_SCHEMA_MAX_CHARS:
+            strat["input_schema"] = {"schema_truncated": True}
+            strat["schema_note"] = _WEBMCP_SCHEMA_NOTE
     a["strategy"] = strat
     return a
 
@@ -214,12 +241,20 @@ def _estimate_meta_chars(meta: dict[str, Any]) -> int:
 
 
 def _estimate_action_chars(a: dict[str, Any]) -> int:
-    role = a.get("role") or ""
-    name = a.get("name") or ""
-    strat = a.get("strategy") or {}
-    sel = strat.get("selector") or strat.get("name") or ""
-    css = strat.get("css") or ""  # role-identity entries carry a css fallback too
-    return 40 + len(role) + len(name) + len(sel) + len(css) + len(a.get("source", ""))
+    # Prefer compact serialization so packing matches real response cost
+    # (aid/actions/confidence/strategy punctuation + any input_schema).
+    try:
+        return len(json.dumps(a, ensure_ascii=False, separators=(",", ":")))
+    except (TypeError, ValueError):
+        role = a.get("role") or ""
+        name = a.get("name") or ""
+        strat = a.get("strategy") or {}
+        sel = strat.get("selector") or strat.get("name") or ""
+        css = strat.get("css") or ""
+        schema_chars = _webmcp_schema_chars(strat) if strat.get("type") == "webmcp" else 0
+        return 40 + len(role) + len(name) + len(sel) + len(css) + schema_chars + len(
+            a.get("source", "")
+        )
 
 
 def _apply_total_output_budget(

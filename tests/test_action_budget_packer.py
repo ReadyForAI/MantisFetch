@@ -1,7 +1,19 @@
 """A6: _apply_total_output_budget must not duplicate actions or emit a truncated
-CSS selector (a 40-char prefix matches the wrong node)."""
+CSS selector (a 40-char prefix matches the wrong node).
 
-from mantisfetch_browser.ranking import _apply_total_output_budget, _estimate_meta_chars
+A1 (2026-07-17): WebMCP input_schema must count toward the budget and oversized
+schemas must be stubbed rather than shipping multi-KB JSON in distill.
+"""
+
+import json
+
+from mantisfetch_browser.ranking import (
+    _WEBMCP_SCHEMA_MAX_CHARS,
+    _apply_total_output_budget,
+    _estimate_action_chars,
+    _estimate_meta_chars,
+    _trim_action_fields,
+)
 
 
 def _action(i: int, selector: str, confidence: float) -> dict:
@@ -13,6 +25,23 @@ def _action(i: int, selector: str, confidence: float) -> dict:
         "actions": ["click"],
         "confidence": confidence,
         "source": "dom",
+    }
+
+
+def _webmcp_action(i: int, schema: dict, confidence: float = 0.95) -> dict:
+    return {
+        "aid": f"wm{i}",
+        "role": "webmcp_tool",
+        "name": f"[WebMCP] tool_{i}",
+        "strategy": {
+            "type": "webmcp",
+            "tool_name": f"tool_{i}",
+            "source": "webmcp",
+            "input_schema": schema,
+        },
+        "actions": ["invoke"],
+        "confidence": confidence,
+        "source": "webmcp",
     }
 
 
@@ -45,3 +74,53 @@ def test_budget_packer_no_duplicates_and_no_truncated_selector():
         sel = a["strategy"].get("selector")
         if sel is not None:
             assert sel in originals, f"packed a truncated/foreign selector: {sel!r}"
+
+
+def test_webmcp_large_schema_trimmed_and_counted_in_budget():
+    """A multi-KB input_schema must not blow past total_output_budget_chars."""
+    huge_schema = {
+        "type": "object",
+        "properties": {f"field_{i}": {"type": "string", "description": "x" * 80} for i in range(80)},
+    }
+    schema_json_len = len(json.dumps(huge_schema, ensure_ascii=False, separators=(",", ":")))
+    assert schema_json_len > _WEBMCP_SCHEMA_MAX_CHARS
+
+    raw = _webmcp_action(0, huge_schema)
+    # Estimate before trim must include the full schema cost.
+    assert _estimate_action_chars(raw) > _WEBMCP_SCHEMA_MAX_CHARS
+
+    trimmed = _trim_action_fields(raw, name_max=80, selector_max=400)
+    assert trimmed["strategy"]["input_schema"] == {"schema_truncated": True}
+    note = trimmed["strategy"].get("schema_note") or ""
+    assert "webmcp_discover" in note
+    assert "web_webmcp_discover" in note
+    assert trimmed["strategy"]["tool_name"] == "tool_0"
+    # Full serialize estimate must match what packing uses.
+    assert _estimate_action_chars(trimmed) == len(
+        json.dumps(trimmed, ensure_ascii=False, separators=(",", ":"))
+    )
+
+    # After trim, packer must keep the action within a tight budget.
+    meta: dict = {}
+    # remaining for actions = total - meta - overhead(200)
+    total_budget = 500 + _estimate_meta_chars(meta) + 200
+    _, packed, _ = _apply_total_output_budget(
+        sections=[],
+        actions=[raw, _webmcp_action(1, {"type": "object", "properties": {}})],
+        meta=meta,
+        total_budget=total_budget,
+        min_actions_to_keep=2,
+        name_max=80,
+        selector_max=400,
+    )
+    assert len(packed) >= 1
+    for a in packed:
+        if a["strategy"].get("type") == "webmcp":
+            schema = a["strategy"].get("input_schema")
+            if schema is not None:
+                encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
+                assert len(encoded) <= _WEBMCP_SCHEMA_MAX_CHARS + 50
+    # Packed action serialization must fit the remaining action budget.
+    remaining = total_budget - _estimate_meta_chars(meta) - 200
+    packed_chars = sum(_estimate_action_chars(a) for a in packed)
+    assert packed_chars <= remaining
