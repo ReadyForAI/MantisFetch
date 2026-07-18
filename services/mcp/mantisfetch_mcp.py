@@ -462,6 +462,19 @@ async def web_session_close(session_id: str) -> Any:
     return await _web_post("/session/close", {"session_id": session_id})
 
 
+@mcp.tool()
+async def web_webmcp_discover(session_id: str, force_refresh: bool = False) -> Any:
+    """List WebMCP tools exposed by the current page, including full input_schema.
+
+    Use when web_distill truncated a tool's schema (strategy.input_schema =
+    {"schema_truncated": true}) or when you need the full parameter contract
+    before web_act(action=invoke)."""
+    return await _web_post(
+        "/session/webmcp_discover",
+        {"session_id": session_id, "force_refresh": force_refresh},
+    )
+
+
 # ============================================================
 # Doc tools (parse + library three-tier retrieval)
 # ============================================================

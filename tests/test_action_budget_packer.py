@@ -91,12 +91,19 @@ def test_webmcp_large_schema_trimmed_and_counted_in_budget():
 
     trimmed = _trim_action_fields(raw, name_max=80, selector_max=400)
     assert trimmed["strategy"]["input_schema"] == {"schema_truncated": True}
-    assert "webmcp_discover" in (trimmed["strategy"].get("schema_note") or "")
+    note = trimmed["strategy"].get("schema_note") or ""
+    assert "webmcp_discover" in note
+    assert "web_webmcp_discover" in note
     assert trimmed["strategy"]["tool_name"] == "tool_0"
+    # Full serialize estimate must match what packing uses.
+    assert _estimate_action_chars(trimmed) == len(
+        json.dumps(trimmed, ensure_ascii=False, separators=(",", ":"))
+    )
 
     # After trim, packer must keep the action within a tight budget.
     meta: dict = {}
-    total_budget = 400 + _estimate_meta_chars(meta) + 200
+    # remaining for actions = total - meta - overhead(200)
+    total_budget = 500 + _estimate_meta_chars(meta) + 200
     _, packed, _ = _apply_total_output_budget(
         sections=[],
         actions=[raw, _webmcp_action(1, {"type": "object", "properties": {}})],
@@ -113,6 +120,7 @@ def test_webmcp_large_schema_trimmed_and_counted_in_budget():
             if schema is not None:
                 encoded = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
                 assert len(encoded) <= _WEBMCP_SCHEMA_MAX_CHARS + 50
-    # Total packed action payload must fit the remaining budget envelope.
+    # Packed action serialization must fit the remaining action budget.
+    remaining = total_budget - _estimate_meta_chars(meta) - 200
     packed_chars = sum(_estimate_action_chars(a) for a in packed)
-    assert packed_chars <= total_budget
+    assert packed_chars <= remaining

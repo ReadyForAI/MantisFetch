@@ -13,7 +13,7 @@ import mantisfetch_mcp as mm
 import pytest
 
 EXPECTED_TOOLS = {
-    # web (9)
+    # web (10)
     "web_capture",
     "web_session_open",
     "web_goto",
@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "web_scroll",
     "web_navigate",
     "web_session_close",
+    "web_webmcp_discover",
     # doc (14)
     "doc_parse",
     "doc_digest",
