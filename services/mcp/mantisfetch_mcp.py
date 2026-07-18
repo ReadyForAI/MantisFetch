@@ -167,6 +167,49 @@ def _wrap_web_result(result: Any, origin: str) -> Any:
     return result
 
 
+def _wrap_schema_free_text(node: Any, nonce: str, origin: str) -> None:
+    """Wrap free-text ``description`` fields inside a JSON Schema tree in place.
+
+    Leaves structural keys (type/enum/properties/required/name) untouched so the
+    schema remains usable for tool invocation.
+    """
+    if isinstance(node, dict):
+        desc = node.get("description")
+        if isinstance(desc, str):
+            node["description"] = _wrap_text(desc, nonce, origin)
+        for value in node.values():
+            _wrap_schema_free_text(value, nonce, origin)
+    elif isinstance(node, list):
+        for item in node:
+            _wrap_schema_free_text(item, nonce, origin)
+
+
+def _wrap_webmcp_discover(result: Any) -> Any:
+    """Wrap page-controlled WebMCP discover metadata as untrusted content.
+
+    Tool ``name`` and structural schema keys stay raw (needed for invoke);
+    descriptions, nested schema descriptions, and error strings are wrapped.
+    """
+    if not isinstance(result, dict):
+        return result
+    origin = str(result.get("url") or "webmcp")
+    nonce = secrets.token_hex(8)
+    for tool in result.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        if isinstance(tool.get("description"), str):
+            tool["description"] = _wrap_text(tool["description"], nonce, origin)
+        schema = tool.get("input_schema")
+        if schema is not None:
+            _wrap_schema_free_text(schema, nonce, origin)
+    errors = result.get("errors")
+    if isinstance(errors, list):
+        result["errors"] = [
+            _wrap_text(e, nonce, origin) if isinstance(e, str) else e for e in errors
+        ]
+    return result
+
+
 def _wrap_search_results(result: Any) -> Any:
     """Wrap each search hit's title+snippet in its OWN origin (the hit URL) and a
     per-hit nonce. Search results are multi-origin — a single boundary (as in
@@ -468,11 +511,13 @@ async def web_webmcp_discover(session_id: str, force_refresh: bool = False) -> A
 
     Use when web_distill truncated a tool's schema (strategy.input_schema =
     {"schema_truncated": true}) or when you need the full parameter contract
-    before web_act(action=invoke)."""
-    return await _web_post(
+    before web_act(action=invoke). Descriptions/errors are wrapped as untrusted
+    page content; tool names and structural schema keys stay raw for invoke."""
+    out = await _web_post(
         "/session/webmcp_discover",
         {"session_id": session_id, "force_refresh": force_refresh},
     )
+    return _wrap_webmcp_discover(out)
 
 
 # ============================================================
