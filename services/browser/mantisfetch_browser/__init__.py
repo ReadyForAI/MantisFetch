@@ -1411,7 +1411,11 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
     # Body-only hash (title + section text): same article via AMP / tracking-param
     # URLs must collide so content-level dedup (B5) can reuse the existing doc.
     # URL lives in source_url / requested_url, not in the content identity.
+    # Empty pages share the same empty-body hash — callers must not use it for
+    # library-wide reuse (see _capture_fresh).
     content_hash = _hash_text((title or "") + "\n" + joined)
+    # Pre-upgrade formula included the URL; stored for dual lookup only.
+    content_hash_legacy = _hash_text((title or "") + "\n" + (url or "") + "\n" + joined)
 
     a11y_attempted = False
     a11y_mode = None
@@ -1513,6 +1517,7 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
         "url": url,
         "title": title,
         "content_hash": content_hash,
+        "content_hash_legacy": content_hash_legacy,
         "sections": sections,
         "actions": actions,
         "meta": meta,
@@ -2090,14 +2095,20 @@ def _find_cached_capture(
 
 
 def _find_capture_by_content_hash(
-    docs_dir: Path, content_hash: str
+    docs_dir: Path,
+    content_hash: str,
+    *,
+    also_match: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the most recent web_capture index entry with the same content_hash.
+    """Return the most recent web_capture index entry with a matching content_hash.
 
     No TTL — library-wide content identity (B5). Different URLs for the same page
     body (tracking params, AMP) reuse one doc_id. Empty/missing hashes never match.
+    ``also_match`` accepts a second hash (legacy title+url+body formula) so
+    pre-upgrade index rows still hit after the body-only hash change.
     """
-    if not content_hash:
+    candidates = {h for h in (content_hash, also_match) if h}
+    if not candidates:
         return None
     index = _load_doc_index(docs_dir)
     if index is None:
@@ -2109,7 +2120,7 @@ def _find_capture_by_content_hash(
             continue
         if doc.get("source") != "web_capture":
             continue
-        if doc.get("content_hash") != content_hash:
+        if doc.get("content_hash") not in candidates:
             continue
         created = doc.get("created_at")
         if not isinstance(created, str):
@@ -2166,10 +2177,25 @@ def _merge_capture_tags_metadata(
         merged_tags = sorted({str(t) for t in list(old_tags) + new_tags if t is not None and str(t)})
         target["tags"] = merged_tags
 
+        storage_path = target.get("storage_path") or entry.get("storage_path")
+        # Keys already present in the manifest (including non-indexable nested
+        # values) count as first-touch and must not appear only on the index.
+        manifest_meta_keys: set[str] = set()
+        manifest: dict[str, Any] | None = None
+        manifest_path: Path | None = None
+        if storage_path:
+            manifest_path = docs_dir / storage_path / "manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                m0 = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+                manifest_meta_keys = set(m0.keys())
+            except (OSError, ValueError):
+                manifest = None
+
         old_index_meta = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
         merged_index_meta = dict(old_index_meta)
         for k, v in indexable_new.items():
-            if k not in merged_index_meta:
+            if k not in merged_index_meta and k not in manifest_meta_keys:
                 merged_index_meta[k] = v
         target["metadata"] = merged_index_meta
 
@@ -2178,11 +2204,8 @@ def _merge_capture_tags_metadata(
 
         # Keep manifest in sync when the product tree is still present.
         # Manifest stores full metadata (including nested values); index is filtered.
-        storage_path = target.get("storage_path") or entry.get("storage_path")
-        if storage_path:
-            manifest_path = docs_dir / storage_path / "manifest.json"
+        if manifest is not None and manifest_path is not None:
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["tags"] = merged_tags
                 m_meta = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
                 for k, v in raw_meta.items():
@@ -2783,12 +2806,20 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
 
             # B5 content-level dedup: after distill, reuse an existing library doc
             # with the same body hash (different URL / tracking params / AMP).
-            # force_refresh always forces a new doc_id.
-            if not req.force_refresh and content_hash:
+            # force_refresh always forces a new doc_id. Skip empty bodies — every
+            # blank page shares the same empty-body hash and must not collide.
+            meaningful_body = bool((title or "").strip() or any(
+                (s.get("t") or "").strip() for s in sections if isinstance(s, dict)
+            ))
+            legacy_hash = out.get("content_hash_legacy") if isinstance(out, dict) else None
+            if not req.force_refresh and content_hash and meaningful_body:
                 # Serialize concurrent same-hash captures so two workers don't both miss.
                 async with _optional_capture_lock(f"ch:{content_hash}"):
                     hit = await asyncio.to_thread(
-                        _find_capture_by_content_hash, docs_dir, content_hash
+                        _find_capture_by_content_hash,
+                        docs_dir,
+                        content_hash,
+                        also_match=legacy_hash if isinstance(legacy_hash, str) else None,
                     )
                     if hit is not None:
                         merged = await asyncio.to_thread(

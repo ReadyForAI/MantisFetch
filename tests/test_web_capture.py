@@ -472,6 +472,7 @@ def test_find_capture_by_content_hash_picks_most_recent(tmp_path: Path) -> None:
     older = (datetime.now(UTC) - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     newer = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     h = "sha256:body-same"
+    legacy = "sha256:legacy-url-formula"
     docs = [
         {
             "id": "WEB-001",
@@ -493,6 +494,12 @@ def test_find_capture_by_content_hash_picks_most_recent(tmp_path: Path) -> None:
             "content_hash": "sha256:other",
             "created_at": newer,
         },
+        {
+            "id": "WEB-LEGACY",
+            "source": "web_capture",
+            "content_hash": legacy,
+            "created_at": newer,
+        },
     ]
     (tmp_path / "doc-index.json").write_text(
         json.dumps({"version": 2, "documents": docs}), encoding="utf-8"
@@ -501,6 +508,9 @@ def test_find_capture_by_content_hash_picks_most_recent(tmp_path: Path) -> None:
     assert hit is not None and hit["id"] == "WEB-002"
     assert lb._find_capture_by_content_hash(tmp_path, "") is None
     assert lb._find_capture_by_content_hash(tmp_path, "sha256:missing") is None
+    # Pre-upgrade title+url+body hash still matches via also_match
+    leg = lb._find_capture_by_content_hash(tmp_path, "sha256:new-body", also_match=legacy)
+    assert leg is not None and leg["id"] == "WEB-LEGACY"
 
 
 def test_merge_capture_tags_metadata_union_and_first_touch(tmp_path: Path) -> None:
