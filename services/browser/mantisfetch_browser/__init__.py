@@ -2976,7 +2976,7 @@ async def _capture_impl(
                 return await asyncio.to_thread(
                     _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
                 )
-        metrics.incr("capture_cache_misses")
+            metrics.incr("capture_cache_misses")
         return await _capture_fresh(req, content_type, docs_dir)
 
 
