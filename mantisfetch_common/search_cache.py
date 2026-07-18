@@ -70,3 +70,14 @@ def read_sections_lower(doc_dir: Path) -> list[dict[str, Any]] | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, list) else None
+
+
+def invalidate_search_cache(doc_dir: Path) -> None:
+    """Remove search cache files so search falls back to live full/section files."""
+    cache_dir = doc_dir / ".cache"
+    for name in (_FULL_CACHE, _SECTIONS_CACHE):
+        path = cache_dir / name
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

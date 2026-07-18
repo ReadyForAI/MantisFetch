@@ -1162,11 +1162,13 @@ def write_output(
             )
         sec_content += sec.text + "\n"
         _write_text(sections_dir / sec_filename, sec_content)
+        # Cache the full on-disk section body (header + summary + text) so
+        # search_text matches the same strings the live file scan used to.
         section_cache_rows.append(
             {
                 "sid": sec.sid,
                 "title": sec.title,
-                "text": sec.text,
+                "text": sec_content,
                 "file": f"sections/{sec_filename}",
                 "page_range": sec.page_range,
             }
@@ -1179,6 +1181,13 @@ def write_output(
         write_search_cache(doc_dir, full_text=full_body, sections=section_cache_rows)
     except Exception:  # noqa: BLE001 — cache is best-effort
         logger.warning("search text cache write failed for %s", doc_id, exc_info=True)
+        # Drop any half-written / prior cache so search falls back to live files.
+        try:
+            from mantisfetch_common.search_cache import invalidate_search_cache
+
+            invalidate_search_cache(doc_dir)
+        except Exception:  # noqa: BLE001
+            pass
 
     # manifest.json + v3 provenance (content_hash computed at function top)
     manifest = {
@@ -1310,7 +1319,7 @@ def write_output_extract_only(
             {
                 "sid": sec.sid,
                 "title": sec.title,
-                "text": sec.text,
+                "text": f"# {sec.title}\n\n{sec.text}\n",
                 "file": f"sections/{fn}",
                 "page_range": sec.page_range,
             }
@@ -1321,6 +1330,12 @@ def write_output_extract_only(
         write_search_cache(doc_dir, full_text=full_body, sections=section_cache_rows)
     except Exception:  # noqa: BLE001
         logger.warning("search text cache write failed for %s", doc_id, exc_info=True)
+        try:
+            from mantisfetch_common.search_cache import invalidate_search_cache
+
+            invalidate_search_cache(doc_dir)
+        except Exception:  # noqa: BLE001
+            pass
 
     placeholder = summary_placeholder or _summary_placeholder_text("pending", locale=output_locale)
     _write_text(
