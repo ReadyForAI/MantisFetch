@@ -134,6 +134,15 @@ def test_oversized_413(client: TestClient, root: Path, monkeypatch: pytest.Monke
     assert client.get("/deliverables/P001/T42/report.txt").status_code == 413
 
 
+def test_max_mb_non_integer_falls_back_to_default(
+    client: TestClient, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A9: non-integer MAX_MB must not 500 every request."""
+    monkeypatch.setenv("MANTISFETCH_DELIVERABLES_MAX_MB", "not-a-number")
+    resp = client.get("/deliverables/P001/T42/report.txt")
+    assert resp.status_code == 200
+
+
 # ── fence unit tests (awkward to express through URL encoding) ────────────────
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -19,8 +20,26 @@ from playwright.async_api import BrowserContext, Page
 
 logger = logging.getLogger("mantisfetch_browser")
 
-SESSION_TTL_SECONDS = 30 * 60  # 30 min idle
-SESSION_MAXSIZE = 200
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using default %d", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("%s=%r is < %d; using default %d", name, raw, minimum, default)
+        return default
+    return value
+
+
+# Defaults match historical hardcodes; override via env for long-lived agents /
+# high concurrency without a rebuild.
+SESSION_TTL_SECONDS = _env_int("MANTISFETCH_SESSION_TTL_SEC", 30 * 60, minimum=1)
+SESSION_MAXSIZE = _env_int("MANTISFETCH_SESSION_MAXSIZE", 200, minimum=1)
 
 
 @dataclass

@@ -10,6 +10,7 @@ Mounted at ``/deliverables`` on the unified :9898 app behind the shared REST
 Bearer gate (loopback-open; token-gated off-host), the same credential as upload.
 """
 
+import logging
 import mimetypes
 import os
 import stat
@@ -19,6 +20,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger("mantisfetch_deliverables")
 
 # No docs/openapi routes: this is a byte face, not a browsable API. Their default
 # paths would also 200 while the fence is disabled (contradicting the unset → 404
@@ -65,7 +68,23 @@ def _fence_root() -> Path | None:
 
 
 def _max_bytes() -> int:
-    return int(os.environ.get("MANTISFETCH_DELIVERABLES_MAX_MB", "200")) * 1024 * 1024
+    raw = os.environ.get("MANTISFETCH_DELIVERABLES_MAX_MB", "200").strip()
+    try:
+        mb = int(raw)
+    except ValueError:
+        logger.warning(
+            "MANTISFETCH_DELIVERABLES_MAX_MB=%r is not an integer; using default 200",
+            raw,
+        )
+        mb = 200
+    # 0 is valid (= any non-empty file is over limit). Negative is nonsense.
+    if mb < 0:
+        logger.warning(
+            "MANTISFETCH_DELIVERABLES_MAX_MB=%r is negative; using default 200",
+            raw,
+        )
+        mb = 200
+    return mb * 1024 * 1024
 
 
 def _resolve(rel_path: str, root: Path) -> Path | None:
