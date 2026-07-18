@@ -341,16 +341,21 @@ async def web_capture(
     tags: list[str] | None = None,
     extract_tables: bool = True,
     force_refresh: bool = False,
+    summary_mode: str = "off",
 ) -> Any:
     """One-shot semantic capture of a web page into the document library — the
     token-cheap replacement for a raw fetch. Returns doc_id + digest + section/
     table counts (reused=true if a recent cached capture was returned instead of
-    re-fetching). Set force_refresh to bypass the cache. No browser session needed."""
+    re-fetching). Set force_refresh to bypass the cache. summary_mode: "off"
+    (default, fast local digest) or "defer" (also schedule an LLM digest+brief
+    in the background — three-tier parity with /doc; poll doc_summary; spends
+    tokens). No browser session needed."""
     payload = {
         "url": url,
         "content_type": content_type,
         "extract_tables": extract_tables,
         "force_refresh": force_refresh,
+        "summary_mode": summary_mode,
     }
     if tags is not None:
         payload["tags"] = tags

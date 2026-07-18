@@ -199,6 +199,44 @@ def test_web_distill_delegates_and_wraps(monkeypatch) -> None:
     assert out["sections"][0]["t"].startswith("⟦mantisfetch:web-content")
 
 
+def test_web_capture_passes_summary_mode(monkeypatch) -> None:
+    """D5: MCP web_capture must surface summary_mode so Agents get /web/capture parity."""
+    fake = {
+        "url": "https://site.example/page",
+        "doc_id": "WEB-1",
+        "digest": "local snippet",
+        "section_count": 1,
+        "table_count": 0,
+        "reused": False,
+        "summary_status": "pending",
+    }
+    monkeypatch.setattr(mm, "_web_post", AsyncMock(return_value=fake))
+    out = asyncio.run(
+        mm.web_capture("https://site.example/page", summary_mode="defer")
+    )
+    args, _ = mm._web_post.call_args
+    assert args[0] == "/capture"
+    assert args[1]["url"] == "https://site.example/page"
+    assert args[1]["summary_mode"] == "defer"
+    assert out["digest"].startswith("⟦mantisfetch:web-content")
+    assert out["summary_status"] == "pending"
+
+
+def test_web_capture_defaults_summary_mode_off(monkeypatch) -> None:
+    fake = {
+        "url": "https://site.example/page",
+        "doc_id": "WEB-2",
+        "digest": "snippet",
+        "section_count": 0,
+        "table_count": 0,
+        "reused": False,
+    }
+    monkeypatch.setattr(mm, "_web_post", AsyncMock(return_value=fake))
+    asyncio.run(mm.web_capture("https://site.example/page"))
+    args, _ = mm._web_post.call_args
+    assert args[1]["summary_mode"] == "off"
+
+
 def test_web_webmcp_discover_wraps_untrusted_metadata(monkeypatch) -> None:
     fake = {
         "url": "https://evil.example/app",

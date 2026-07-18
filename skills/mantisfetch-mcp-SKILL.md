@@ -122,7 +122,7 @@ Document tools (`doc_*`) operate on user-uploaded content and are **not** wrappe
 
 | Tool | Purpose | Key args |
 | ---- | ------- | -------- |
-| `web_capture` | One-shot semantic capture of a URL into the library (token-cheap; no session). Returns `doc_id` + digest + section/table counts (`reused=true` when a recent cached capture is returned). | `url`, `content_type="General"`, `tags?`, `extract_tables=true`, `force_refresh=false` |
+| `web_capture` | One-shot semantic capture of a URL into the library (token-cheap; no session). Returns `doc_id` + digest + section/table counts (`reused=true` when a recent cached capture is returned). | `url`, `content_type="General"`, `tags?`, `extract_tables=true`, `force_refresh=false`, `summary_mode="off"` (`"defer"` schedules LLM digest+brief; poll `doc_summary`) |
 | `web_search` † | Web search — a ranked list of `{url, title, snippet, ...}`. Title/snippet are wrapped as untrusted content. Prefer `doc_search` first to reuse the library. | `query`, `max_results=8`, `lang="en"`, `freshness?` |
 | `web_search_capture` † | Search + capture the top N hits (`capture_top ≤ 3`) into the library. Returns `[{doc_id, digest, rank, reused}]` — deep-read via the tiers, don't pull full text blindly. | `query`, `capture_top=2`, `tags?`, `content_type="General"`, `lang="en"`, `freshness?` |
 | `web_session_open` | Open a stateful browser session. Returns `session_id`. | — |
@@ -147,6 +147,10 @@ Notes:
   `web_session_close` when done.
 - For action semantics, confidence ordering (WebMCP > A11y/DOM > Vision), and table
   extraction details, see the [browser skill](./mantisfetch-browser-SKILL.md).
+- `web_capture` defaults to `summary_mode="off"` (fast local digest). Pass
+  `summary_mode="defer"` when you need the LLM digest + brief (same as REST
+  `/web/capture`); poll `doc_summary` for progress. It spends tokens — opt in only
+  when the three-tier summary path is useful.
 
 ### 6.2 Doc tools (parse + library retrieval)
 
