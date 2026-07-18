@@ -1178,7 +1178,13 @@ def write_output(
     try:
         from mantisfetch_common.search_cache import write_search_cache
 
-        write_search_cache(doc_dir, full_text=full_body, sections=section_cache_rows)
+        write_search_cache(
+            doc_dir,
+            full_text=full_body,
+            sections=section_cache_rows,
+            doc_id=doc_id,
+            docs_dir=output_dir,
+        )
     except Exception:  # noqa: BLE001 — cache is best-effort
         logger.warning("search text cache write failed for %s", doc_id, exc_info=True)
         # Drop any half-written / prior cache so search falls back to live files.
@@ -1327,7 +1333,13 @@ def write_output_extract_only(
     try:
         from mantisfetch_common.search_cache import write_search_cache
 
-        write_search_cache(doc_dir, full_text=full_body, sections=section_cache_rows)
+        write_search_cache(
+            doc_dir,
+            full_text=full_body,
+            sections=section_cache_rows,
+            doc_id=doc_id,
+            docs_dir=output_dir,
+        )
     except Exception:  # noqa: BLE001
         logger.warning("search text cache write failed for %s", doc_id, exc_info=True)
         try:
@@ -3190,6 +3202,9 @@ async def library_search_text(
         results: list[SearchResult] = []
         from mantisfetch_common.search_cache import read_full_lower, read_sections_lower
 
+        # Note: FTS is populated as an optimization side-channel but is not yet
+        # used as an exclusive shortlist (web captures / pre-FTS docs may lack
+        # rows). Full scan still runs; B2 lowercase cache keeps it cheap.
         for d in documents:
             current_doc_id = d.get("id", "")
             if not isinstance(current_doc_id, str) or not _DOC_ID_RE.match(current_doc_id):

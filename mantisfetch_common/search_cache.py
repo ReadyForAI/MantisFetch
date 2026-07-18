@@ -20,15 +20,20 @@ def write_search_cache(
     *,
     full_text: str | None = None,
     sections: list[dict[str, Any]] | None = None,
+    doc_id: str | None = None,
+    docs_dir: Path | None = None,
 ) -> None:
     """Write lowercase full-text and optional section cache entries.
 
     ``sections`` items: ``{sid, title, text, file?, page_range?, page_start?, page_end?}``.
+    When ``doc_id`` + ``docs_dir`` are provided, also updates the SQLite FTS index (B3).
     """
     cache_dir = doc_dir / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
+    body_parts: list[str] = []
     if full_text is not None:
         (cache_dir / _FULL_CACHE).write_text(full_text.lower(), encoding="utf-8")
+        body_parts.append(full_text)
     if sections is not None:
         payload = []
         for sec in sections:
@@ -46,9 +51,18 @@ def write_search_cache(
                     "page_end": sec.get("page_end"),
                 }
             )
+            body_parts.append(title)
+            body_parts.append(text)
         (cache_dir / _SECTIONS_CACHE).write_text(
             json.dumps(payload, ensure_ascii=False), encoding="utf-8"
         )
+    if doc_id and docs_dir is not None:
+        try:
+            from mantisfetch_common import doc_index_store as dis
+
+            dis.upsert_fts(docs_dir, doc_id, "\n".join(body_parts))
+        except Exception:
+            pass
 
 
 def read_full_lower(doc_dir: Path) -> str | None:

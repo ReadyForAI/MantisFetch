@@ -1881,7 +1881,13 @@ def _persist_web_capture(
             )
             index["documents"].append(index_entry)
             index["last_updated"] = now_str
-            _write_json(index_path, index)
+            try:
+                from mantisfetch_common import doc_index_store as dis
+
+                dis.upsert_document(docs_dir, index_entry)
+                dis.export_json(docs_dir, last_updated=now_str)
+            except Exception:
+                _write_json(index_path, index)
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -1923,6 +1929,27 @@ def _update_web_index_summary(
     summary_status in the index)."""
     with _doc_index_lock:
         index_path = docs_dir / "doc-index.json"
+        try:
+            from mantisfetch_common import doc_index_store as dis
+
+            docs = dis.list_documents(docs_dir)
+            if not docs and index_path.exists():
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                docs = index.get("documents") if isinstance(index, dict) else []
+            for entry in docs or []:
+                if entry.get("id") == doc_id:
+                    entry["summary_mode"] = "defer"
+                    entry["summary_status"] = status
+                    if digest is not None:
+                        entry["digest"] = digest[:200]
+                    dis.upsert_document(docs_dir, entry)
+                    dis.export_json(
+                        docs_dir,
+                        last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                    return
+        except Exception:
+            pass
         try:
             index = json.loads(index_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -2209,6 +2236,13 @@ def _merge_capture_tags_metadata(
 
         index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         _write_json(index_path, index)
+        try:
+            from mantisfetch_common import doc_index_store as dis
+
+            dis.upsert_document(docs_dir, target)
+            dis.export_json(docs_dir, last_updated=index["last_updated"])
+        except Exception:
+            pass
 
         # Keep manifest in sync when the product tree is still present.
         # Manifest stores full metadata (including nested values); index is filtered.
