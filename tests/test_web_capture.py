@@ -461,3 +461,191 @@ def test_capture_metadata_does_not_bust_cache(client: TestClient) -> None:
     data = resp.json()
     assert data["reused"] is True  # metadata did not bust the cache
     assert data["doc_id"] == "WEB-009"
+
+
+# ── B5 content-hash dedup ──────────────────────────────────────────────────────
+
+
+def test_find_capture_by_content_hash_picks_most_recent(tmp_path: Path) -> None:
+    import mantisfetch_browser as lb
+
+    older = (datetime.now(UTC) - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    newer = (datetime.now(UTC) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    h = "sha256:body-same"
+    legacy = "sha256:legacy-url-formula"
+    docs = [
+        {
+            "id": "WEB-001",
+            "source": "web_capture",
+            "content_hash": h,
+            "created_at": older,
+            "requested_url": "https://a.com/?utm=1",
+        },
+        {
+            "id": "WEB-002",
+            "source": "web_capture",
+            "content_hash": h,
+            "created_at": newer,
+            "requested_url": "https://a.com/amp",
+        },
+        {
+            "id": "WEB-003",
+            "source": "web_capture",
+            "content_hash": "sha256:other",
+            "created_at": newer,
+        },
+        {
+            "id": "WEB-LEGACY",
+            "source": "web_capture",
+            "content_hash": legacy,
+            "created_at": newer,
+        },
+    ]
+    (tmp_path / "doc-index.json").write_text(
+        json.dumps({"version": 2, "documents": docs}), encoding="utf-8"
+    )
+    hit = lb._find_capture_by_content_hash(tmp_path, h)
+    assert hit is not None and hit["id"] == "WEB-002"
+    assert lb._find_capture_by_content_hash(tmp_path, "") is None
+    assert lb._find_capture_by_content_hash(tmp_path, "sha256:missing") is None
+    # Pre-upgrade title+url+body hash still matches via also_match
+    leg = lb._find_capture_by_content_hash(tmp_path, "sha256:new-body", also_match=legacy)
+    assert leg is not None and leg["id"] == "WEB-LEGACY"
+
+
+def test_merge_capture_tags_metadata_union_and_first_touch(tmp_path: Path) -> None:
+    import mantisfetch_browser as lb
+
+    entry = _seed_capture_index(tmp_path, doc_id="WEB-010", url="https://example.com")
+    # Seed index entry with tags + metadata
+    index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
+    index["documents"][0]["tags"] = ["a"]
+    index["documents"][0]["metadata"] = {"source": "web_capture", "keep": "old"}
+    (tmp_path / "doc-index.json").write_text(json.dumps(index), encoding="utf-8")
+    # Manifest too
+    manifest_path = tmp_path / entry["storage_path"] / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps({"tags": ["a"], "metadata": {"source": "web_capture", "keep": "old"}}),
+        encoding="utf-8",
+    )
+
+    merged = lb._merge_capture_tags_metadata(
+        tmp_path,
+        index["documents"][0],
+        tags=["b", "a"],
+        metadata={
+            "source": "web_search",
+            "search_query": "q",
+            "keep": "new",
+            "nested": {"x": 1},  # non-scalar: index drops, manifest keeps
+        },
+    )
+    assert merged["tags"] == ["a", "b"]
+    # first-touch: existing keys win (index only stores scalar-filtered metadata)
+    assert merged["metadata"]["source"] == "web_capture"
+    assert merged["metadata"]["keep"] == "old"
+    assert merged["metadata"]["search_query"] == "q"
+    assert "nested" not in merged["metadata"]
+
+    reloaded = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
+    assert reloaded["documents"][0]["tags"] == ["a", "b"]
+    man = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert man["tags"] == ["a", "b"]
+    assert man["metadata"]["search_query"] == "q"
+    assert man["metadata"]["nested"] == {"x": 1}  # full metadata in manifest
+
+
+def test_capture_reuses_by_content_hash_across_urls(client: TestClient) -> None:
+    """B5: after distill, same body hash reuses an existing doc even for a new URL
+    (CAPTURE_TTL=0 so URL cache is off)."""
+    distill = _make_distill_result(url="https://example.com/amp")
+    # Ensure content_hash is body-only and shared with a seeded entry
+    import mantisfetch_browser as lb
+
+    body_hash = lb._hash_text(
+        "Example Domain\n" + "\n\n".join(s["t"] for s in distill["sections"])
+    )
+    distill["content_hash"] = body_hash
+    distill["title"] = "Example Domain"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        # Persist a prior capture with the same body hash but a different URL
+        lb._persist_web_capture(
+            doc_id="WEB-020",
+            url="https://example.com/?utm=old",
+            title="Example Domain",
+            sections=distill["sections"],
+            digest="prior digest",
+            tags=["prior"],
+            content_hash=body_hash,
+            docs_dir=docs_dir,
+            content_type="General",
+            extract_tables=True,
+            requested_url="https://example.com/?utm=old",
+            lang="en-US",
+            metadata={"source": "web_capture"},
+        )
+
+        mock_page = AsyncMock()
+        mock_page.goto = AsyncMock()
+        mock_context = AsyncMock()
+        mock_context.new_page = AsyncMock(return_value=mock_page)
+        orig_browser = lb._browser
+        lb._browser = MagicMock()
+        lb._browser.new_context = AsyncMock(return_value=mock_context)
+        try:
+            with (
+                patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
+                patch("mantisfetch_browser.CAPTURE_TTL_HOURS", 0.0),
+                patch("mantisfetch_browser._distill", new=AsyncMock(return_value=distill)),
+                patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
+            ):
+                resp = client.post(
+                    "/web/capture",
+                    json={
+                        "url": "https://example.com/amp",
+                        "tags": ["from-amp"],
+                        "metadata": {"search_query": "q"},
+                    },
+                )
+        finally:
+            lb._browser = orig_browser
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reused"] is True
+        assert data["doc_id"] == "WEB-020"
+        # tags merged
+        index = json.loads((docs_dir / "doc-index.json").read_text(encoding="utf-8"))
+        entry = next(d for d in index["documents"] if d["id"] == "WEB-020")
+        assert set(entry["tags"]) == {"prior", "from-amp"}
+        assert entry["metadata"].get("search_query") == "q"
+
+
+def test_content_hash_excludes_url() -> None:
+    """Body-only hash: same title+sections, different URLs → same content_hash."""
+    import mantisfetch_browser as lb
+
+    sections = [
+        {"sid": "s1", "h": "H", "t": "same body", "type": "text"},
+    ]
+    joined = "\n\n".join(s["t"] for s in sections)
+    h1 = lb._hash_text("Title\n" + joined)
+    h2 = lb._hash_text("Title\n" + joined)
+    assert h1 == h2
+    # URL must not be part of the formula (explicit regression guard)
+    with_url = lb._hash_text("Title\nhttps://a.com\n" + joined)
+    assert h1 != with_url
+
+
+def test_search_and_capture_url_ttl_independent(monkeypatch) -> None:
+    import mantisfetch_browser as lb
+
+    # Default is independent of CAPTURE_TTL
+    assert lb._search_and_capture_url_ttl() == lb.SEARCH_CAPTURE_TTL_HOURS
+    # 0 disables URL reuse on the search path even if CAPTURE_TTL is high
+    monkeypatch.setattr(lb, "SEARCH_CAPTURE_TTL_HOURS", 0.0)
+    monkeypatch.setattr(lb, "CAPTURE_TTL_HOURS", 48.0)
+    assert lb._search_and_capture_url_ttl() == 0.0

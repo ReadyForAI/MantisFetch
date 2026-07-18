@@ -309,7 +309,12 @@ MANTISFETCH_SEARCH_PROVIDER=searxng docker compose --profile search up
 
 For **China deployments**, SearXNG's default upstreams (Google, DuckDuckGo) are usually blocked — activate the China preset first (a Baidu / 360 / Sogou / Quark / Bing starting set; **validate it from your own network**): `cp configs/searxng/settings.cn.yml configs/searxng/settings.yml`.
 
-`search_and_capture` reuses the `/web/capture` path, so its results are deduplicated by the same `MANTISFETCH_CAPTURE_TTL_HOURS` cache — **enable it (`> 0`) to share captures (and paid-API savings) across agents/hosts** (it is `0`/off by default). A cache hit keeps the document's original provenance (first-touch): a URL first captured directly stays `source=web_capture`. Filter search-sourced documents with `metadata.source=web_search`, **not** the top-level `source`.
+`search_and_capture` reuses the `/web/capture` path with **two** layers of reuse:
+
+1. **URL cache** — `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` (default **24**) so repeated research queries do not re-fetch the same top hits. Independent of `MANTISFETCH_CAPTURE_TTL_HOURS` (still `0`/off for plain `/web/capture`).
+2. **Content-hash reuse** — after distill, if the body `content_hash` already exists in the library (same article via AMP / tracking-param URLs), the existing `doc_id` is returned and tags/metadata are merged (first-touch for existing metadata keys).
+
+A cache hit keeps the document's original top-level provenance (first-touch): a URL first captured directly stays `source=web_capture`. Filter search-sourced documents with `metadata.source=web_search`, **not** the top-level `source`.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -319,6 +324,7 @@ For **China deployments**, SearXNG's default upstreams (Google, DuckDuckGo) are 
 | `MANTISFETCH_SEARCH_API_KEY` | — | API key for the active provider (Tavily / Bocha / Brave) |
 | `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | Default result cap (hard max 20) |
 | `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | Minimum seconds between searches (`429` when exceeded) |
+| `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` | `24` | URL-level reuse window for `/web/search_and_capture` only; `0` disables URL reuse on that path (content-hash reuse still applies) |
 
 ### Configuration
 
@@ -337,7 +343,8 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | Fence root for the read-only `GET /deliverables/{rel_path}` byte face; unset disables it (every request 404s). Must not overlap `MANTISFETCH_DOCS_DIR` or `MANTISFETCH_ALLOWED_DOC_ROOTS` |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | Size cap for a single deliverable download; larger files get 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |
-| `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | Reuse a prior `/web/capture` of the same URL + content_type made within this many hours instead of re-fetching; `0` disables (default). `force_refresh=true` always bypasses |
+| `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | Reuse a prior `/web/capture` of the same URL + content_type made within this many hours instead of re-fetching; `0` disables (default). `force_refresh=true` always bypasses. Content-hash library reuse still applies after distill |
+| `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` | `24` | Same as above, but for `/web/search_and_capture` only (default on so research queries do not pile duplicate docs) |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | Maximum concurrent section-summary LLM batches per document |
 | `MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC` | `2.0` | Minimum spacing between summary LLM requests across the service |
 | `MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT` | `10` | Documents above this section count skip per-section LLM summaries and generate document-level summaries from section excerpts |
@@ -634,7 +641,12 @@ MANTISFETCH_SEARCH_PROVIDER=searxng docker compose --profile search up
 
 **国内部署**:SearXNG 默认上游(Google、DuckDuckGo)通常被墙——先启用国内预设(Baidu / 360 / Sogou / Quark / Bing 起步组合,**请在目标网络实测校准**):`cp configs/searxng/settings.cn.yml configs/searxng/settings.yml`。
 
-`search_and_capture` 复用 `/web/capture` 路径，因此结果由同一个 `MANTISFETCH_CAPTURE_TTL_HOURS` 缓存去重——**将其设为 `> 0` 可在多 Agent / 多主机间共享采集结果（及付费 API 配额节省）**（默认 `0` 关闭）。缓存命中保留文档原有来源（first-touch）：先被直接采集的 URL 仍为 `source=web_capture`。过滤搜索来源文档请用 `metadata.source=web_search`，**不要**用顶层 `source`。
+`search_and_capture` 复用 `/web/capture` 路径，并带两层去重：
+
+1. **URL 缓存** — `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS`（默认 **24**），避免重复研究查询反复重抓同一批结果；与普通 `/web/capture` 的 `MANTISFETCH_CAPTURE_TTL_HOURS`（默认仍为 `0`）独立。
+2. **内容哈希复用** — distill 后若库中已有相同 body `content_hash`（同一文章经 AMP / 跟踪参数 URL），返回已有 `doc_id` 并合并 tags/metadata（已有 metadata 键 first-touch 保留）。
+
+缓存命中保留文档原有顶层来源（first-touch）：先被直接采集的 URL 仍为 `source=web_capture`。过滤搜索来源文档请用 `metadata.source=web_search`，**不要**用顶层 `source`。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -662,7 +674,8 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | 只读 `GET /deliverables/{rel_path}` 字节接口的围栏根目录；不设置则禁用（所有请求返回 404）。不得与 `MANTISFETCH_DOCS_DIR` 或 `MANTISFETCH_ALLOWED_DOC_ROOTS` 重叠 |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | 单个交付物下载的大小上限；超出返回 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | 文档目录命名策略：`counter` 保持 `DOC-xxx`；`source_filename` 基于上传文件名生成安全目录名 |
-| `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | 在这么多小时内对同一 URL + content_type 的 `/web/capture` 直接复用已有结果而不重抓；`0` 关闭（默认）。`force_refresh=true` 始终绕过 |
+| `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | 在这么多小时内对同一 URL + content_type 的 `/web/capture` 直接复用已有结果而不重抓；`0` 关闭（默认）。`force_refresh=true` 始终绕过。distill 后仍会按 content_hash 做库内内容级复用 |
+| `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` | `24` | 同上，但仅作用于 `/web/search_and_capture`（默认开启，避免研究查询堆积重复文档） |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | 单文档 section 摘要的最大 LLM batch 并发数 |
 | `MANTISFETCH_SUMMARY_REQUEST_MIN_INTERVAL_SEC` | `2.0` | 全服务摘要 LLM 请求之间的最小间隔秒数 |
 | `MANTISFETCH_SUMMARY_SECTION_DETAIL_LIMIT` | `10` | 超过该 section 数量后跳过逐 section LLM 摘要，改用 section 摘录生成文档级摘要 |

@@ -800,7 +800,9 @@ Response example:
 - The session is always closed after capture, even on error
 - Rate-limited: returns `429` when too many concurrent captures are in progress
 - URL validation: private IPs, localhost, and non-HTTP(S) schemes are blocked
-- **URL dedup (opt-in):** when `MANTISFETCH_CAPTURE_TTL_HOURS > 0`, a capture of the same `url` + `content_type` + `extract_tables` + `lang` made within that window is reused — the response has `reused: true` and `cache_age_hours`, and no re-fetch happens. Default (`0`) always captures. Pass `force_refresh: true` to bypass the cache for a single call. A cache hit returns the existing document **with its original tags** (request `tags` are not re-applied on a hit). Concurrent identical requests are deduped too — they serialize per key, so only the first fetches and the rest reuse it.
+- **URL dedup (opt-in for `/web/capture`):** when `MANTISFETCH_CAPTURE_TTL_HOURS > 0`, a capture of the same `url` + `content_type` + `extract_tables` + `lang` made within that window is reused — the response has `reused: true` and `cache_age_hours`, and no re-fetch happens. Default (`0`) always re-fetches for plain capture. Pass `force_refresh: true` to bypass. Concurrent identical requests serialize per key.
+- **`/web/search_and_capture` URL TTL (default on):** uses `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` (default **24**) so repeated research queries reuse recent hits without re-fetch. Independent of `CAPTURE_TTL_HOURS`.
+- **Content-hash reuse (always on after distill):** if the distilled body `content_hash` already exists in the library (same article via AMP / tracking-param URLs), returns that `doc_id` with `reused: true` and **merges** request tags (union) plus new metadata keys (first-touch keeps existing keys). `force_refresh: true` skips this too.
 
 **When to use `/capture` vs manual session flow:**
 
