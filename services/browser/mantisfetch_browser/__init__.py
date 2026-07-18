@@ -2601,8 +2601,10 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
         await sessions.put(sid, sess)
 
         try:
-            # Hold sess.lock across goto→distill so SessionManager maxsize eviction
-            # cannot close the context mid-capture (#158 close-under-lock + A7).
+            # Hold sess.lock only for browser I/O so SessionManager maxsize eviction
+            # cannot close the context mid-goto/distill (#158 + A7). Disk writes run
+            # outside the lock in a worker thread (A3) so they never block the loop
+            # or serialize other sessions behind fsync of a large capture.
             async with sess.lock:
                 try:
                     await sess.page.goto(
@@ -2625,13 +2627,14 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 except Exception as e:
                     raise HTTPException(500, f"capture distill failed: {e}")
 
-                url = out["url"]
-                title = out.get("title")
-                sections: list[dict[str, Any]] = out["sections"]
-                content_hash: str = out["content_hash"]
-                table_sections = [s for s in sections if s.get("type") == "table"]
+            url = out["url"]
+            title = out.get("title")
+            sections: list[dict[str, Any]] = out["sections"]
+            content_hash: str = out["content_hash"]
+            table_sections = [s for s in sections if s.get("type") == "table"]
+            digest = _build_web_digest(title, sections)
 
-                digest = _build_web_digest(title, sections)
+            def _alloc_and_persist() -> str:
                 doc_id = _next_web_doc_id(docs_dir)
                 _persist_web_capture(
                     doc_id=doc_id,
@@ -2649,26 +2652,29 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                     metadata=req.metadata,
                     summary_mode=req.summary_mode,
                 )
+                return doc_id
 
-                summary_status: str | None = None
-                if req.summary_mode == "defer":
-                    threading.Thread(
-                        target=_defer_web_summary,
-                        args=(doc_id, sections, docs_dir, content_type, title, url),
-                        daemon=True,
-                        name=f"web-summary-{doc_id}",
-                    ).start()
-                    summary_status = "pending"
+            doc_id = await asyncio.to_thread(_alloc_and_persist)
 
-                return CaptureResponse(
-                    doc_id=doc_id,
-                    content_type=content_type,
-                    storage_path=_doc_storage_rel_path(doc_id, content_type),
-                    digest=digest,
-                    section_count=len(sections),
-                    table_count=len(table_sections),
-                    summary_status=summary_status,
-                )
+            summary_status: str | None = None
+            if req.summary_mode == "defer":
+                threading.Thread(
+                    target=_defer_web_summary,
+                    args=(doc_id, sections, docs_dir, content_type, title, url),
+                    daemon=True,
+                    name=f"web-summary-{doc_id}",
+                ).start()
+                summary_status = "pending"
+
+            return CaptureResponse(
+                doc_id=doc_id,
+                content_type=content_type,
+                storage_path=_doc_storage_rel_path(doc_id, content_type),
+                digest=digest,
+                section_count=len(sections),
+                table_count=len(table_sections),
+                summary_status=summary_status,
+            )
         finally:
             await sessions.remove(sid)
 
@@ -2687,13 +2693,21 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     docs_dir = _get_docs_dir()
 
     # Fast path: a lock-free cache hit returns without taking the per-key lock or
-    # spinning up a browser.
+    # spinning up a browser. Index/digest reads run off the event loop (A3).
     if caching:
-        cached = _find_cached_capture(
-            docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+        cached = await asyncio.to_thread(
+            _find_cached_capture,
+            docs_dir,
+            req.url,
+            content_type,
+            req.extract_tables,
+            req.lang,
+            CAPTURE_TTL_HOURS,
         )
         if cached is not None:
-            return _cached_capture_response(cached, content_type, docs_dir, req.summary_mode)
+            return await asyncio.to_thread(
+                _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
+            )
 
     cache_key = (
         _capture_cache_key(req.url, content_type, req.extract_tables, req.lang) if caching else None
@@ -2702,11 +2716,19 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     # the first captures under the lock; the rest recheck the cache here and reuse it.
     async with _optional_capture_lock(cache_key):
         if caching:
-            cached = _find_cached_capture(
-                docs_dir, req.url, content_type, req.extract_tables, req.lang, CAPTURE_TTL_HOURS
+            cached = await asyncio.to_thread(
+                _find_cached_capture,
+                docs_dir,
+                req.url,
+                content_type,
+                req.extract_tables,
+                req.lang,
+                CAPTURE_TTL_HOURS,
             )
             if cached is not None:
-                return _cached_capture_response(cached, content_type, docs_dir, req.summary_mode)
+                return await asyncio.to_thread(
+                    _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
+                )
         return await _capture_fresh(req, content_type, docs_dir)
 
 
