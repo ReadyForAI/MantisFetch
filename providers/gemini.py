@@ -11,7 +11,12 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
-from providers.errors import ProviderRejected, classify_provider_error
+from providers.errors import (
+    ProviderError,
+    ProviderRejected,
+    ProviderUnavailable,
+    classify_provider_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,33 @@ _OCR_PROOFREAD_PROMPT = OCR_PROOFREAD_PROMPT
 
 # See providers.openai_compat._UNSET — tells "not passed" from an explicit value.
 _UNSET = object()
+
+
+def _gemini_empty_text_error(response: object, what: str) -> ProviderError:
+    """Classify a Gemini response with no text parts.
+
+    Safety / policy blocks are non-retryable; empty text from MAX_TOKENS or other
+    finish reasons remains retryable so FailoverProvider can try the backup.
+    """
+    reason_bits: list[str] = []
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    block = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+    if block:
+        reason_bits.append(f"block_reason={block}")
+    candidates = getattr(response, "candidates", None) or []
+    for cand in candidates:
+        fr = getattr(cand, "finish_reason", None)
+        if fr is not None:
+            reason_bits.append(f"finish_reason={fr}")
+            fr_s = str(fr).upper()
+            if any(tok in fr_s for tok in ("SAFETY", "BLOCK", "PROHIBITED", "RECITATION")):
+                return ProviderRejected(
+                    f"Gemini {what} blocked ({', '.join(reason_bits)})"
+                )
+    if block:
+        return ProviderRejected(f"Gemini {what} blocked ({', '.join(reason_bits)})")
+    detail = ", ".join(reason_bits) if reason_bits else "no text parts"
+    return ProviderUnavailable(f"Gemini {what} returned no text ({detail})")
 
 
 class GeminiProvider(LLMProvider):
@@ -81,11 +113,9 @@ class GeminiProvider(LLMProvider):
                 )
                 text = getattr(response, "text", None)
                 if text is None:
-                    # Safety / block often yields None text; do not treat as
-                    # transient (would waste a failover call).
-                    raise ProviderRejected("Gemini summary returned no text (possibly blocked)")
+                    raise _gemini_empty_text_error(response, "summary")
                 return text.strip()
-            except ProviderRejected:
+            except ProviderError:
                 raise
             except Exception as exc:
                 if attempt < max_retries:
@@ -119,9 +149,7 @@ class GeminiProvider(LLMProvider):
                 )
                 raw_text = getattr(response, "text", None)
                 if raw_text is None:
-                    raise ProviderRejected(
-                        f"Gemini OCR returned no text for page {page_num} (possibly blocked)"
-                    )
+                    raise _gemini_empty_text_error(response, f"OCR page {page_num}")
                 result = raw_text.strip()
                 # Proofread whenever transcription succeeded — gating on
                 # attempt == 0 skipped it for any page that needed a retry.
@@ -148,7 +176,7 @@ class GeminiProvider(LLMProvider):
                             exc,
                         )
                 return result
-            except ProviderRejected:
+            except ProviderError:
                 raise
             except Exception as exc:
                 if attempt < max_retries:

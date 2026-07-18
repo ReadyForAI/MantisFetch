@@ -227,9 +227,13 @@ class OpenAICompatProvider(LLMProvider):
                 )
                 choice = resp.choices[0]
                 finish = getattr(choice, "finish_reason", None)
-                return self._message_text(choice.message.content), (
-                    str(finish) if finish is not None else None
-                )
+                message = choice.message
+                refusal = getattr(message, "refusal", None)
+                text = self._message_text(message.content)
+                # Policy refusal with null content: treat as rejection (do not fail over).
+                if text is None and isinstance(refusal, str) and refusal.strip():
+                    raise ProviderRejected(f"model refusal: {refusal.strip()[:200]}")
+                return text, (str(finish) if finish is not None else None)
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries:
