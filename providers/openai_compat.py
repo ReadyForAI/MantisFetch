@@ -142,13 +142,17 @@ class OpenAICompatProvider(LLMProvider):
         return merged
 
     @staticmethod
-    def _message_text(message_content) -> str:
+    def _message_text(message_content) -> str | None:
         # Some OpenAI-compatible backends (reasoning models, tool-only replies,
         # content-filter drops) return content: null. str(None) would yield the
         # literal "None", which is neither empty nor a failure sentinel and gets
         # written into digests/OCR as real text.
+        #
+        # Return None for null so callers can distinguish it from a genuine empty
+        # string: summarize treats both as failure, but OCR must treat only null as
+        # failure (empty string = blank page success — see FailoverProvider).
         if message_content is None:
-            return ""
+            return None
         if isinstance(message_content, str):
             return message_content.strip()
         if isinstance(message_content, list):
@@ -196,8 +200,12 @@ class OpenAICompatProvider(LLMProvider):
         max_retries: int = 2,
         model: str | None = None,
         extra_body: dict | None = None,
-    ) -> str:
-        """Call chat.completions.create and return the assistant text."""
+    ) -> str | None:
+        """Call chat.completions.create and return the assistant text.
+
+        Returns ``None`` when the upstream message content is null (distinct from
+        an empty string). Callers decide role-specific handling.
+        """
 
         last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
@@ -231,11 +239,14 @@ class OpenAICompatProvider(LLMProvider):
             {"role": "user", "content": text},
         ]
         try:
-            return self._chat(
+            result = self._chat(
                 messages,
                 max_retries=max_retries,
                 extra_body=self._chat_extra_body,
             )
+            # Null content → empty string: summary pipeline treats empty as failed
+            # (_summary_failed_text / FailoverProvider._summary_failed).
+            return result if result is not None else ""
         except Exception as exc:
             # Honor the same failure-sentinel contract as GeminiProvider —
             # callers check _summary_failed_text() rather than catching.
@@ -270,6 +281,13 @@ class OpenAICompatProvider(LLMProvider):
             # raising, so the OCR pipeline detects it via _is_ocr_failed_text.
             logger.warning("OpenAI-compat OCR failed for page %d: %s", page_num, exc)
             return f"[OCR failed for page {page_num}]"
+        # content:null is a failed OCR call, not a blank page. Empty string is
+        # reserved for genuinely blank pages (must not trigger failover).
+        if result is None:
+            logger.warning(
+                "OpenAI-compat OCR returned null content for page %d", page_num
+            )
+            return f"[OCR failed for page {page_num}]"
         if do_proofread and result and not self._is_ocr_failure_sentinel(result):
             review_messages = [
                 {
@@ -293,6 +311,7 @@ class OpenAICompatProvider(LLMProvider):
             except Exception as exc:
                 logger.warning("OpenAI-compat OCR proofread skipped for page %d: %s", page_num, exc)
                 reviewed = ""
+            # Ignore null/empty/sentinel proofread; keep the transcription draft.
             if reviewed and not self._is_ocr_failure_sentinel(reviewed):
                 result = reviewed
         if self._is_ocr_failure_sentinel(result):

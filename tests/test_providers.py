@@ -403,11 +403,16 @@ class TestOpenAICompatProvider:
             with pytest.raises(RuntimeError, match="MANTISFETCH_OCR_EXTRA_BODY_JSON"):
                 get_provider()
 
-    def test_message_text_null_content_returns_empty(self, monkeypatch):
-        """content=null must not become the literal string 'None'."""
+    def test_message_text_null_content_role_specific(self, monkeypatch):
+        """content=null must not become 'None'; OCR maps it to the fail sentinel.
+
+        Summarize treats empty/null as failure (empty string → summary failed
+        detection). OCR must NOT treat null as a blank page (empty string is
+        reserved for blank-page success / no-failover).
+        """
         monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
         monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
-        monkeypatch.setenv("MANTISFETCH_LLM_OCR_PROOFREAD", "false")
+        monkeypatch.setenv("MANTISFETCH_OCR_PROOFREAD", "false")
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = MagicMock(
@@ -419,7 +424,7 @@ class TestOpenAICompatProvider:
         with patch.dict("sys.modules", {"openai": mock_openai}):
             p = get_provider()
             assert p.summarize("body", "prompt") == ""
-            assert p.ocr(b"\x89PNG", page_num=1) == ""
+            assert p.ocr(b"\x89PNG", page_num=1) == "[OCR failed for page 1]"
 
     def test_ocr_bracketed_page_text_still_proofreads(self, monkeypatch):
         """Real OCR text starting with '[1]' must not be treated as a failure."""
