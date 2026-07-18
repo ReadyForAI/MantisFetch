@@ -29,7 +29,9 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       # OpenAI-compatible provider settings (used when MANTISFETCH_LLM_PROVIDER=openai)
       MANTISFETCH_LLM_API_KEY: ${MANTISFETCH_LLM_API_KEY:-}
-      MANTISFETCH_LLM_BASE_URL: ${MANTISFETCH_LLM_BASE_URL:-https://api.openai.com/v1}
+      # Leave empty so vendor profiles (zhipu/kimi/...) supply their base_url.
+      # Set explicitly only when overriding (e.g. a proxy or local Ollama).
+      MANTISFETCH_LLM_BASE_URL: ${MANTISFETCH_LLM_BASE_URL:-}
       MANTISFETCH_LLM_MODEL: ${MANTISFETCH_LLM_MODEL:-}
       MANTISFETCH_OCR_MODEL: ${MANTISFETCH_OCR_MODEL:-}
       MANTISFETCH_OCR_IMAGE_INPUT_MODE: ${MANTISFETCH_OCR_IMAGE_INPUT_MODE:-}
