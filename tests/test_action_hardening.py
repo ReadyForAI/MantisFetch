@@ -342,3 +342,46 @@ def test_act_click_proceeds_when_not_occluded(client: TestClient) -> None:
 
     assert resp.status_code == 200
     locator.click.assert_awaited_once()
+
+
+def test_act_webmcp_non_object_text_wrapped_as_input(client: TestClient) -> None:
+    """A5: text='5' must not pass integer 5 as params; wrap as {\"input\": ...}."""
+    sid = "S-WEBMCP"
+    sess = _register_session(sid, "W1")
+    sess.action_map["W1"] = {
+        "aid": "W1",
+        "role": "webmcp_tool",
+        "name": "[WebMCP] tool",
+        "strategy": {"type": "webmcp", "tool_name": "tool_x", "source": "webmcp"},
+        "actions": ["invoke"],
+        "source": "webmcp",
+    }
+    invoke = AsyncMock(return_value={"success": True, "result": {}})
+    after = {
+        "url": "https://example.com",
+        "title": "T",
+        "content_hash": "sha256:z",
+        "sections": [],
+        "actions": [],
+        "meta": {},
+    }
+    try:
+        with (
+            patch("mantisfetch_browser._invoke_webmcp_tool", new=invoke),
+            patch("mantisfetch_browser._distill", new=AsyncMock(return_value=after)),
+        ):
+            resp = client.post(
+                "/web/session/act",
+                json={
+                    "session_id": sid,
+                    "aid": "W1",
+                    "action": "invoke",
+                    "text": "5",
+                },
+            )
+    finally:
+        mb.sessions._sessions.pop(sid, None)
+
+    assert resp.status_code == 200
+    invoke.assert_awaited_once()
+    assert invoke.await_args.args[2] == {"input": "5"}

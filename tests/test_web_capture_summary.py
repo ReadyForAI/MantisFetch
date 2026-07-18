@@ -170,6 +170,46 @@ def test_defer_summary_failure_marks_failed(tmp_path: Path, monkeypatch) -> None
     assert not (doc_dir / "brief.md").exists()  # keep the snippet digest, no half-written brief
 
 
+def test_defer_summary_skips_when_doc_deleted(tmp_path: Path, monkeypatch) -> None:
+    """A4: if the capture was deleted before/during summary, do not write back."""
+    import shutil
+
+    import mantisfetch_docreader as dr
+
+    doc_dir = _persist(tmp_path, "defer")
+    shutil.rmtree(doc_dir)
+
+    called = {"n": 0}
+
+    def gen(*args, **kwargs):
+        called["n"] += 1
+        return ("DIGEST", "BRIEF", [])
+
+    monkeypatch.setattr(dr, "generate_summaries", gen)
+    mb._defer_web_summary("WEB-001", _SECTIONS, tmp_path, "General", "Example", "https://example.com")
+
+    assert called["n"] == 0  # early exit before LLM
+    assert not doc_dir.exists()
+
+
+def test_defer_summary_discards_when_deleted_mid_llm(tmp_path: Path, monkeypatch) -> None:
+    """A4: DELETE during LLM must not resurrect digest/brief on a missing dir."""
+    import shutil
+
+    import mantisfetch_docreader as dr
+
+    doc_dir = _persist(tmp_path, "defer")
+
+    def gen_then_delete(*args, **kwargs):
+        shutil.rmtree(doc_dir)
+        return ("DIGEST", "BRIEF", [])
+
+    monkeypatch.setattr(dr, "generate_summaries", gen_then_delete)
+    mb._defer_web_summary("WEB-001", _SECTIONS, tmp_path, "General", "Example", "https://example.com")
+
+    assert not doc_dir.exists()
+
+
 def _distill_result() -> dict:
     return {
         "url": "https://example.com",
