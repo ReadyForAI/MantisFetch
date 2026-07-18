@@ -1748,7 +1748,7 @@ def _persist_web_capture(
         sid = sec.get("sid", f"s_{i:03d}")
         h = sec.get("h") or ""
         body = sec.get("t", "")
-        safe_h = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", h).strip().replace(" ", "-")[:40] or "section"
+        safe_h = _safe_heading(h)
         fname = f"{i:02d}-{sid}-{safe_h}.md"
         header = f"## {h}\n\n" if h else ""
         _write_text_atomic(sections_dir / fname, f"{header}{body}\n")
@@ -1904,7 +1904,11 @@ def _defer_web_summary(
     into its storage layout (three-tier parity with /doc). Reuses the docreader
     summary pipeline via a function-level import — this avoids import-time coupling
     and lets tests patch ``mantisfetch_docreader.generate_summaries``. The LLM
-    client's own request timeouts bound the call; the thread is a daemon."""
+    client's own request timeouts bound the call; the thread is a daemon.
+
+    Delete guard: web captures are not re-parsed under the same id, so existence of
+    ``manifest.json`` is enough — if the doc was deleted mid-LLM, skip writeback.
+    """
     from mantisfetch_docreader import (  # noqa: PLC0415
         ParsedDocument,
         Section,
@@ -1913,6 +1917,9 @@ def _defer_web_summary(
 
     doc_dir = docs_dir / _doc_storage_rel_path(doc_id, _normalize_content_type(content_type))
     with _web_summary_sem:
+        if not (doc_dir / "manifest.json").exists():
+            logger.info("web capture summary skipped (doc deleted): %s", doc_id)
+            return
         _set_web_summary_status(doc_dir, "running")
         _update_web_index_summary(docs_dir, doc_id, status="running")
         text_sections = [s for s in sections if s.get("type") != "table"]
@@ -1935,17 +1942,21 @@ def _defer_web_summary(
         )
         try:
             digest_text, brief_text, _ = generate_summaries(parsed, _WEB_SUMMARY_CONCURRENCY, False)
+            # Re-check before writeback: DELETE may have raced with the LLM call.
+            if not (doc_dir / "manifest.json").exists():
+                logger.info("web capture summary discarded (doc deleted): %s", doc_id)
+                return
+            _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest_text}\n")
+            _write_text_atomic(doc_dir / "brief.md", f"{brief_text}\n")
+            _update_web_index_summary(docs_dir, doc_id, status="completed", digest=digest_text)
+            # Flip status last so "completed" means every artifact is already on disk.
+            _set_web_summary_status(doc_dir, "completed", add_brief_path=True)
+            logger.info("web capture summary complete: %s", doc_id)
         except Exception as exc:  # noqa: BLE001 - status recorded; the thread must not crash
             logger.warning("web capture summary failed for %s: %s", doc_id, exc)
-            _set_web_summary_status(doc_dir, "failed", error=str(exc))
-            _update_web_index_summary(docs_dir, doc_id, status="failed")
-            return
-        _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest_text}\n")
-        _write_text_atomic(doc_dir / "brief.md", f"{brief_text}\n")
-        _update_web_index_summary(docs_dir, doc_id, status="completed", digest=digest_text)
-        # Flip status last so "completed" means every artifact is already on disk.
-        _set_web_summary_status(doc_dir, "completed", add_brief_path=True)
-        logger.info("web capture summary complete: %s", doc_id)
+            if (doc_dir / "manifest.json").exists():
+                _set_web_summary_status(doc_dir, "failed", error=str(exc))
+                _update_web_index_summary(docs_dir, doc_id, status="failed")
 
 
 # Per-capture-key locks serialize *cache misses* for the same (url, content_type,
@@ -2352,11 +2363,18 @@ async def act(req: ActRequest) -> ActResponse:
                 tool_name = ad.get("strategy", {}).get("tool_name")
                 if not tool_name:
                     raise HTTPException(400, "webmcp action missing tool_name")
-                params = {}
+                params: dict[str, Any] = {}
                 if req.text:
                     try:
-                        params = json.loads(req.text)
+                        parsed = json.loads(req.text)
                     except Exception:
+                        parsed = None
+                    # Non-object JSON (e.g. text="5") must not become invoke params —
+                    # tool.execute(5) is not a structured input. Mirror the parse-fail
+                    # path and wrap as {"input": ...}.
+                    if isinstance(parsed, dict):
+                        params = parsed
+                    else:
                         params = {"input": req.text}
                 invoke_result = await _invoke_webmcp_tool(
                     sess, tool_name, params, timeout_ms=req.timeout_ms
@@ -2583,69 +2601,74 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
         await sessions.put(sid, sess)
 
         try:
-            try:
-                await sess.page.goto(req.url, wait_until="domcontentloaded", timeout=req.timeout_ms)
-            except Exception as e:
-                raise HTTPException(502, f"capture goto failed: {e}")
+            # Hold sess.lock across goto→distill so SessionManager maxsize eviction
+            # cannot close the context mid-capture (#158 close-under-lock + A7).
+            async with sess.lock:
+                try:
+                    await sess.page.goto(
+                        req.url, wait_until="domcontentloaded", timeout=req.timeout_ms
+                    )
+                except Exception as e:
+                    raise HTTPException(502, f"capture goto failed: {e}")
 
-            sess.webmcp_tools = None
-            sess.webmcp_available = False
+                sess.webmcp_tools = None
+                sess.webmcp_available = False
 
-            distill_req = DistillRequest(
-                session_id=sid,
-                include_actions=False,
-                include_diff=False,
-                extract_tables=req.extract_tables,
-            )
-            try:
-                out = await _distill(sess, distill_req)
-            except Exception as e:
-                raise HTTPException(500, f"capture distill failed: {e}")
+                distill_req = DistillRequest(
+                    session_id=sid,
+                    include_actions=False,
+                    include_diff=False,
+                    extract_tables=req.extract_tables,
+                )
+                try:
+                    out = await _distill(sess, distill_req)
+                except Exception as e:
+                    raise HTTPException(500, f"capture distill failed: {e}")
 
-            url = out["url"]
-            title = out.get("title")
-            sections: list[dict[str, Any]] = out["sections"]
-            content_hash: str = out["content_hash"]
-            table_sections = [s for s in sections if s.get("type") == "table"]
+                url = out["url"]
+                title = out.get("title")
+                sections: list[dict[str, Any]] = out["sections"]
+                content_hash: str = out["content_hash"]
+                table_sections = [s for s in sections if s.get("type") == "table"]
 
-            digest = _build_web_digest(title, sections)
-            doc_id = _next_web_doc_id(docs_dir)
-            _persist_web_capture(
-                doc_id=doc_id,
-                url=url,
-                title=title,
-                sections=sections,
-                digest=digest,
-                tags=req.tags,
-                content_hash=content_hash,
-                docs_dir=docs_dir,
-                content_type=content_type,
-                extract_tables=req.extract_tables,
-                requested_url=req.url,
-                lang=req.lang,
-                metadata=req.metadata,
-                summary_mode=req.summary_mode,
-            )
+                digest = _build_web_digest(title, sections)
+                doc_id = _next_web_doc_id(docs_dir)
+                _persist_web_capture(
+                    doc_id=doc_id,
+                    url=url,
+                    title=title,
+                    sections=sections,
+                    digest=digest,
+                    tags=req.tags,
+                    content_hash=content_hash,
+                    docs_dir=docs_dir,
+                    content_type=content_type,
+                    extract_tables=req.extract_tables,
+                    requested_url=req.url,
+                    lang=req.lang,
+                    metadata=req.metadata,
+                    summary_mode=req.summary_mode,
+                )
 
-            summary_status: str | None = None
-            if req.summary_mode == "defer":
-                threading.Thread(
-                    target=_defer_web_summary,
-                    args=(doc_id, sections, docs_dir, content_type, title, url),
-                    daemon=True,
-                    name=f"web-summary-{doc_id}",
-                ).start()
-                summary_status = "pending"
+                summary_status: str | None = None
+                if req.summary_mode == "defer":
+                    threading.Thread(
+                        target=_defer_web_summary,
+                        args=(doc_id, sections, docs_dir, content_type, title, url),
+                        daemon=True,
+                        name=f"web-summary-{doc_id}",
+                    ).start()
+                    summary_status = "pending"
 
-            return CaptureResponse(
-                doc_id=doc_id,
-                content_type=content_type,
-                storage_path=_doc_storage_rel_path(doc_id, content_type),
-                digest=digest,
-                section_count=len(sections),
-                table_count=len(table_sections),
-                summary_status=summary_status,
-            )
+                return CaptureResponse(
+                    doc_id=doc_id,
+                    content_type=content_type,
+                    storage_path=_doc_storage_rel_path(doc_id, content_type),
+                    digest=digest,
+                    section_count=len(sections),
+                    table_count=len(table_sections),
+                    summary_status=summary_status,
+                )
         finally:
             await sessions.remove(sid)
 
