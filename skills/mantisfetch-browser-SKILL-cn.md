@@ -798,7 +798,9 @@ If false:
 - 即使发生错误，session 也一定会被关闭
 - 有并发限流：并发抓取过多时会返回 `429`
 - URL 校验：私有 IP、localhost、非 HTTP(S) 协议都会被拦截
-- **URL 去重（opt-in）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` + `extract_tables` + `lang` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）每次都抓。单次想绕过缓存传 `force_refresh: true`。命中缓存返回的是已有文档（**保留其原有 tags**，不会把本次请求的 `tags` 重新应用上去）。**并发**的同键请求也会去重 —— 按 key 串行，只有第一个真正抓取，其余复用其结果。
+- **URL 去重（`/web/capture` 默认关闭）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` + `extract_tables` + `lang` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）普通 capture 每次重抓。单次绕过传 `force_refresh: true`。并发同键请求按 key 串行。
+- **`/web/search_and_capture` URL TTL（默认开启）：** 使用 `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS`（默认 **24**），重复研究查询会复用近期命中，无需重抓；与 `CAPTURE_TTL_HOURS` 独立。
+- **内容哈希复用（distill 后始终开启）：** 若库中已有相同 body `content_hash`（同一文章经 AMP / 跟踪参数 URL），返回该 `doc_id`（`reused: true`），并**合并** tags（并集）与新 metadata 键（已有键 first-touch 保留）。`force_refresh: true` 同样跳过。
 
 **什么时候用 `/capture`，什么时候用手动 session 流程：**
 

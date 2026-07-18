@@ -92,16 +92,18 @@ def test_search_throttle_429(client: TestClient, monkeypatch) -> None:
 def test_search_and_capture_serial_with_skip(client: TestClient) -> None:
     provider = _FakeSearchProvider(results=[_sr("https://a.com"), _sr("https://b.com")])
     seen_reqs = []
+    seen_ttls = []
 
-    async def fake_capture(req):
+    async def fake_capture(req, *, url_ttl_hours=None):
         seen_reqs.append(req)
+        seen_ttls.append(url_ttl_hours)
         if req.url == "https://b.com":
             raise HTTPException(502, "goto timeout")
         return CaptureResponse(doc_id="WEB-100", digest="dg", section_count=2, table_count=0)
 
     with (
         patch("mantisfetch_browser.create_search_provider", return_value=provider),
-        patch("mantisfetch_browser.capture", new=fake_capture),
+        patch("mantisfetch_browser._capture_impl", new=fake_capture),
     ):
         resp = client.post(
             "/web/search_and_capture",
@@ -120,19 +122,21 @@ def test_search_and_capture_serial_with_skip(client: TestClient) -> None:
     assert seen_reqs[0].metadata["search_provider"] == "fake"
     assert seen_reqs[0].metadata["search_rank"] == 1
     assert seen_reqs[0].tags == ["research"]
+    # B5: search_and_capture applies its own URL TTL (default 24h)
+    assert all(t is not None and t >= 24.0 for t in seen_ttls)
 
 
 def test_search_and_capture_caps_top_at_3(client: TestClient) -> None:
     provider = _FakeSearchProvider(results=[_sr(f"https://{i}.com") for i in range(10)])
     calls = []
 
-    async def fake_capture(req):
+    async def fake_capture(req, *, url_ttl_hours=None):
         calls.append(req.url)
         return CaptureResponse(doc_id="WEB-1", digest="d", section_count=1, table_count=0)
 
     with (
         patch("mantisfetch_browser.create_search_provider", return_value=provider),
-        patch("mantisfetch_browser.capture", new=fake_capture),
+        patch("mantisfetch_browser._capture_impl", new=fake_capture),
     ):
         resp = client.post("/web/search_and_capture", json={"query": "q", "capture_top": 9})
     assert resp.status_code == 200

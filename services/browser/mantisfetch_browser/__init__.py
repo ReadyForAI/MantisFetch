@@ -256,6 +256,13 @@ _MAX_CONCURRENT_SESSIONS = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_SESSIO
 # within this many hours is reused instead of re-fetched. 0 (default) disables it,
 # preserving the original always-capture behavior.
 CAPTURE_TTL_HOURS = float(os.environ.get("MANTISFETCH_CAPTURE_TTL_HOURS", "0") or "0")
+# URL-level cache TTL used only by /search_and_capture (B5). Default 24h so
+# repeated research queries do not re-fetch the same top hits into new doc_ids.
+# Set to 0 to disable (falls back to CAPTURE_TTL_HOURS only when that is > 0 —
+# search_and_capture always applies max(this, CAPTURE_TTL_HOURS)).
+SEARCH_CAPTURE_TTL_HOURS = float(
+    os.environ.get("MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS", "24") or "24"
+)
 _capture_sem = asyncio.Semaphore(_MAX_CONCURRENT_CAPTURE)
 _session_sem = asyncio.Semaphore(_MAX_CONCURRENT_SESSIONS)
 
@@ -1401,7 +1408,10 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
     )
 
     joined = "\n\n".join(s["t"] for s in sections)
-    content_hash = _hash_text((title or "") + "\n" + (url or "") + "\n" + joined)
+    # Body-only hash (title + section text): same article via AMP / tracking-param
+    # URLs must collide so content-level dedup (B5) can reuse the existing doc.
+    # URL lives in source_url / requested_url, not in the content identity.
+    content_hash = _hash_text((title or "") + "\n" + joined)
 
     a11y_attempted = False
     a11y_mode = None
@@ -2014,6 +2024,18 @@ async def _optional_capture_lock(key: str | None) -> AsyncGenerator[None, None]:
         yield
 
 
+def _load_doc_index(docs_dir: Path) -> dict[str, Any] | None:
+    index_path = docs_dir / "doc-index.json"
+    if not index_path.exists():
+        return None
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return index if isinstance(index, dict) else None
+
+
 def _find_cached_capture(
     docs_dir: Path,
     url: str,
@@ -2029,13 +2051,8 @@ def _find_cached_capture(
     a hit returns the existing document with its original tags/metadata, i.e.
     first-touch provenance: a URL first captured directly keeps source=web_capture
     with no search metadata even when later reused via /web/search_and_capture.)"""
-    index_path = docs_dir / "doc-index.json"
-    if not index_path.exists():
-        return None
-    try:
-        with open(index_path, encoding="utf-8") as f:
-            index = json.load(f)
-    except (OSError, ValueError):
+    index = _load_doc_index(docs_dir)
+    if index is None:
         return None
     now = datetime.now(UTC)
     best: dict[str, Any] | None = None
@@ -2070,6 +2087,111 @@ def _find_cached_capture(
         if best_dt is None or created_dt > best_dt:
             best, best_dt = doc, created_dt
     return best
+
+
+def _find_capture_by_content_hash(
+    docs_dir: Path, content_hash: str
+) -> dict[str, Any] | None:
+    """Return the most recent web_capture index entry with the same content_hash.
+
+    No TTL — library-wide content identity (B5). Different URLs for the same page
+    body (tracking params, AMP) reuse one doc_id. Empty/missing hashes never match.
+    """
+    if not content_hash:
+        return None
+    index = _load_doc_index(docs_dir)
+    if index is None:
+        return None
+    best: dict[str, Any] | None = None
+    best_dt: datetime | None = None
+    for doc in index.get("documents", []):
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("source") != "web_capture":
+            continue
+        if doc.get("content_hash") != content_hash:
+            continue
+        created = doc.get("created_at")
+        if not isinstance(created, str):
+            continue
+        try:
+            created_dt = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        if best_dt is None or created_dt > best_dt:
+            best, best_dt = doc, created_dt
+    return best
+
+
+def _merge_capture_tags_metadata(
+    docs_dir: Path,
+    entry: dict[str, Any],
+    tags: list[str] | None,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Union tags and first-touch-merge metadata into an existing capture (B5).
+
+    Existing metadata keys win (first-touch provenance); new keys are added.
+    Tags are the sorted unique union. Updates both doc-index and manifest when
+    present. Returns the refreshed index entry (or the original on I/O failure).
+    """
+    doc_id = entry.get("id")
+    if not doc_id:
+        return entry
+    new_tags = list(tags or [])
+    new_meta = _indexable_metadata(metadata or {})
+    if not new_tags and not new_meta:
+        return entry
+
+    with _doc_index_lock:
+        index_path = docs_dir / "doc-index.json"
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return entry
+        docs = index.get("documents")
+        if not isinstance(docs, list):
+            return entry
+        target: dict[str, Any] | None = None
+        for d in docs:
+            if isinstance(d, dict) and d.get("id") == doc_id:
+                target = d
+                break
+        if target is None:
+            return entry
+
+        old_tags = target.get("tags") if isinstance(target.get("tags"), list) else []
+        merged_tags = sorted({str(t) for t in list(old_tags) + new_tags if t is not None and str(t)})
+        target["tags"] = merged_tags
+
+        old_meta = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+        merged_meta = dict(old_meta)
+        for k, v in new_meta.items():
+            if k not in merged_meta:
+                merged_meta[k] = v
+        target["metadata"] = merged_meta
+
+        index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _write_json(index_path, index)
+
+        # Keep manifest in sync when the product tree is still present.
+        storage_path = target.get("storage_path") or entry.get("storage_path")
+        if storage_path:
+            manifest_path = docs_dir / storage_path / "manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["tags"] = merged_tags
+                m_meta = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+                for k, v in new_meta.items():
+                    if k not in m_meta:
+                        m_meta[k] = v
+                manifest["metadata"] = m_meta
+                _write_text_atomic(
+                    manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2)
+                )
+            except (OSError, ValueError):
+                pass
+        return dict(target)
 
 
 def _load_web_capture_text_sections(doc_dir: Path) -> list[dict[str, Any]]:
@@ -2656,27 +2778,75 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             table_sections = [s for s in sections if s.get("type") == "table"]
             digest = _build_web_digest(title, sections)
 
-            def _alloc_and_persist() -> str:
-                doc_id = _next_web_doc_id(docs_dir)
-                _persist_web_capture(
-                    doc_id=doc_id,
-                    url=url,
-                    title=title,
-                    sections=sections,
-                    digest=digest,
-                    tags=req.tags,
-                    content_hash=content_hash,
-                    docs_dir=docs_dir,
-                    content_type=content_type,
-                    extract_tables=req.extract_tables,
-                    requested_url=req.url,
-                    lang=req.lang,
-                    metadata=req.metadata,
-                    summary_mode=req.summary_mode,
-                )
-                return doc_id
+            # B5 content-level dedup: after distill, reuse an existing library doc
+            # with the same body hash (different URL / tracking params / AMP).
+            # force_refresh always forces a new doc_id.
+            if not req.force_refresh and content_hash:
+                # Serialize concurrent same-hash captures so two workers don't both miss.
+                async with _optional_capture_lock(f"ch:{content_hash}"):
+                    hit = await asyncio.to_thread(
+                        _find_capture_by_content_hash, docs_dir, content_hash
+                    )
+                    if hit is not None:
+                        merged = await asyncio.to_thread(
+                            _merge_capture_tags_metadata,
+                            docs_dir,
+                            hit,
+                            req.tags,
+                            req.metadata,
+                        )
+                        return await asyncio.to_thread(
+                            _cached_capture_response,
+                            merged,
+                            content_type,
+                            docs_dir,
+                            req.summary_mode,
+                        )
 
-            doc_id = await asyncio.to_thread(_alloc_and_persist)
+                    def _alloc_and_persist() -> str:
+                        doc_id = _next_web_doc_id(docs_dir)
+                        _persist_web_capture(
+                            doc_id=doc_id,
+                            url=url,
+                            title=title,
+                            sections=sections,
+                            digest=digest,
+                            tags=req.tags,
+                            content_hash=content_hash,
+                            docs_dir=docs_dir,
+                            content_type=content_type,
+                            extract_tables=req.extract_tables,
+                            requested_url=req.url,
+                            lang=req.lang,
+                            metadata=req.metadata,
+                            summary_mode=req.summary_mode,
+                        )
+                        return doc_id
+
+                    doc_id = await asyncio.to_thread(_alloc_and_persist)
+            else:
+
+                def _alloc_and_persist_forced() -> str:
+                    doc_id = _next_web_doc_id(docs_dir)
+                    _persist_web_capture(
+                        doc_id=doc_id,
+                        url=url,
+                        title=title,
+                        sections=sections,
+                        digest=digest,
+                        tags=req.tags,
+                        content_hash=content_hash,
+                        docs_dir=docs_dir,
+                        content_type=content_type,
+                        extract_tables=req.extract_tables,
+                        requested_url=req.url,
+                        lang=req.lang,
+                        metadata=req.metadata,
+                        summary_mode=req.summary_mode,
+                    )
+                    return doc_id
+
+                doc_id = await asyncio.to_thread(_alloc_and_persist_forced)
 
             summary_status: str | None = None
             if req.summary_mode == "defer":
@@ -2701,17 +2871,20 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             await sessions.remove(sid)
 
 
-@app.post("/capture", response_model=CaptureResponse)
-async def capture(req: CaptureRequest) -> CaptureResponse:
-    """One-shot web capture: navigate to URL, distill, persist to document library, return doc_id.
+async def _capture_impl(
+    req: CaptureRequest, *, url_ttl_hours: float | None = None
+) -> CaptureResponse:
+    """Shared capture path for /capture and /search_and_capture.
 
-    Internally runs: session/new → goto → distill → persist → session/close.
-    The session is always closed, even on error.
+    ``url_ttl_hours`` overrides the module-level CAPTURE_TTL_HOURS for the URL
+    cache (search_and_capture passes a higher default). Content-hash reuse is
+    always on (unless force_refresh) and lives inside ``_capture_fresh``.
     """
     _validate_url(req.url)
     content_type = _normalize_content_type(req.content_type)
 
-    caching = CAPTURE_TTL_HOURS > 0 and not req.force_refresh
+    ttl = CAPTURE_TTL_HOURS if url_ttl_hours is None else url_ttl_hours
+    caching = ttl > 0 and not req.force_refresh
     docs_dir = _get_docs_dir()
 
     # Fast path: a lock-free cache hit returns without taking the per-key lock or
@@ -2724,7 +2897,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
             content_type,
             req.extract_tables,
             req.lang,
-            CAPTURE_TTL_HOURS,
+            ttl,
         )
         if cached is not None:
             return await asyncio.to_thread(
@@ -2745,13 +2918,31 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
                 content_type,
                 req.extract_tables,
                 req.lang,
-                CAPTURE_TTL_HOURS,
+                ttl,
             )
             if cached is not None:
                 return await asyncio.to_thread(
                     _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
                 )
         return await _capture_fresh(req, content_type, docs_dir)
+
+
+@app.post("/capture", response_model=CaptureResponse)
+async def capture(req: CaptureRequest) -> CaptureResponse:
+    """One-shot web capture: navigate to URL, distill, persist to document library, return doc_id.
+
+    Internally runs: session/new → goto → distill → persist → session/close.
+    The session is always closed, even on error. Reuses an existing library doc
+    when (a) URL-level cache hits within MANTISFETCH_CAPTURE_TTL_HOURS, or
+    (b) the distilled body content_hash already exists (B5 content dedup).
+    """
+    return await _capture_impl(req)
+
+
+def _search_and_capture_url_ttl() -> float:
+    """Effective URL-cache TTL for search_and_capture: max of its own default
+    (SEARCH_CAPTURE_TTL_HOURS, default 24) and the global CAPTURE_TTL_HOURS."""
+    return max(SEARCH_CAPTURE_TTL_HOURS, CAPTURE_TTL_HOURS)
 
 
 # ═══════════════════════════════════════════
@@ -2868,10 +3059,11 @@ async def search_and_capture(req: SearchAndCaptureRequest) -> SearchAndCaptureRe
             lang=req.lang,
             metadata=metadata,
         )
-        # capture() runs the SSRF guard on the (search-supplied) URL, so a hit
+        # _capture_impl runs the SSRF guard on the (search-supplied) URL, so a hit
         # pointing at a private/loopback target is rejected here → skipped.
+        # URL TTL defaults to 24h for this path (B5) so repeated queries reuse hits.
         try:
-            cap = await capture(cap_req)
+            cap = await _capture_impl(cap_req, url_ttl_hours=_search_and_capture_url_ttl())
         except HTTPException as exc:
             skipped.append(
                 SkippedItem(url=hit.url, reason=f"capture_failed: {exc.detail}", rank=rank)
