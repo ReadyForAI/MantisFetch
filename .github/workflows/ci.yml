@@ -24,6 +24,27 @@ jobs:
 
       - name: Test
         # e2e is excluded: it needs a real browser (playwright install), an LLM
-        # key, and network egress. The real-Chromium smoke test skips cleanly
-        # when Chromium is absent, so it stays green here too.
+        # key, and network egress. The real-Chromium smoke test is powered by the
+        # separate browser-smoke job below (this job does not install Chromium).
         run: pytest tests/ --ignore=tests/e2e -v --tb=short
+
+  # D1 (2026-07-17 review): keep the A1 Chromium smoke test electrified. The
+  # suite skips when Chromium is absent, so without this job the guard never
+  # runs in CI. Uses data: URLs only — no external network needed.
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-asyncio
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python -m playwright install --with-deps chromium
+
+      - name: Real-Chromium evaluate smoke
+        run: pytest tests/test_browser_evaluate_smoke.py -v --tb=short

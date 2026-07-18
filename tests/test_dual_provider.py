@@ -115,6 +115,25 @@ def test_gemini_prefix_routes_to_gemini_provider(monkeypatch):
     assert p._api_key_override == "gk"
 
 
+def test_gemini_slot_base_url_warns_and_is_ignored(monkeypatch, caplog):
+    """A6: gemini slots ignore base_url; warn so a proxy config is not silent."""
+    import logging
+
+    _dual(
+        monkeypatch,
+        MANTISFETCH_LLM_DEFAULT="gemini",
+        MANTISFETCH_LLM_DEFAULT_API_KEY="gk",
+        MANTISFETCH_LLM_DEFAULT_BASE_URL="https://proxy.example/v1",
+        MANTISFETCH_SUM_MODEL_DEFAULT="gemini/gemini-2.5-pro",
+    )
+    from providers.gemini import GeminiProvider
+
+    with caplog.at_level(logging.WARNING, logger="providers"):
+        p = get_provider("summary")
+    assert isinstance(p, GeminiProvider)
+    assert any("ignore base_url" in r.message for r in caplog.records)
+
+
 def test_unregistered_vendor_works_with_slot_base_url(monkeypatch):
     """Any OpenAI-compatible endpoint is usable config-only via its slot base_url."""
     _dual(

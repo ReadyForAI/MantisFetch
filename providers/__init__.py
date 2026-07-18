@@ -160,6 +160,20 @@ def _build_slot_provider(spec: str, slots: dict[str, _Slot]) -> LLMProvider:
     if vendor == "gemini":
         from providers.gemini import GeminiProvider
 
+        # GeminiProvider talks to Google's API via google-genai and does not
+        # accept a custom base_url. Warn loudly if the slot has one set so a
+        # proxy/gateway config is not silently ignored.
+        if slot.base_url:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "gemini slot %s has MANTISFETCH_LLM_%s_BASE_URL=%r set; "
+                "gemini slots ignore base_url (google-genai only). "
+                "Use an openai-compat slot with a Gemini-compatible gateway if you need a proxy.",
+                vendor,
+                slot.label,
+                slot.base_url,
+            )
         return GeminiProvider(api_key=slot.api_key, model=model)
 
     from providers.openai_compat import OpenAICompatProvider
