@@ -92,6 +92,18 @@ async def health() -> dict:
     }
 
 
+@app.get("/metrics")
+async def metrics() -> dict:
+    """Process-wide cumulative counters (token efficiency, cache, failover).
+
+    Ungated like ``/health`` so operators can scrape without a bearer token.
+    Counters reset on process restart.
+    """
+    from mantisfetch_common.metrics import snapshot
+
+    return {"ok": True, "metrics": snapshot()}
+
+
 class _RestAuthGate:
     """Pure-ASGI Bearer gate for the /web, /doc and /deliverables HTTP surface
     (SSE-safe — only ever emits its own response on deny, otherwise passes through
@@ -122,7 +134,7 @@ class _RestAuthGate:
     # The mount does not rewrite scope["path"], so the gate sees the full path.
     # Both the stripped and full forms are exempted to be robust across Starlette
     # versions.
-    _HEALTH_PATHS = {"/health", "/web/health", "/doc/health"}
+    _HEALTH_PATHS = {"/health", "/metrics", "/web/health", "/doc/health"}
 
     def __init__(self, app: object) -> None:
         self.app = app

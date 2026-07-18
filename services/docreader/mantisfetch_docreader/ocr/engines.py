@@ -66,8 +66,10 @@ _local_ocr_disabled_until = 0.0
 
 def gemini_ocr(image_bytes: bytes, page_num: int, *, proofread: bool | None = None) -> str:
     """OCR a single page image via the active LLM provider."""
+    from mantisfetch_common import metrics as metrics
     from providers import get_provider
 
+    metrics.incr("ocr_pages")
     try:
         return get_provider("ocr").ocr(image_bytes, page_num, proofread=proofread)
     except Exception as exc:
@@ -301,6 +303,12 @@ def local_ocr_with_layout(
         # spawn the worker — a defensive choke point so any caller, including ones
         # without their own LLM fallback, gets a clean miss instead of a crash.
         return t("ocr_failed", page=page_num), None
+    try:
+        from mantisfetch_common import metrics as metrics
+
+        metrics.incr("ocr_pages")
+    except Exception:  # noqa: BLE001
+        pass
     with _local_ocr_worker_lock:
         try:
             proc = _get_local_ocr_worker()

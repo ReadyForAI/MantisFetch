@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from mantisfetch_common import metrics as metrics
 from providers.base import LLMProvider
 from providers.errors import ProviderError
 
@@ -66,12 +67,14 @@ class FailoverProvider(LLMProvider):
                 "summary primary provider failed (%s); failing over to the fallback provider",
                 type(exc).__name__,
             )
+            metrics.incr("failover_summary")
             return self._fallback.summarize(text, prompt, max_retries=max_retries)
         except Exception as exc:
             logger.warning(
                 "summary primary provider raised (%s); failing over to the fallback provider",
                 exc,
             )
+            metrics.incr("failover_summary")
             return self._fallback.summarize(text, prompt, max_retries=max_retries)
 
         if not _summary_failed(result):
@@ -79,6 +82,7 @@ class FailoverProvider(LLMProvider):
         logger.warning(
             "summary primary provider failed (sentinel); failing over to the fallback provider"
         )
+        metrics.incr("failover_summary")
         return self._fallback.summarize(text, prompt, max_retries=max_retries)
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
@@ -97,6 +101,7 @@ class FailoverProvider(LLMProvider):
                 page_num,
                 type(exc).__name__,
             )
+            metrics.incr("failover_ocr")
             return self._fallback.ocr(image_bytes, page_num, proofread=proofread)
         except Exception as exc:
             logger.warning(
@@ -104,6 +109,7 @@ class FailoverProvider(LLMProvider):
                 page_num,
                 exc,
             )
+            metrics.incr("failover_ocr")
             return self._fallback.ocr(image_bytes, page_num, proofread=proofread)
 
         if not _ocr_failed(result):
@@ -112,4 +118,5 @@ class FailoverProvider(LLMProvider):
             "OCR primary provider failed for page %d (sentinel); failing over to the fallback provider",
             page_num,
         )
+        metrics.incr("failover_ocr")
         return self._fallback.ocr(image_bytes, page_num, proofread=proofread)

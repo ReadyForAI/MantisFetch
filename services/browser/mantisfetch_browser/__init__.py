@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from i18n import t
+from mantisfetch_common import metrics as metrics
 from mantisfetch_common.atomic import _write_json
 from mantisfetch_common.atomic import _write_text as _write_text_atomic
 from mantisfetch_common.paths import _mask_path
@@ -1523,6 +1524,13 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
         "meta": meta,
     }
     session.action_map = {a["aid"]: a for a in actions}
+    # D3: rough char budget accounting (joined body before packing vs packed out).
+    out_chars = sum(len(s.get("t") or "") + len(s.get("h") or "") for s in sections) + sum(
+        _estimate_action_chars(a) for a in actions
+    )
+    metrics.incr("distill_input_chars", len(joined) + len(title or "") + len(url or ""))
+    metrics.incr("distill_output_chars", out_chars)
+    metrics.incr("distill_calls")
     return session.last_distill
 
 
@@ -2836,6 +2844,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                         hit_ct = _normalize_content_type(
                             merged.get("content_type") or content_type
                         )
+                        metrics.incr("capture_content_hash_hits")
                         return await asyncio.to_thread(
                             _cached_capture_response,
                             merged,
@@ -2941,6 +2950,7 @@ async def _capture_impl(
             ttl,
         )
         if cached is not None:
+            metrics.incr("capture_cache_hits")
             return await asyncio.to_thread(
                 _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
             )
@@ -2962,9 +2972,11 @@ async def _capture_impl(
                 ttl,
             )
             if cached is not None:
+                metrics.incr("capture_cache_hits")
                 return await asyncio.to_thread(
                     _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
                 )
+            metrics.incr("capture_cache_misses")
         return await _capture_fresh(req, content_type, docs_dir)
 
 
