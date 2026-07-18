@@ -19,6 +19,12 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
+from providers.errors import (
+    ProviderError,
+    ProviderRejected,
+    ProviderUnavailable,
+    classify_provider_error,
+)
 from providers.vendor_profiles import get_vendor_profile
 
 logger = logging.getLogger(__name__)
@@ -200,11 +206,11 @@ class OpenAICompatProvider(LLMProvider):
         max_retries: int = 2,
         model: str | None = None,
         extra_body: dict | None = None,
-    ) -> str | None:
-        """Call chat.completions.create and return the assistant text.
+    ) -> tuple[str | None, str | None]:
+        """Call chat.completions.create.
 
-        Returns ``None`` when the upstream message content is null (distinct from
-        an empty string). Callers decide role-specific handling.
+        Returns ``(text, finish_reason)``. ``text`` is ``None`` when upstream
+        message content is null (distinct from an empty string).
         """
 
         last_exc: Exception | None = None
@@ -219,7 +225,15 @@ class OpenAICompatProvider(LLMProvider):
                 resp = self._client.chat.completions.create(
                     **kwargs,
                 )
-                return self._message_text(resp.choices[0].message.content)
+                choice = resp.choices[0]
+                finish = getattr(choice, "finish_reason", None)
+                message = choice.message
+                refusal = getattr(message, "refusal", None)
+                text = self._message_text(message.content)
+                # Policy refusal with null content: treat as rejection (do not fail over).
+                if text is None and isinstance(refusal, str) and refusal.strip():
+                    raise ProviderRejected(f"model refusal: {refusal.strip()[:200]}")
+                return text, (str(finish) if finish is not None else None)
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries:
@@ -239,19 +253,23 @@ class OpenAICompatProvider(LLMProvider):
             {"role": "user", "content": text},
         ]
         try:
-            result = self._chat(
+            result, finish = self._chat(
                 messages,
                 max_retries=max_retries,
                 extra_body=self._chat_extra_body,
             )
-            # Null content → empty string: summary pipeline treats empty as failed
-            # (_summary_failed_text / FailoverProvider._summary_failed).
+            if result is None and finish and "content_filter" in finish.lower():
+                raise ProviderRejected(f"summary blocked by content filter ({finish})")
+            # Null content → empty string: summary pipeline treats empty as failed.
             return result if result is not None else ""
+        except ProviderError:
+            raise
         except Exception as exc:
-            # Honor the same failure-sentinel contract as GeminiProvider —
-            # callers check _summary_failed_text() rather than catching.
+            # Raise typed errors so FailoverProvider can skip non-retryable 4xx.
+            # get_provider wraps with SentinelBoundary for callers that still
+            # expect "[summary generation failed]".
             logger.error("OpenAI-compat summarize failed: %s", exc)
-            return "[summary generation failed]"
+            raise classify_provider_error(exc) from exc
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """OCR a page image via the OpenAI vision endpoint (base64-encoded)."""
@@ -270,24 +288,31 @@ class OpenAICompatProvider(LLMProvider):
             }
         ]
         try:
-            result = self._chat(
+            result, finish = self._chat(
                 messages,
                 max_retries=2,
                 model=self._ocr_model,
                 extra_body=self._ocr_extra_body,
             )
         except Exception as exc:
-            # Match GeminiProvider: return the OCR failure sentinel instead of
-            # raising, so the OCR pipeline detects it via _is_ocr_failed_text.
+            # Typed raise → FailoverProvider (retryable only) + SentinelBoundary.
             logger.warning("OpenAI-compat OCR failed for page %d: %s", page_num, exc)
-            return f"[OCR failed for page {page_num}]"
+            raise classify_provider_error(exc) from exc
         # content:null is a failed OCR call, not a blank page. Empty string is
         # reserved for genuinely blank pages (must not trigger failover).
         if result is None:
             logger.warning(
-                "OpenAI-compat OCR returned null content for page %d", page_num
+                "OpenAI-compat OCR returned null content for page %d (finish=%s)",
+                page_num,
+                finish,
             )
-            return f"[OCR failed for page {page_num}]"
+            if finish and "content_filter" in finish.lower():
+                raise ProviderRejected(
+                    f"OCR blocked by content filter for page {page_num} ({finish})"
+                )
+            raise ProviderUnavailable(
+                f"OpenAI-compat OCR returned null content for page {page_num}"
+            )
         if do_proofread and result and not self._is_ocr_failure_sentinel(result):
             review_messages = [
                 {
@@ -302,7 +327,7 @@ class OpenAICompatProvider(LLMProvider):
                 }
             ]
             try:
-                reviewed = self._chat(
+                reviewed, _finish = self._chat(
                     review_messages,
                     max_retries=1,
                     model=self._ocr_model,

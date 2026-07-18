@@ -68,7 +68,11 @@ def get_provider(role: str = "summary") -> LLMProvider:
         existing = _providers.get(key)
         if existing is not None:
             return existing
-        provider = _build_dual(role) if _dual_mode() else _build_legacy()
+        raw = _build_dual(role) if _dual_mode() else _build_legacy()
+        # Fold typed ProviderError back into failure sentinels for the pipeline.
+        from providers.sentinel import SentinelBoundary
+
+        provider = SentinelBoundary(raw)
         _providers[key] = provider
         return provider
 
@@ -77,6 +81,15 @@ def reset_provider() -> None:
     """Clear the cached providers (used in tests)."""
     with _providers_lock:
         _providers.clear()
+
+
+def unwrap_provider(provider: LLMProvider) -> LLMProvider:
+    """Peel off ``SentinelBoundary`` wrappers (tests / diagnostics)."""
+    from providers.sentinel import SentinelBoundary
+
+    while isinstance(provider, SentinelBoundary):
+        provider = provider._inner  # noqa: SLF001
+    return provider
 
 
 # ── Legacy single-provider path ───────────────────────────────────────────────

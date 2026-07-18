@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from providers import get_provider, reset_provider
+from providers import get_provider, reset_provider, unwrap_provider
 
 _PROVIDER_ENV = (
     "MANTISFETCH_LLM_PROVIDER",
@@ -110,7 +110,7 @@ def test_gemini_prefix_routes_to_gemini_provider(monkeypatch):
     from providers.gemini import GeminiProvider
 
     p = get_provider("summary")
-    assert isinstance(p, GeminiProvider)
+    assert isinstance(unwrap_provider(p), GeminiProvider)
     assert p._model == "gemini-2.5-pro"
     assert p._api_key_override == "gk"
 
@@ -130,7 +130,7 @@ def test_gemini_slot_base_url_warns_and_is_ignored(monkeypatch, caplog):
 
     with caplog.at_level(logging.WARNING, logger="providers"):
         p = get_provider("summary")
-    assert isinstance(p, GeminiProvider)
+    assert isinstance(unwrap_provider(p), GeminiProvider)
     assert any("ignore base_url" in r.message for r in caplog.records)
 
 
@@ -254,6 +254,69 @@ def test_failover_ocr_on_primary_exception():
     assert fallback.calls == 1
 
 
+def test_failover_skips_on_provider_rejected():
+    """D2: 4xx / content-policy must NOT spend a fallback call."""
+    from providers.errors import ProviderRejected
+    from providers.failover import FailoverProvider
+
+    class _Rejecting:
+        calls = 0
+
+        def summarize(self, text, prompt, max_retries=2):
+            self.calls += 1
+            raise ProviderRejected("400 bad request")
+
+        def ocr(self, image_bytes, page_num, proofread=None):
+            self.calls += 1
+            raise ProviderRejected("400 bad request")
+
+    primary = _Rejecting()
+    fallback = _StubProvider("should-not-run")
+    fp = FailoverProvider(primary, fallback, role="summary")
+    try:
+        fp.summarize("t", "p")
+        raise AssertionError("expected ProviderRejected")
+    except ProviderRejected:
+        pass
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+def test_classify_status_codes():
+    from providers.errors import (
+        ProviderRateLimited,
+        ProviderRejected,
+        ProviderUnavailable,
+        classify_provider_error,
+    )
+
+    class _E(Exception):
+        def __init__(self, status_code):
+            super().__init__(f"status {status_code}")
+            self.status_code = status_code
+
+    assert isinstance(classify_provider_error(_E(429)), ProviderRateLimited)
+    assert isinstance(classify_provider_error(_E(400)), ProviderRejected)
+    assert isinstance(classify_provider_error(_E(503)), ProviderUnavailable)
+    assert isinstance(classify_provider_error(TimeoutError("timed out")), ProviderUnavailable)
+
+
+def test_sentinel_boundary_folds_typed_errors():
+    from providers.errors import ProviderRejected
+    from providers.sentinel import SentinelBoundary
+
+    class _Inner:
+        def summarize(self, text, prompt, max_retries=2):
+            raise ProviderRejected("nope")
+
+        def ocr(self, image_bytes, page_num, proofread=None):
+            raise ProviderRejected("nope")
+
+    b = SentinelBoundary(_Inner())
+    assert b.summarize("t", "p") == "[summary generation failed]"
+    assert b.ocr(b"x", 2) == "[OCR failed for page 2]"
+
+
 def test_get_provider_wires_failover_when_fallback_set(monkeypatch):
     _dual(
         monkeypatch,
@@ -269,7 +332,7 @@ def test_get_provider_wires_failover_when_fallback_set(monkeypatch):
 
     with _mock_openai():
         p = get_provider("summary")
-    assert isinstance(p, FailoverProvider)
+    assert isinstance(unwrap_provider(p), FailoverProvider)
 
 
 # ── Validation / degradation ──────────────────────────────────────────────────
@@ -287,7 +350,7 @@ def test_broken_fallback_degrades_to_primary(monkeypatch):
 
     with _mock_openai():
         p = get_provider("summary")
-    assert isinstance(p, OpenAICompatProvider)  # bare primary, no failover wrapper
+    assert isinstance(unwrap_provider(p), OpenAICompatProvider)  # bare primary, no failover wrapper
 
 
 def test_unknown_vendor_prefix_raises(monkeypatch):
@@ -359,7 +422,7 @@ def test_keyless_gemini_fallback_degrades_to_primary(monkeypatch):
 
     with _mock_openai():
         p = get_provider("summary")
-    assert isinstance(p, OpenAICompatProvider)  # bare primary, no failover wrapper
+    assert isinstance(unwrap_provider(p), OpenAICompatProvider)  # bare primary, no failover wrapper
 
 
 def test_invalid_role_raises():
@@ -374,7 +437,7 @@ def test_legacy_mode_when_default_slot_absent(monkeypatch):
     from providers.gemini import GeminiProvider
 
     p = get_provider("ocr")  # role ignored in legacy mode
-    assert isinstance(p, GeminiProvider)
+    assert isinstance(unwrap_provider(p), GeminiProvider)
 
 
 def test_reset_clears_per_role_cache(monkeypatch):

@@ -11,6 +11,12 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
+from providers.errors import (
+    ProviderError,
+    ProviderRejected,
+    ProviderUnavailable,
+    classify_provider_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,33 @@ _OCR_PROOFREAD_PROMPT = OCR_PROOFREAD_PROMPT
 
 # See providers.openai_compat._UNSET — tells "not passed" from an explicit value.
 _UNSET = object()
+
+
+def _gemini_empty_text_error(response: object, what: str) -> ProviderError:
+    """Classify a Gemini response with no text parts.
+
+    Safety / policy blocks are non-retryable; empty text from MAX_TOKENS or other
+    finish reasons remains retryable so FailoverProvider can try the backup.
+    """
+    reason_bits: list[str] = []
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    block = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+    if block:
+        reason_bits.append(f"block_reason={block}")
+    candidates = getattr(response, "candidates", None) or []
+    for cand in candidates:
+        fr = getattr(cand, "finish_reason", None)
+        if fr is not None:
+            reason_bits.append(f"finish_reason={fr}")
+            fr_s = str(fr).upper()
+            if any(tok in fr_s for tok in ("SAFETY", "BLOCK", "PROHIBITED", "RECITATION")):
+                return ProviderRejected(
+                    f"Gemini {what} blocked ({', '.join(reason_bits)})"
+                )
+    if block:
+        return ProviderRejected(f"Gemini {what} blocked ({', '.join(reason_bits)})")
+    detail = ", ".join(reason_bits) if reason_bits else "no text parts"
+    return ProviderUnavailable(f"Gemini {what} returned no text ({detail})")
 
 
 class GeminiProvider(LLMProvider):
@@ -78,15 +111,20 @@ class GeminiProvider(LLMProvider):
                     contents=full_prompt,
                     config={"http_options": {"timeout": 60_000}},
                 )
-                return response.text.strip()
+                text = getattr(response, "text", None)
+                if text is None:
+                    raise _gemini_empty_text_error(response, "summary")
+                return text.strip()
+            except ProviderError:
+                raise
             except Exception as exc:
                 if attempt < max_retries:
                     logger.warning("Gemini summarize retry (%d/%d): %s", attempt + 1, max_retries, exc)
                     time.sleep(2**attempt)
                 else:
                     logger.error("Gemini summarize failed after %d retries: %s", max_retries, exc)
-                    return "[summary generation failed]"
-        return "[summary generation failed]"
+                    raise classify_provider_error(exc) from exc
+        raise classify_provider_error(RuntimeError("Gemini summarize exhausted retries"))
 
     def ocr(
         self,
@@ -109,7 +147,10 @@ class GeminiProvider(LLMProvider):
                     contents=[_OCR_TRANSCRIBE_PROMPT, img],
                     config={"http_options": {"timeout": 60_000}},
                 )
-                result = response.text.strip()
+                raw_text = getattr(response, "text", None)
+                if raw_text is None:
+                    raise _gemini_empty_text_error(response, f"OCR page {page_num}")
+                result = raw_text.strip()
                 # Proofread whenever transcription succeeded — gating on
                 # attempt == 0 skipped it for any page that needed a retry.
                 # Only the explicit OCR failure sentinel counts — not any text
@@ -135,11 +176,15 @@ class GeminiProvider(LLMProvider):
                             exc,
                         )
                 return result
+            except ProviderError:
+                raise
             except Exception as exc:
                 if attempt < max_retries:
                     logger.warning("Gemini OCR retry (%d/%d) for page %d: %s", attempt + 1, max_retries, page_num, exc)
                     time.sleep(2**attempt)
                 else:
                     logger.warning("Gemini OCR failed for page %d after %d retries: %s", page_num, max_retries, exc)
-                    return f"[OCR failed for page {page_num}]"
-        return f"[OCR failed for page {page_num}]"
+                    raise classify_provider_error(exc) from exc
+        raise classify_provider_error(
+            RuntimeError(f"Gemini OCR exhausted retries for page {page_num}")
+        )

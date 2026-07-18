@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import providers as providers_module
-from providers import get_provider, reset_provider
+from providers import get_provider, reset_provider, unwrap_provider
 from providers.base import LLMProvider
 from providers.vendor_profiles import get_vendor_profile
 
@@ -57,7 +57,7 @@ class TestGeminiProvider:
         """With no env var, get_provider() returns a GeminiProvider."""
         monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
         p = get_provider()
-        assert "gemini" in type(p).__name__.lower()
+        assert "gemini" in type(unwrap_provider(p)).__name__.lower()
 
     def test_gemini_provider_is_llm_provider(self, monkeypatch):
         monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
@@ -154,7 +154,7 @@ class TestOpenAICompatProvider:
         monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
         monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
         p = get_provider()
-        assert "openai" in type(p).__name__.lower()
+        assert "openai" in type(unwrap_provider(p)).__name__.lower()
 
     def test_openai_compat_is_llm_provider(self, monkeypatch):
         monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")

@@ -1190,7 +1190,9 @@ class TestGeminiOCRRetry:
         assert mock_client.models.generate_content.call_count == 2
 
     def test_ocr_exhausts_retries(self):
+        from providers.errors import ProviderUnavailable
         from providers.gemini import GeminiProvider
+        from providers.sentinel import SentinelBoundary
 
         provider = GeminiProvider()
         mock_client = MagicMock()
@@ -1206,10 +1208,15 @@ class TestGeminiOCRRetry:
         img_bytes = buf.getvalue()
 
         with patch("time.sleep"):
-            result = provider.ocr(img_bytes, page_num=3, max_retries=2)
+            with pytest.raises(ProviderUnavailable):
+                provider.ocr(img_bytes, page_num=3, max_retries=2)
+            # Public boundary still folds typed errors into the OCR sentinel.
+            wrapped = SentinelBoundary(provider)
+            result = wrapped.ocr(img_bytes, page_num=3, proofread=False)
 
         assert "[OCR failed for page 3]" in result
-        assert mock_client.models.generate_content.call_count == 3
+        # first call: raw provider 3 attempts; second: boundary → another 3
+        assert mock_client.models.generate_content.call_count == 6
 
 
 class TestGeminiTimeout:
