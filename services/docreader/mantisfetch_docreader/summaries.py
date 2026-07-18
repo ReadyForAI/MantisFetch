@@ -91,6 +91,9 @@ def gemini_summarize(text: str, summarize_prompt: str, max_retries: int = 2) -> 
                     break
                 wait_sec = _summary_llm_next_allowed_at - now
             time.sleep(wait_sec)
+        from mantisfetch_common import metrics as metrics
+
+        metrics.incr("summary_llm_calls")
         return get_provider("summary").summarize(text, summarize_prompt, max_retries=max_retries)
 
 

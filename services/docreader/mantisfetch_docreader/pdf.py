@@ -347,6 +347,13 @@ def parse_pdf(
                         else:
                             local_ocr_results[page_num] = cached
                         logger.info("Page %d/%d: %s OCR cache hit", page_num, total_pages, cache_key)
+                        try:
+                            from mantisfetch_common import metrics as metrics
+
+                            metrics.incr("ocr_cache_hits")
+                            metrics.incr("ocr_pages")
+                        except Exception:  # noqa: BLE001 — metrics must never break OCR
+                            pass
                         continue
             # Cache miss: spill the PNG to disk and queue only its path. img_bytes
             # is released on the next iteration, so at most one pixmap is resident

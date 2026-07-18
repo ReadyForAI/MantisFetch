@@ -66,8 +66,10 @@ _local_ocr_disabled_until = 0.0
 
 def gemini_ocr(image_bytes: bytes, page_num: int, *, proofread: bool | None = None) -> str:
     """OCR a single page image via the active LLM provider."""
+    from mantisfetch_common import metrics as metrics
     from providers import get_provider
 
+    metrics.incr("ocr_pages")
     try:
         return get_provider("ocr").ocr(image_bytes, page_num, proofread=proofread)
     except Exception as exc:
