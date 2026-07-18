@@ -524,19 +524,26 @@ def test_merge_capture_tags_metadata_union_and_first_touch(tmp_path: Path) -> No
         tmp_path,
         index["documents"][0],
         tags=["b", "a"],
-        metadata={"source": "web_search", "search_query": "q", "keep": "new"},
+        metadata={
+            "source": "web_search",
+            "search_query": "q",
+            "keep": "new",
+            "nested": {"x": 1},  # non-scalar: index drops, manifest keeps
+        },
     )
     assert merged["tags"] == ["a", "b"]
-    # first-touch: existing keys win
+    # first-touch: existing keys win (index only stores scalar-filtered metadata)
     assert merged["metadata"]["source"] == "web_capture"
     assert merged["metadata"]["keep"] == "old"
     assert merged["metadata"]["search_query"] == "q"
+    assert "nested" not in merged["metadata"]
 
     reloaded = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
     assert reloaded["documents"][0]["tags"] == ["a", "b"]
     man = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert man["tags"] == ["a", "b"]
     assert man["metadata"]["search_query"] == "q"
+    assert man["metadata"]["nested"] == {"x": 1}  # full metadata in manifest
 
 
 def test_capture_reuses_by_content_hash_across_urls(client: TestClient) -> None:
@@ -623,8 +630,12 @@ def test_content_hash_excludes_url() -> None:
     assert h1 != with_url
 
 
-def test_search_and_capture_url_ttl_default() -> None:
+def test_search_and_capture_url_ttl_independent(monkeypatch) -> None:
     import mantisfetch_browser as lb
 
-    assert lb.SEARCH_CAPTURE_TTL_HOURS == 24.0
-    assert lb._search_and_capture_url_ttl() >= 24.0
+    # Default is independent of CAPTURE_TTL
+    assert lb._search_and_capture_url_ttl() == lb.SEARCH_CAPTURE_TTL_HOURS
+    # 0 disables URL reuse on the search path even if CAPTURE_TTL is high
+    monkeypatch.setattr(lb, "SEARCH_CAPTURE_TTL_HOURS", 0.0)
+    monkeypatch.setattr(lb, "CAPTURE_TTL_HOURS", 48.0)
+    assert lb._search_and_capture_url_ttl() == 0.0

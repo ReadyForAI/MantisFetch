@@ -258,8 +258,8 @@ _MAX_CONCURRENT_SESSIONS = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_SESSIO
 CAPTURE_TTL_HOURS = float(os.environ.get("MANTISFETCH_CAPTURE_TTL_HOURS", "0") or "0")
 # URL-level cache TTL used only by /search_and_capture (B5). Default 24h so
 # repeated research queries do not re-fetch the same top hits into new doc_ids.
-# Set to 0 to disable (falls back to CAPTURE_TTL_HOURS only when that is > 0 —
-# search_and_capture always applies max(this, CAPTURE_TTL_HOURS)).
+# Independent of CAPTURE_TTL_HOURS; set to 0 to disable URL reuse on that path
+# (content-hash reuse still applies after distill).
 SEARCH_CAPTURE_TTL_HOURS = float(
     os.environ.get("MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS", "24") or "24"
 )
@@ -2132,15 +2132,17 @@ def _merge_capture_tags_metadata(
     """Union tags and first-touch-merge metadata into an existing capture (B5).
 
     Existing metadata keys win (first-touch provenance); new keys are added.
-    Tags are the sorted unique union. Updates both doc-index and manifest when
-    present. Returns the refreshed index entry (or the original on I/O failure).
+    Tags are the sorted unique union. Manifest keeps full (verbatim) metadata;
+    doc-index only stores scalar-filtered keys (same split as a fresh persist).
+    Returns the refreshed index entry (or the original on I/O failure).
     """
     doc_id = entry.get("id")
     if not doc_id:
         return entry
     new_tags = list(tags or [])
-    new_meta = _indexable_metadata(metadata or {})
-    if not new_tags and not new_meta:
+    raw_meta = dict(metadata) if metadata else {}
+    indexable_new = _indexable_metadata(raw_meta)
+    if not new_tags and not raw_meta:
         return entry
 
     with _doc_index_lock:
@@ -2164,17 +2166,18 @@ def _merge_capture_tags_metadata(
         merged_tags = sorted({str(t) for t in list(old_tags) + new_tags if t is not None and str(t)})
         target["tags"] = merged_tags
 
-        old_meta = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
-        merged_meta = dict(old_meta)
-        for k, v in new_meta.items():
-            if k not in merged_meta:
-                merged_meta[k] = v
-        target["metadata"] = merged_meta
+        old_index_meta = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+        merged_index_meta = dict(old_index_meta)
+        for k, v in indexable_new.items():
+            if k not in merged_index_meta:
+                merged_index_meta[k] = v
+        target["metadata"] = merged_index_meta
 
         index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         _write_json(index_path, index)
 
         # Keep manifest in sync when the product tree is still present.
+        # Manifest stores full metadata (including nested values); index is filtered.
         storage_path = target.get("storage_path") or entry.get("storage_path")
         if storage_path:
             manifest_path = docs_dir / storage_path / "manifest.json"
@@ -2182,7 +2185,7 @@ def _merge_capture_tags_metadata(
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["tags"] = merged_tags
                 m_meta = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
-                for k, v in new_meta.items():
+                for k, v in raw_meta.items():
                     if k not in m_meta:
                         m_meta[k] = v
                 manifest["metadata"] = m_meta
@@ -2795,10 +2798,15 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                             req.tags,
                             req.metadata,
                         )
+                        # Use the existing entry's content_type so deferred summary
+                        # resolves the real storage_path (may differ from the request).
+                        hit_ct = _normalize_content_type(
+                            merged.get("content_type") or content_type
+                        )
                         return await asyncio.to_thread(
                             _cached_capture_response,
                             merged,
-                            content_type,
+                            hit_ct,
                             docs_dir,
                             req.summary_mode,
                         )
@@ -2940,9 +2948,12 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
 
 
 def _search_and_capture_url_ttl() -> float:
-    """Effective URL-cache TTL for search_and_capture: max of its own default
-    (SEARCH_CAPTURE_TTL_HOURS, default 24) and the global CAPTURE_TTL_HOURS."""
-    return max(SEARCH_CAPTURE_TTL_HOURS, CAPTURE_TTL_HOURS)
+    """URL-cache TTL for search_and_capture only (SEARCH_CAPTURE_TTL_HOURS).
+
+    Independent of CAPTURE_TTL_HOURS: 0 disables URL reuse on this path even when
+    the global capture TTL is set.
+    """
+    return SEARCH_CAPTURE_TTL_HOURS
 
 
 # ═══════════════════════════════════════════

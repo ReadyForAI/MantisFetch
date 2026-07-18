@@ -122,8 +122,8 @@ def test_search_and_capture_serial_with_skip(client: TestClient) -> None:
     assert seen_reqs[0].metadata["search_provider"] == "fake"
     assert seen_reqs[0].metadata["search_rank"] == 1
     assert seen_reqs[0].tags == ["research"]
-    # B5: search_and_capture applies its own URL TTL (default 24h)
-    assert all(t is not None and t >= 24.0 for t in seen_ttls)
+    # B5: search_and_capture applies its own URL TTL (default 24h, independent)
+    assert all(t == 24.0 for t in seen_ttls)
 
 
 def test_search_and_capture_caps_top_at_3(client: TestClient) -> None:
