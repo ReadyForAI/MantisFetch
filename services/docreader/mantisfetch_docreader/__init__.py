@@ -1178,7 +1178,13 @@ def write_output(
     try:
         from mantisfetch_common.search_cache import write_search_cache
 
-        write_search_cache(doc_dir, full_text=full_body, sections=section_cache_rows)
+        write_search_cache(
+            doc_dir,
+            full_text=full_body,
+            sections=section_cache_rows,
+            doc_id=doc_id,
+            docs_dir=output_dir,
+        )
     except Exception:  # noqa: BLE001 — cache is best-effort
         logger.warning("search text cache write failed for %s", doc_id, exc_info=True)
         # Drop any half-written / prior cache so search falls back to live files.
@@ -1327,7 +1333,13 @@ def write_output_extract_only(
     try:
         from mantisfetch_common.search_cache import write_search_cache
 
-        write_search_cache(doc_dir, full_text=full_body, sections=section_cache_rows)
+        write_search_cache(
+            doc_dir,
+            full_text=full_body,
+            sections=section_cache_rows,
+            doc_id=doc_id,
+            docs_dir=output_dir,
+        )
     except Exception:  # noqa: BLE001
         logger.warning("search text cache write failed for %s", doc_id, exc_info=True)
         try:
@@ -3190,9 +3202,22 @@ async def library_search_text(
         results: list[SearchResult] = []
         from mantisfetch_common.search_cache import read_full_lower, read_sections_lower
 
+        # B3: FTS shortlist when available (still verify with cache / files).
+        fts_ids: set[str] | None = None
+        try:
+            from mantisfetch_common import doc_index_store as dis
+
+            hits = dis.search_fts(docs_dir, query, limit=max(limit * 5, 50))
+            if hits:
+                fts_ids = set(hits)
+        except Exception:
+            fts_ids = None
+
         for d in documents:
             current_doc_id = d.get("id", "")
             if not isinstance(current_doc_id, str) or not _DOC_ID_RE.match(current_doc_id):
+                continue
+            if fts_ids is not None and current_doc_id not in fts_ids:
                 continue
             try:
                 doc_dir = _resolve_doc_dir(docs_dir, current_doc_id)

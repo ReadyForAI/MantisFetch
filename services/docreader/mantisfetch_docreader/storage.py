@@ -152,10 +152,26 @@ def _update_doc_index(
 
         index["documents"].append(entry)
         index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_json(index_path, index)
+        # B3: SQLite is the working index; JSON remains a compatibility export.
+        try:
+            from mantisfetch_common import doc_index_store as dis
+
+            dis.upsert_document(docs_dir, entry)
+            dis.export_json(docs_dir, last_updated=index["last_updated"])
+        except Exception:
+            # Fall back to legacy JSON-only write if SQLite is unavailable.
+            _write_json(index_path, index)
 
 
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
+    try:
+        from mantisfetch_common import doc_index_store as dis
+
+        docs = dis.list_documents(docs_dir)
+        if docs:
+            return docs
+    except Exception:
+        pass
     index_path = docs_dir / "doc-index.json"
     if not index_path.exists():
         return []
@@ -215,6 +231,16 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
                 removed = True
 
         # Drop the index entry only after products are gone.
+        try:
+            from mantisfetch_common import doc_index_store as dis
+
+            dis.delete_document(docs_dir, doc_id)
+            dis.export_json(
+                docs_dir,
+                last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+        except Exception:
+            pass
         index_path = docs_dir / "doc-index.json"
         if index_path.exists():
             try:

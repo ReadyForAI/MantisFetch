@@ -1881,7 +1881,13 @@ def _persist_web_capture(
             )
             index["documents"].append(index_entry)
             index["last_updated"] = now_str
-            _write_json(index_path, index)
+            try:
+                from mantisfetch_common import doc_index_store as dis
+
+                dis.upsert_document(docs_dir, index_entry)
+                dis.export_json(docs_dir, last_updated=now_str)
+            except Exception:
+                _write_json(index_path, index)
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
