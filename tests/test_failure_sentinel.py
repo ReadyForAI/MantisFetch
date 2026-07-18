@@ -46,13 +46,16 @@ def test_openai_summarize_and_ocr_return_sentinels(monkeypatch):  # #21
     monkeypatch.setitem(sys.modules, "openai", MagicMock())
     monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
     from providers.openai_compat import OpenAICompatProvider
+    from providers.sentinel import SentinelBoundary
 
-    p = OpenAICompatProvider()
+    # Concrete providers raise typed errors; the public boundary folds them
+    # back into the historical failure-sentinel strings.
+    p = SentinelBoundary(OpenAICompatProvider())
 
     def boom(*a, **k):
         raise RuntimeError("upstream down")
 
-    monkeypatch.setattr(p, "_chat", boom)
+    monkeypatch.setattr(p._inner, "_chat", boom)
     assert p.summarize("text", "prompt") == "[summary generation failed]"
     assert p.ocr(_png(), 7) == "[OCR failed for page 7]"
 

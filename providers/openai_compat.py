@@ -19,6 +19,7 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
+from providers.errors import ProviderUnavailable, classify_provider_error
 from providers.vendor_profiles import get_vendor_profile
 
 logger = logging.getLogger(__name__)
@@ -248,10 +249,11 @@ class OpenAICompatProvider(LLMProvider):
             # (_summary_failed_text / FailoverProvider._summary_failed).
             return result if result is not None else ""
         except Exception as exc:
-            # Honor the same failure-sentinel contract as GeminiProvider —
-            # callers check _summary_failed_text() rather than catching.
+            # Raise typed errors so FailoverProvider can skip non-retryable 4xx.
+            # get_provider wraps with SentinelBoundary for callers that still
+            # expect "[summary generation failed]".
             logger.error("OpenAI-compat summarize failed: %s", exc)
-            return "[summary generation failed]"
+            raise classify_provider_error(exc) from exc
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """OCR a page image via the OpenAI vision endpoint (base64-encoded)."""
@@ -277,17 +279,18 @@ class OpenAICompatProvider(LLMProvider):
                 extra_body=self._ocr_extra_body,
             )
         except Exception as exc:
-            # Match GeminiProvider: return the OCR failure sentinel instead of
-            # raising, so the OCR pipeline detects it via _is_ocr_failed_text.
+            # Typed raise → FailoverProvider (retryable only) + SentinelBoundary.
             logger.warning("OpenAI-compat OCR failed for page %d: %s", page_num, exc)
-            return f"[OCR failed for page {page_num}]"
+            raise classify_provider_error(exc) from exc
         # content:null is a failed OCR call, not a blank page. Empty string is
         # reserved for genuinely blank pages (must not trigger failover).
         if result is None:
             logger.warning(
                 "OpenAI-compat OCR returned null content for page %d", page_num
             )
-            return f"[OCR failed for page {page_num}]"
+            raise ProviderUnavailable(
+                f"OpenAI-compat OCR returned null content for page {page_num}"
+            )
         if do_proofread and result and not self._is_ocr_failure_sentinel(result):
             review_messages = [
                 {

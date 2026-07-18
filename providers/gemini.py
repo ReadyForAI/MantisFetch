@@ -11,6 +11,7 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
+from providers.errors import classify_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +86,8 @@ class GeminiProvider(LLMProvider):
                     time.sleep(2**attempt)
                 else:
                     logger.error("Gemini summarize failed after %d retries: %s", max_retries, exc)
-                    return "[summary generation failed]"
-        return "[summary generation failed]"
+                    raise classify_provider_error(exc) from exc
+        raise classify_provider_error(RuntimeError("Gemini summarize exhausted retries"))
 
     def ocr(
         self,
@@ -141,5 +142,7 @@ class GeminiProvider(LLMProvider):
                     time.sleep(2**attempt)
                 else:
                     logger.warning("Gemini OCR failed for page %d after %d retries: %s", page_num, max_retries, exc)
-                    return f"[OCR failed for page {page_num}]"
-        return f"[OCR failed for page {page_num}]"
+                    raise classify_provider_error(exc) from exc
+        raise classify_provider_error(
+            RuntimeError(f"Gemini OCR exhausted retries for page {page_num}")
+        )
