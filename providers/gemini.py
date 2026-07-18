@@ -11,7 +11,7 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
-from providers.errors import classify_provider_error
+from providers.errors import ProviderRejected, classify_provider_error
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,14 @@ class GeminiProvider(LLMProvider):
                     contents=full_prompt,
                     config={"http_options": {"timeout": 60_000}},
                 )
-                return response.text.strip()
+                text = getattr(response, "text", None)
+                if text is None:
+                    # Safety / block often yields None text; do not treat as
+                    # transient (would waste a failover call).
+                    raise ProviderRejected("Gemini summary returned no text (possibly blocked)")
+                return text.strip()
+            except ProviderRejected:
+                raise
             except Exception as exc:
                 if attempt < max_retries:
                     logger.warning("Gemini summarize retry (%d/%d): %s", attempt + 1, max_retries, exc)
@@ -110,7 +117,12 @@ class GeminiProvider(LLMProvider):
                     contents=[_OCR_TRANSCRIBE_PROMPT, img],
                     config={"http_options": {"timeout": 60_000}},
                 )
-                result = response.text.strip()
+                raw_text = getattr(response, "text", None)
+                if raw_text is None:
+                    raise ProviderRejected(
+                        f"Gemini OCR returned no text for page {page_num} (possibly blocked)"
+                    )
+                result = raw_text.strip()
                 # Proofread whenever transcription succeeded — gating on
                 # attempt == 0 skipped it for any page that needed a retry.
                 # Only the explicit OCR failure sentinel counts — not any text
@@ -136,6 +148,8 @@ class GeminiProvider(LLMProvider):
                             exc,
                         )
                 return result
+            except ProviderRejected:
+                raise
             except Exception as exc:
                 if attempt < max_retries:
                     logger.warning("Gemini OCR retry (%d/%d) for page %d: %s", attempt + 1, max_retries, page_num, exc)

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 
 from providers.base import LLMProvider
-from providers.errors import ProviderError, ProviderRejected
+from providers.errors import ProviderError
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +55,13 @@ class FailoverProvider(LLMProvider):
     def summarize(self, text: str, prompt: str, max_retries: int = 2) -> str:
         try:
             result = self._primary.summarize(text, prompt, max_retries=max_retries)
-        except ProviderRejected as exc:
-            logger.warning(
-                "summary primary rejected request (not failing over): %s",
-                exc,
-            )
-            raise
         except ProviderError as exc:
+            if not exc.retryable:
+                logger.warning(
+                    "summary primary rejected request (not failing over): %s",
+                    exc,
+                )
+                raise
             logger.warning(
                 "summary primary provider failed (%s); failing over to the fallback provider",
                 type(exc).__name__,
@@ -84,14 +84,14 @@ class FailoverProvider(LLMProvider):
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         try:
             result = self._primary.ocr(image_bytes, page_num, proofread=proofread)
-        except ProviderRejected as exc:
-            logger.warning(
-                "OCR primary rejected page %d (not failing over): %s",
-                page_num,
-                exc,
-            )
-            raise
         except ProviderError as exc:
+            if not exc.retryable:
+                logger.warning(
+                    "OCR primary rejected page %d (not failing over): %s",
+                    page_num,
+                    exc,
+                )
+                raise
             logger.warning(
                 "OCR primary provider failed for page %d (%s); failing over to the fallback provider",
                 page_num,

@@ -19,7 +19,12 @@ import os
 import time
 
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
-from providers.errors import ProviderUnavailable, classify_provider_error
+from providers.errors import (
+    ProviderError,
+    ProviderRejected,
+    ProviderUnavailable,
+    classify_provider_error,
+)
 from providers.vendor_profiles import get_vendor_profile
 
 logger = logging.getLogger(__name__)
@@ -201,11 +206,11 @@ class OpenAICompatProvider(LLMProvider):
         max_retries: int = 2,
         model: str | None = None,
         extra_body: dict | None = None,
-    ) -> str | None:
-        """Call chat.completions.create and return the assistant text.
+    ) -> tuple[str | None, str | None]:
+        """Call chat.completions.create.
 
-        Returns ``None`` when the upstream message content is null (distinct from
-        an empty string). Callers decide role-specific handling.
+        Returns ``(text, finish_reason)``. ``text`` is ``None`` when upstream
+        message content is null (distinct from an empty string).
         """
 
         last_exc: Exception | None = None
@@ -220,7 +225,11 @@ class OpenAICompatProvider(LLMProvider):
                 resp = self._client.chat.completions.create(
                     **kwargs,
                 )
-                return self._message_text(resp.choices[0].message.content)
+                choice = resp.choices[0]
+                finish = getattr(choice, "finish_reason", None)
+                return self._message_text(choice.message.content), (
+                    str(finish) if finish is not None else None
+                )
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries:
@@ -240,14 +249,17 @@ class OpenAICompatProvider(LLMProvider):
             {"role": "user", "content": text},
         ]
         try:
-            result = self._chat(
+            result, finish = self._chat(
                 messages,
                 max_retries=max_retries,
                 extra_body=self._chat_extra_body,
             )
-            # Null content → empty string: summary pipeline treats empty as failed
-            # (_summary_failed_text / FailoverProvider._summary_failed).
+            if result is None and finish and "content_filter" in finish.lower():
+                raise ProviderRejected(f"summary blocked by content filter ({finish})")
+            # Null content → empty string: summary pipeline treats empty as failed.
             return result if result is not None else ""
+        except ProviderError:
+            raise
         except Exception as exc:
             # Raise typed errors so FailoverProvider can skip non-retryable 4xx.
             # get_provider wraps with SentinelBoundary for callers that still
@@ -272,7 +284,7 @@ class OpenAICompatProvider(LLMProvider):
             }
         ]
         try:
-            result = self._chat(
+            result, finish = self._chat(
                 messages,
                 max_retries=2,
                 model=self._ocr_model,
@@ -286,8 +298,14 @@ class OpenAICompatProvider(LLMProvider):
         # reserved for genuinely blank pages (must not trigger failover).
         if result is None:
             logger.warning(
-                "OpenAI-compat OCR returned null content for page %d", page_num
+                "OpenAI-compat OCR returned null content for page %d (finish=%s)",
+                page_num,
+                finish,
             )
+            if finish and "content_filter" in finish.lower():
+                raise ProviderRejected(
+                    f"OCR blocked by content filter for page {page_num} ({finish})"
+                )
             raise ProviderUnavailable(
                 f"OpenAI-compat OCR returned null content for page {page_num}"
             )
@@ -305,7 +323,7 @@ class OpenAICompatProvider(LLMProvider):
                 }
             ]
             try:
-                reviewed = self._chat(
+                reviewed, _finish = self._chat(
                     review_messages,
                     max_retries=1,
                     model=self._ocr_model,
