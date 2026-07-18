@@ -1,0 +1,72 @@
+"""Per-document lowercase text cache for ``/library/search_text`` (B2).
+
+Built at parse/persist time so queries avoid re-reading and re-lowercasing every
+``full.md`` / section file on each request. Cache files live under
+``{doc_dir}/.cache/`` and are safe to delete (search falls back to live files).
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+_FULL_CACHE = "search_full.lower.txt"
+_SECTIONS_CACHE = "search_sections.lower.json"
+
+
+def write_search_cache(
+    doc_dir: Path,
+    *,
+    full_text: str | None = None,
+    sections: list[dict[str, Any]] | None = None,
+) -> None:
+    """Write lowercase full-text and optional section cache entries.
+
+    ``sections`` items: ``{sid, title, text, file?, page_range?, page_start?, page_end?}``.
+    """
+    cache_dir = doc_dir / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if full_text is not None:
+        (cache_dir / _FULL_CACHE).write_text(full_text.lower(), encoding="utf-8")
+    if sections is not None:
+        payload = []
+        for sec in sections:
+            text = sec.get("text") or ""
+            title = sec.get("title") or ""
+            payload.append(
+                {
+                    "sid": sec.get("sid"),
+                    "title": title,
+                    "title_lower": title.lower(),
+                    "text_lower": text.lower(),
+                    "file": sec.get("file"),
+                    "page_range": sec.get("page_range"),
+                    "page_start": sec.get("page_start"),
+                    "page_end": sec.get("page_end"),
+                }
+            )
+        (cache_dir / _SECTIONS_CACHE).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def read_full_lower(doc_dir: Path) -> str | None:
+    path = doc_dir / ".cache" / _FULL_CACHE
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def read_sections_lower(doc_dir: Path) -> list[dict[str, Any]] | None:
+    path = doc_dir / ".cache" / _SECTIONS_CACHE
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, list) else None
