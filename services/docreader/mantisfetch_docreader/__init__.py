@@ -3202,22 +3202,12 @@ async def library_search_text(
         results: list[SearchResult] = []
         from mantisfetch_common.search_cache import read_full_lower, read_sections_lower
 
-        # B3: FTS shortlist when available (still verify with cache / files).
-        fts_ids: set[str] | None = None
-        try:
-            from mantisfetch_common import doc_index_store as dis
-
-            hits = dis.search_fts(docs_dir, query, limit=max(limit * 5, 50))
-            if hits:
-                fts_ids = set(hits)
-        except Exception:
-            fts_ids = None
-
+        # Note: FTS is populated as an optimization side-channel but is not yet
+        # used as an exclusive shortlist (web captures / pre-FTS docs may lack
+        # rows). Full scan still runs; B2 lowercase cache keeps it cheap.
         for d in documents:
             current_doc_id = d.get("id", "")
             if not isinstance(current_doc_id, str) or not _DOC_ID_RE.match(current_doc_id):
-                continue
-            if fts_ids is not None and current_doc_id not in fts_ids:
                 continue
             try:
                 doc_dir = _resolve_doc_dir(docs_dir, current_doc_id)

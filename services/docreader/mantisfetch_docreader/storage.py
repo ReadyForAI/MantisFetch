@@ -153,14 +153,16 @@ def _update_doc_index(
         index["documents"].append(entry)
         index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         # B3: SQLite is the working index; JSON remains a compatibility export.
+        # Always write JSON first so a SQLite failure cannot lose the entry;
+        # then upsert SQLite (which migrates-from-JSON once if needed).
+        _write_json(index_path, index)
         try:
             from mantisfetch_common import doc_index_store as dis
 
             dis.upsert_document(docs_dir, entry)
             dis.export_json(docs_dir, last_updated=index["last_updated"])
         except Exception:
-            # Fall back to legacy JSON-only write if SQLite is unavailable.
-            _write_json(index_path, index)
+            pass
 
 
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
@@ -230,31 +232,42 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
                 shutil.rmtree(candidate)  # raise on real failure -> caller retries
                 removed = True
 
-        # Drop the index entry only after products are gone.
+        # Drop the index entry only after products are gone. SQLite is authoritative
+        # when available; JSON is rewritten from SQLite so they cannot diverge.
+        index_path = docs_dir / "doc-index.json"
+        had_index_entry = entry is not None
         try:
             from mantisfetch_common import doc_index_store as dis
 
+            # entry was looked up pre-delete; if missing from SQLite, check list.
+            if not had_index_entry:
+                had_index_entry = any(
+                    d.get("id") == doc_id for d in dis.list_documents(docs_dir)
+                )
             dis.delete_document(docs_dir, doc_id)
             dis.export_json(
                 docs_dir,
                 last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
+            if had_index_entry:
+                removed = True
         except Exception:
-            pass
-        index_path = docs_dir / "doc-index.json"
-        if index_path.exists():
-            try:
-                index = json.loads(index_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                index = None
-            if isinstance(index, dict) and isinstance(index.get("documents"), list):
-                kept = [d for d in index["documents"] if d.get("id") != doc_id]
-                if len(kept) != len(index["documents"]):
-                    index["documents"] = kept
-                    index["version"] = 2
-                    index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    _write_json(index_path, index)
-                    removed = True
+            # Legacy JSON-only path if SQLite is completely unavailable.
+            if index_path.exists():
+                try:
+                    index = json.loads(index_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    index = None
+                if isinstance(index, dict) and isinstance(index.get("documents"), list):
+                    kept = [d for d in index["documents"] if d.get("id") != doc_id]
+                    if len(kept) != len(index["documents"]):
+                        index["documents"] = kept
+                        index["version"] = 2
+                        index["last_updated"] = datetime.now(UTC).strftime(
+                            "%Y-%m-%dT%H:%M:%SZ"
+                        )
+                        _write_json(index_path, index)
+                        removed = True
         return removed
 
 

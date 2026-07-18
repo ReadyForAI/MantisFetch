@@ -124,6 +124,7 @@ def _upsert_entry_conn(conn: sqlite3.Connection, entry: dict[str, Any]) -> None:
 
 def upsert_document(docs_dir: Path, entry: dict[str, Any]) -> None:
     """Insert/update one document entry in SQLite (caller holds _doc_index_lock)."""
+    ensure_migrated_from_json(docs_dir)
     conn = _connect(docs_dir)
     _upsert_entry_conn(conn, entry)
     conn.commit()
