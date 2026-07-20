@@ -62,6 +62,15 @@ class SearchConfigError(SearchError):
     """
 
 
+class UnknownSearchProviderError(SearchError):
+    """A per-request ``provider`` selection outside the addressable set
+    (MANTISFETCH_SEARCH_PROVIDER + fallback chain + MANTISFETCH_SEARCH_PROVIDERS).
+
+    A caller error (mapped to HTTP 400), distinct from a misconfigured provider
+    (RuntimeError → 502) or a runtime provider failure (SearchError → 502).
+    """
+
+
 def _raise_for_search_status(provider: str, status_code: int, body: str = "") -> None:
     """Map an HTTP status to the fallback contract. 5xx → retriable, 4xx → config."""
     if status_code >= 500:
@@ -98,6 +107,15 @@ class SearchProvider(ABC):
     """Unified async interface for web-search backends."""
 
     name: str
+
+    @property
+    def throttle_keys(self) -> tuple[str, ...]:
+        """Backend bucket keys for the process-level min-interval throttle. A single
+        provider charges its own bucket; a fallback chain overrides this to charge
+        *every* member it might query, so neither the primary-share nor the
+        failover path can bypass the interval for a backend an explicit
+        ``provider=<name>`` request would also hit."""
+        return (self.name,)
 
     @abstractmethod
     async def search(

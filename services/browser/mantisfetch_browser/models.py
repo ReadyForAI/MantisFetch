@@ -252,6 +252,7 @@ class SearchRequest(BaseModel):
     max_results: int | None = None  # None → server default (MANTISFETCH_SEARCH_MAX_RESULTS)
     lang: str = DEFAULT_LANG
     freshness: str | None = None  # "day" | "week" | "month" | None
+    provider: str | None = None  # None → default provider/chain; else target one addressable provider
 
 
 class SearchHit(BaseModel):
@@ -284,6 +285,7 @@ class SearchAndCaptureRequest(BaseModel):
     content_type: str = "General"
     lang: str = DEFAULT_LANG
     freshness: str | None = None
+    provider: str | None = None  # None → default provider/chain; else target one addressable provider
 
 
 class CapturedItem(BaseModel):

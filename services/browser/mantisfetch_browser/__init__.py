@@ -36,7 +36,11 @@ from providers.search import (
     default_max_results,
     min_interval_sec,
 )
-from providers.search.base import SearchConfigError, SearchProviderUnavailable
+from providers.search.base import (
+    SearchConfigError,
+    SearchProviderUnavailable,
+    UnknownSearchProviderError,
+)
 
 # URL validation (anti-SSRF). Re-exported so the goto/capture endpoints and
 # test_security keep calling _validate_url off the package namespace.
@@ -3041,36 +3045,53 @@ def _search_and_capture_url_ttl() -> float:
 
 SEARCH_CAPTURE_TOP_MAX = 3  # search_and_capture captures at most this many, serially
 
-# Process-level min-interval throttle (protects paid search-API quota). Mirrors the
+# Per-provider min-interval throttle (protects paid search-API quota). Mirrors the
 # docreader summary min-interval pattern rather than a token bucket — search is
-# low-frequency, so burst tolerance buys nothing.
+# low-frequency, so burst tolerance buys nothing. Keyed by resolved provider name
+# so an agent hitting two providers (e.g. bocha + tavily) is not serialised across
+# them; the default fallback chain gets its own composite-name bucket.
 _search_throttle_lock = asyncio.Lock()
-_last_search_monotonic = 0.0
+_last_search_monotonic: dict[str, float] = {}
 
 
-async def _enforce_search_throttle() -> None:
-    """Raise a bare 429 when two searches arrive closer than the configured min
-    interval; record the timestamp when the search is allowed."""
-    global _last_search_monotonic
+async def _enforce_search_throttle(provider_keys: tuple[str, ...]) -> None:
+    """Raise a bare 429 when a search would hit any backend within the configured
+    min interval of its last hit; otherwise stamp every backend the request touches
+    (a fallback chain charges all its members) so failover can't bypass the limit.
+
+    Best-effort burst guard, enforced once up front. Known limitation: it does not
+    re-check at the moment a fallback member is actually queried, so a chain whose
+    primary hangs longer than the interval before failing over can, under concurrent
+    load, hit a fallback backend slightly sooner than the nominal interval. Closing
+    that fully would move throttling into the provider layer (an abstraction it is
+    deliberately kept out of); the residual window is bounded and low-risk for a
+    quota guard on a low-frequency surface."""
     interval = min_interval_sec()
     if interval <= 0:
         return
     async with _search_throttle_lock:
         now = time.monotonic()
-        if _last_search_monotonic and now - _last_search_monotonic < interval:
-            raise HTTPException(429, "search rate limited: minimum interval not elapsed")
-        _last_search_monotonic = now
+        for key in provider_keys:
+            last = _last_search_monotonic.get(key, 0.0)
+            if last and now - last < interval:
+                raise HTTPException(429, "search rate limited: minimum interval not elapsed")
+        for key in provider_keys:
+            _last_search_monotonic[key] = now
 
 
-def _require_search_provider():
+def _require_search_provider(name: str | None = None):
     """Return the active provider, or 404 when search is disabled.
 
-    A configured-but-misconfigured provider (searxng without a URL, tavily without
-    a key, an unknown provider name) raises during construction — surface that as a
-    502 rather than letting it escape as an unhandled 500.
+    ``name`` selects one addressable provider for this request; an unknown/unlisted
+    name (while search is enabled) is a caller error (400). A configured-but-
+    misconfigured provider (searxng without a URL, tavily without a key) raises
+    during construction — surface that as a 502 rather than letting it escape as an
+    unhandled 500.
     """
     try:
-        provider = create_search_provider()
+        provider = create_search_provider(name)
+    except UnknownSearchProviderError as exc:
+        raise HTTPException(400, str(exc))
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(502, f"search provider misconfigured: {exc}")
     if provider is None:
@@ -3091,8 +3112,8 @@ async def _run_search(provider, query, *, max_results, lang, freshness):
 @app.post("/search", response_model=SearchResponse)
 async def search(req: SearchRequest) -> SearchResponse:
     """Web search only — returns results, captures nothing. 404 when disabled."""
-    provider = _require_search_provider()
-    await _enforce_search_throttle()
+    provider = _require_search_provider(req.provider)
+    await _enforce_search_throttle(provider.throttle_keys)
     max_results = (
         clamp_max_results(req.max_results) if req.max_results is not None else default_max_results()
     )
@@ -3122,9 +3143,9 @@ async def search_and_capture(req: SearchAndCaptureRequest) -> SearchAndCaptureRe
     """Search, then capture the top N hits into the document library (serially) with
     search provenance stamped in metadata. One hit failing to capture is recorded in
     `skipped` and does not abort the batch."""
-    provider = _require_search_provider()
+    provider = _require_search_provider(req.provider)
     _normalize_content_type(req.content_type)  # 422 early on a bad content_type
-    await _enforce_search_throttle()
+    await _enforce_search_throttle(provider.throttle_keys)
     top = max(1, min(req.capture_top, SEARCH_CAPTURE_TOP_MAX))
     searched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 

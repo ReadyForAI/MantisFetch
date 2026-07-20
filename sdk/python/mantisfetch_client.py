@@ -221,15 +221,23 @@ class MantisFetchClient:
         max_results: int | None = None,
         lang: str = "en",
         freshness: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         """Web search (requires a server-side search provider; 404 when disabled).
 
         Returns a dict with ``provider`` and ``results`` (each ``{url, title,
-        snippet, published_at, score, provider}``).
+        snippet, published_at, score, provider}``). Pass ``provider`` to target one
+        addressable backend when several are configured (else the server default).
         """
         return self._post_json(
             "/web/search",
-            {"query": query, "max_results": max_results, "lang": lang, "freshness": freshness},
+            {
+                "query": query,
+                "max_results": max_results,
+                "lang": lang,
+                "freshness": freshness,
+                "provider": provider,
+            },
         )
 
     def web_search_and_capture(
@@ -241,12 +249,14 @@ class MantisFetchClient:
         content_type: str = "General",
         lang: str = "en",
         freshness: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         """Search, then capture the top N hits (<=3, serial) into the library.
 
         Returns a dict with ``captured`` (each ``{doc_id, url, title, digest,
         reused, rank}``) and ``skipped``. Captured docs carry
-        ``metadata.source=web_search``.
+        ``metadata.source=web_search``. Pass ``provider`` to target one addressable
+        backend when several are configured (else the server default).
         """
         content_type = _validate_content_type(content_type)
         return self._post_json(
@@ -258,6 +268,7 @@ class MantisFetchClient:
                 "content_type": content_type,
                 "lang": lang,
                 "freshness": freshness,
+                "provider": provider,
             },
         )
 
@@ -676,11 +687,21 @@ class AsyncMantisFetchClient:
         max_results: int | None = None,
         lang: str = "en",
         freshness: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
-        """Web search (requires a server-side search provider; 404 when disabled)."""
+        """Web search (requires a server-side search provider; 404 when disabled).
+
+        Pass ``provider`` to target one addressable backend when several are
+        configured (else the server default)."""
         return await self._post_json(
             "/web/search",
-            {"query": query, "max_results": max_results, "lang": lang, "freshness": freshness},
+            {
+                "query": query,
+                "max_results": max_results,
+                "lang": lang,
+                "freshness": freshness,
+                "provider": provider,
+            },
         )
 
     async def web_search_and_capture(
@@ -692,8 +713,12 @@ class AsyncMantisFetchClient:
         content_type: str = "General",
         lang: str = "en",
         freshness: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
-        """Search, then capture the top N hits (<=3, serial) into the library."""
+        """Search, then capture the top N hits (<=3, serial) into the library.
+
+        Pass ``provider`` to target one addressable backend when several are
+        configured (else the server default)."""
         content_type = _validate_content_type(content_type)
         return await self._post_json(
             "/web/search_and_capture",
@@ -704,6 +729,7 @@ class AsyncMantisFetchClient:
                 "content_type": content_type,
                 "lang": lang,
                 "freshness": freshness,
+                "provider": provider,
             },
         )
 

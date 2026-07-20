@@ -7,6 +7,7 @@ import pytest
 from providers.search import (
     HARD_MAX_RESULTS,
     _FallbackSearchProvider,
+    available_providers,
     clamp_max_results,
     create_search_provider,
     default_max_results,
@@ -18,6 +19,7 @@ from providers.search.base import (
     SearchProvider,
     SearchProviderUnavailable,
     SearchResult,
+    UnknownSearchProviderError,
     _raise_for_search_status,
 )
 from providers.search.bocha import BochaProvider
@@ -29,6 +31,7 @@ from providers.search.tavily import TavilyProvider
 _SEARCH_ENV = [
     "MANTISFETCH_SEARCH_PROVIDER",
     "MANTISFETCH_SEARCH_FALLBACK",
+    "MANTISFETCH_SEARCH_PROVIDERS",
     "MANTISFETCH_SEARXNG_URL",
     "MANTISFETCH_SEARCH_API_KEY",
     "MANTISFETCH_TAVILY_API_KEY",
@@ -328,6 +331,82 @@ def test_two_api_providers_hold_distinct_keys(monkeypatch):
     monkeypatch.setenv("MANTISFETCH_TAVILY_API_KEY", "tvly-en")
     assert BochaProvider()._api_key == "bocha-cn"
     assert TavilyProvider()._api_key == "tvly-en"
+
+
+# ── addressable providers: per-request `provider` selection ─────────────────────
+def test_available_providers_disabled_is_empty():
+    assert available_providers() == []
+
+
+def test_create_named_provider_disabled_returns_none():
+    # A named request while search is disabled → None (endpoint maps to 404),
+    # not UnknownSearchProviderError (which is reserved for the enabled-but-unlisted
+    # caller error → 400).
+    assert create_search_provider("brave") is None
+
+
+def test_available_providers_chain_plus_configured(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_FALLBACK", "searxng")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDERS", "tavily,brave,bogus")
+    # chain (bocha, searxng) + configured known (tavily, brave); "bogus" dropped
+    assert available_providers() == ["bocha", "searxng", "tavily", "brave"]
+
+
+def test_create_named_provider(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDERS", "bocha,tavily")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "bocha-cn")
+    monkeypatch.setenv("MANTISFETCH_TAVILY_API_KEY", "tvly-en")
+    assert isinstance(create_search_provider("tavily"), TavilyProvider)
+    assert isinstance(create_search_provider("BOCHA"), BochaProvider)  # case-insensitive
+
+
+def test_named_provider_never_wraps_fallback(monkeypatch):
+    # Explicit selection builds a single provider, never the fallback chain.
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_FALLBACK", "searxng")
+    monkeypatch.setenv("MANTISFETCH_SEARXNG_URL", "http://searxng:8080")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "k")
+    assert isinstance(create_search_provider("bocha"), BochaProvider)
+
+
+def test_named_provider_not_addressable_raises_400(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "k")
+    # brave is neither primary/fallback nor in MANTISFETCH_SEARCH_PROVIDERS
+    with pytest.raises(UnknownSearchProviderError, match="not available"):
+        create_search_provider("brave")
+
+
+def test_throttle_keys_single_is_name(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "k")
+    assert create_search_provider("bocha").throttle_keys == ("bocha",)
+
+
+def test_throttle_keys_chain_charges_all_members(monkeypatch):
+    # A default fallback chain charges every member's bucket, so neither the
+    # primary-share nor the failover path can bypass the min-interval for a backend
+    # an explicit provider=<member> request would also hit.
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_FALLBACK", "searxng")
+    monkeypatch.setenv("MANTISFETCH_SEARXNG_URL", "http://searxng:8080")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "k")
+    chain = create_search_provider()
+    assert isinstance(chain, _FallbackSearchProvider)
+    assert chain.name == "bocha+searxng"
+    assert chain.throttle_keys == ("bocha", "searxng")  # all members, not the composite
+
+
+def test_named_provider_addressable_but_misconfigured_raises_runtime(monkeypatch):
+    # Distinct from the 400 case: tavily IS addressable but has no key configured,
+    # so it fails at construction (RuntimeError → 502), not as a caller error.
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDERS", "bocha,tavily")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "k")
+    with pytest.raises(RuntimeError):
+        create_search_provider("tavily")
 
 
 async def test_bocha_parse(monkeypatch):
