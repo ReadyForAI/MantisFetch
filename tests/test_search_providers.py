@@ -31,6 +31,9 @@ _SEARCH_ENV = [
     "MANTISFETCH_SEARCH_FALLBACK",
     "MANTISFETCH_SEARXNG_URL",
     "MANTISFETCH_SEARCH_API_KEY",
+    "MANTISFETCH_TAVILY_API_KEY",
+    "MANTISFETCH_BOCHA_API_KEY",
+    "MANTISFETCH_BRAVE_API_KEY",
     "MANTISFETCH_TAVILY_URL",
     "MANTISFETCH_SEARCH_MAX_RESULTS",
     "MANTISFETCH_SEARCH_MIN_INTERVAL_SEC",
@@ -292,6 +295,39 @@ def test_bocha_missing_key_raises(monkeypatch):
     monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
     with pytest.raises(RuntimeError, match="MANTISFETCH_SEARCH_API_KEY"):
         create_search_provider()
+
+
+# ── per-provider API keys: each API provider prefers its own key and falls back
+#    to the shared MANTISFETCH_SEARCH_API_KEY when the per-provider var is unset ──
+def test_per_provider_key_used_when_set(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_TAVILY_API_KEY", "tvly-own")
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "bocha-own")
+    monkeypatch.setenv("MANTISFETCH_BRAVE_API_KEY", "brave-own")
+    assert TavilyProvider()._api_key == "tvly-own"
+    assert BochaProvider()._api_key == "bocha-own"
+    assert BraveProvider()._api_key == "brave-own"
+
+
+def test_per_provider_key_overrides_shared(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_API_KEY", "shared")
+    monkeypatch.setenv("MANTISFETCH_TAVILY_API_KEY", "tvly-own")
+    assert TavilyProvider()._api_key == "tvly-own"  # per-provider wins
+    assert BochaProvider()._api_key == "shared"  # unset per-provider → shared fallback
+
+
+def test_shared_key_is_fallback_for_all(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_SEARCH_API_KEY", "shared")
+    assert TavilyProvider()._api_key == "shared"
+    assert BochaProvider()._api_key == "shared"
+    assert BraveProvider()._api_key == "shared"
+
+
+def test_two_api_providers_hold_distinct_keys(monkeypatch):
+    # Motivating case: bocha (CN) and tavily (EN) each with their own key.
+    monkeypatch.setenv("MANTISFETCH_BOCHA_API_KEY", "bocha-cn")
+    monkeypatch.setenv("MANTISFETCH_TAVILY_API_KEY", "tvly-en")
+    assert BochaProvider()._api_key == "bocha-cn"
+    assert TavilyProvider()._api_key == "tvly-en"
 
 
 async def test_bocha_parse(monkeypatch):

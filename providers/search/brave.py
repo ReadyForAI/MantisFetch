@@ -1,7 +1,8 @@
 """Brave Search provider — independent index with a free tier (contribution-friendly).
 
 Environment variables:
-  MANTISFETCH_SEARCH_API_KEY — Brave subscription token (required)
+  MANTISFETCH_BRAVE_API_KEY  — Brave subscription token (falls back to MANTISFETCH_SEARCH_API_KEY)
+  MANTISFETCH_SEARCH_API_KEY — shared API key used when the per-provider var is unset
   MANTISFETCH_BRAVE_URL      — base URL override (default https://api.search.brave.com/res/v1; test/self-host hook)
 
 Response shape (GET /web/search): ``web.results[]`` holds ``{title, url, description,
@@ -27,10 +28,14 @@ class BraveProvider(SearchProvider):
     name = "brave"
 
     def __init__(self) -> None:
-        self._api_key = os.environ.get("MANTISFETCH_SEARCH_API_KEY", "").strip()
+        self._api_key = (
+            os.environ.get("MANTISFETCH_BRAVE_API_KEY", "").strip()
+            or os.environ.get("MANTISFETCH_SEARCH_API_KEY", "").strip()
+        )
         if not self._api_key:
             raise RuntimeError(
-                "MANTISFETCH_SEARCH_API_KEY is not set (required for the brave search provider)."
+                "MANTISFETCH_BRAVE_API_KEY / MANTISFETCH_SEARCH_API_KEY is not set "
+                "(required for the brave search provider)."
             )
         self._base_url = os.environ.get(
             "MANTISFETCH_BRAVE_URL", "https://api.search.brave.com/res/v1"

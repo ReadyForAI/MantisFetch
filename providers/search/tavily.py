@@ -3,7 +3,8 @@
 A quality-upgrade option over the self-hosted SearXNG default.
 
 Environment variables:
-  MANTISFETCH_SEARCH_API_KEY — Tavily API key (required)
+  MANTISFETCH_TAVILY_API_KEY — Tavily API key (falls back to MANTISFETCH_SEARCH_API_KEY)
+  MANTISFETCH_SEARCH_API_KEY — shared API key used when the per-provider var is unset
   MANTISFETCH_TAVILY_URL     — base URL override (default https://api.tavily.com; test/self-host hook)
 """
 
@@ -33,10 +34,14 @@ class TavilyProvider(SearchProvider):
     name = "tavily"
 
     def __init__(self) -> None:
-        self._api_key = os.environ.get("MANTISFETCH_SEARCH_API_KEY", "").strip()
+        self._api_key = (
+            os.environ.get("MANTISFETCH_TAVILY_API_KEY", "").strip()
+            or os.environ.get("MANTISFETCH_SEARCH_API_KEY", "").strip()
+        )
         if not self._api_key:
             raise RuntimeError(
-                "MANTISFETCH_SEARCH_API_KEY is not set (required for the tavily search provider)."
+                "MANTISFETCH_TAVILY_API_KEY / MANTISFETCH_SEARCH_API_KEY is not set "
+                "(required for the tavily search provider)."
             )
         self._base_url = os.environ.get("MANTISFETCH_TAVILY_URL", "https://api.tavily.com").rstrip(
             "/"
