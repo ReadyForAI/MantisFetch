@@ -10,11 +10,20 @@ Fallback contract: try providers in order; move to the next ONLY on
 :class:`SearchConfigError` (4xx) or an empty result stops the chain — the former
 surfaces to the operator, the latter is a valid answer.
 
+Per-request selection: a caller may target one addressable provider by name
+(``create_search_provider(name)``) instead of the default primary + fallback
+chain. The addressable set is the primary + fallback chain plus any names listed
+in ``MANTISFETCH_SEARCH_PROVIDERS`` — this lets an agent query, say, bocha with a
+Chinese query and tavily with an English one and keep the two result sets apart.
+
 Environment variables:
   MANTISFETCH_SEARCH_PROVIDER          primary provider; unset ⇒ disabled
   MANTISFETCH_SEARCH_FALLBACK          comma-separated fallback chain, e.g. "tavily,searxng"
+  MANTISFETCH_SEARCH_PROVIDERS         comma-separated addressable set for per-request
+                                       ``provider`` selection (adds to primary + fallback)
   MANTISFETCH_SEARXNG_URL              SearXNG instance URL
-  MANTISFETCH_SEARCH_API_KEY           Tavily / bocha / brave API key
+  MANTISFETCH_SEARCH_API_KEY           shared Tavily / bocha / brave API key (per-provider
+                                       MANTISFETCH_{TAVILY,BOCHA,BRAVE}_API_KEY override it)
   MANTISFETCH_SEARCH_MAX_RESULTS       default result cap (default 10, hard max 20)
   MANTISFETCH_SEARCH_MIN_INTERVAL_SEC  min seconds between searches (default 2)
 """
@@ -30,6 +39,7 @@ from .base import (
     SearchProvider,
     SearchProviderUnavailable,
     SearchResult,
+    UnknownSearchProviderError,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,7 +50,9 @@ __all__ = [
     "SearchProvider",
     "SearchProviderUnavailable",
     "SearchResult",
+    "UnknownSearchProviderError",
     "create_search_provider",
+    "available_providers",
     "search_enabled",
     "default_max_results",
     "clamp_max_results",
@@ -129,17 +141,52 @@ def _build(name: str) -> SearchProvider:
     return cls()  # raises RuntimeError on misconfiguration (missing URL / key)
 
 
-def create_search_provider() -> SearchProvider | None:
-    """Build the active provider (a fallback chain if more than one is configured).
+def available_providers() -> list[str]:
+    """Addressable provider names for per-request selection: the primary + fallback
+    chain, plus any known names listed in ``MANTISFETCH_SEARCH_PROVIDERS``.
 
-    Returns ``None`` when search is disabled (no primary provider set)."""
+    Order-preserving and de-duplicated. Empty when search is disabled. Unknown
+    names in the env list are dropped (only registry-valid names are addressable)."""
     names = _chain_names()
     if not names:
-        return None
-    providers = [_build(name) for name in names]
-    if len(providers) == 1:
-        return providers[0]
-    return _FallbackSearchProvider(providers)
+        return []
+    reg = _registry()
+    for part in os.environ.get("MANTISFETCH_SEARCH_PROVIDERS", "").split(","):
+        name = part.strip().lower()
+        if name and name in reg and name not in names:
+            names.append(name)
+    return names
+
+
+def create_search_provider(name: str | None = None) -> SearchProvider | None:
+    """Build a search provider.
+
+    ``name is None`` → the default active provider: the primary, or a fallback
+    chain when ``MANTISFETCH_SEARCH_FALLBACK`` adds more. Returns ``None`` when
+    search is disabled (no primary set).
+
+    ``name`` given → that single provider (no fallback), for per-request
+    selection. Returns ``None`` when search is disabled (same as the default path);
+    raises :class:`UnknownSearchProviderError` when search is enabled but the name
+    is not in :func:`available_providers` (a caller error → HTTP 400)."""
+    if name is None:
+        names = _chain_names()
+        if not names:
+            return None
+        providers = [_build(n) for n in names]
+        if len(providers) == 1:
+            return providers[0]
+        return _FallbackSearchProvider(providers)
+
+    addressable = available_providers()
+    if not addressable:
+        return None  # search disabled — endpoint maps None → 404
+    selected = name.strip().lower()
+    if selected not in addressable:
+        raise UnknownSearchProviderError(
+            f"search provider {name!r} is not available; addressable: {addressable}"
+        )
+    return _build(selected)
 
 
 class _FallbackSearchProvider(SearchProvider):
@@ -148,6 +195,13 @@ class _FallbackSearchProvider(SearchProvider):
     def __init__(self, providers: list[SearchProvider]) -> None:
         self._providers = providers
         self.name = "+".join(p.name for p in providers)
+
+    @property
+    def throttle_keys(self) -> tuple[str, ...]:
+        # Charge every member the chain might query (primary + each fallback): a
+        # default request must not leave any of them a free interval that an
+        # explicit `provider=<member>` request could then exploit.
+        return tuple(p.name for p in self._providers)
 
     async def search(
         self,

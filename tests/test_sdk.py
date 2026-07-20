@@ -144,6 +144,15 @@ class TestSyncClient:
         assert call_kwargs.kwargs["params"]["q"] == "revenue"
         assert call_kwargs.kwargs["params"]["content_type"] == "Bid"
 
+    def test_web_search_forwards_provider(self, sync_client):
+        client, mock_http, mock_resp = sync_client
+        mock_resp.json.return_value = {"provider": "tavily", "results": []}
+        client.web_search("q", provider="tavily")
+        assert mock_http.post.call_args.args[0].endswith("/web/search")
+        body = mock_http.post.call_args.kwargs["json"]
+        assert body["query"] == "q"
+        assert body["provider"] == "tavily"
+
     def test_parse_accepts_skill_metadata_options(self, sync_client, tmp_path):
         client, mock_http, mock_resp = sync_client
         sample = tmp_path / "tender.pdf"

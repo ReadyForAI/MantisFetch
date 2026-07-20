@@ -20,13 +20,14 @@ def _reset_search_state(monkeypatch):
     throttle by default so ordering between tests can't leak a spurious 429."""
     import mantisfetch_browser as lb
 
-    lb._last_search_monotonic = 0.0
+    lb._last_search_monotonic = {}
     monkeypatch.setenv("MANTISFETCH_SEARCH_MIN_INTERVAL_SEC", "0")
     yield
 
 
 class _FakeSearchProvider:
     name = "fake"
+    throttle_keys = ("fake",)
 
     def __init__(self, results=None, raises=None):
         self._results = results or []
@@ -61,6 +62,37 @@ def test_search_returns_results(client: TestClient) -> None:
     assert [r["url"] for r in data["results"]] == ["https://a.com", "https://b.com"]
     assert data["results"][0]["snippet"] == "snip"
     assert data["searched_at"].endswith("Z")
+
+
+def test_search_provider_param_forwarded(client: TestClient) -> None:
+    provider = _FakeSearchProvider(results=[_sr("https://a.com")])
+    with patch(
+        "mantisfetch_browser.create_search_provider", return_value=provider
+    ) as factory:
+        resp = client.post("/web/search", json={"query": "q", "provider": "tavily"})
+    assert resp.status_code == 200
+    factory.assert_called_once_with("tavily")  # per-request provider reaches the factory
+
+
+def test_search_unknown_provider_400(client: TestClient) -> None:
+    from providers.search.base import UnknownSearchProviderError
+
+    with patch(
+        "mantisfetch_browser.create_search_provider",
+        side_effect=UnknownSearchProviderError("search provider 'brave' is not available"),
+    ):
+        resp = client.post("/web/search", json={"query": "q", "provider": "brave"})
+    assert resp.status_code == 400
+
+
+def test_search_default_provider_calls_factory_with_none(client: TestClient) -> None:
+    provider = _FakeSearchProvider(results=[_sr("https://a.com")])
+    with patch(
+        "mantisfetch_browser.create_search_provider", return_value=provider
+    ) as factory:
+        resp = client.post("/web/search", json={"query": "q"})
+    assert resp.status_code == 200
+    factory.assert_called_once_with(None)  # omitted provider → default path
 
 
 def test_search_provider_unavailable_502(client: TestClient) -> None:

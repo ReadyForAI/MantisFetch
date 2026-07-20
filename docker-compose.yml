@@ -67,6 +67,8 @@ services:
       # defaults to the in-compose service.
       MANTISFETCH_SEARCH_PROVIDER: ${MANTISFETCH_SEARCH_PROVIDER:-}
       MANTISFETCH_SEARCH_FALLBACK: ${MANTISFETCH_SEARCH_FALLBACK:-}
+      # Addressable set for per-request `provider` selection (adds to primary + fallback).
+      MANTISFETCH_SEARCH_PROVIDERS: ${MANTISFETCH_SEARCH_PROVIDERS:-}
       MANTISFETCH_SEARXNG_URL: ${MANTISFETCH_SEARXNG_URL:-http://searxng:8080}
       MANTISFETCH_SEARCH_API_KEY: ${MANTISFETCH_SEARCH_API_KEY:-}
       # Per-provider keys (override the shared one) — needed to run more than one
