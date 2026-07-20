@@ -1,7 +1,8 @@
 """Bocha (博查) search provider — China-compliant search.
 
 Environment variables:
-  MANTISFETCH_SEARCH_API_KEY — Bocha API key (required)
+  MANTISFETCH_BOCHA_API_KEY  — Bocha API key (falls back to MANTISFETCH_SEARCH_API_KEY)
+  MANTISFETCH_SEARCH_API_KEY — shared API key used when the per-provider var is unset
   MANTISFETCH_BOCHA_URL      — base URL override (default https://api.bochaai.com; test/self-host hook)
 
 Response shape (POST /v1/web-search): a top-level envelope ``{code, msg, data}``
@@ -34,10 +35,14 @@ class BochaProvider(SearchProvider):
     name = "bocha"
 
     def __init__(self) -> None:
-        self._api_key = os.environ.get("MANTISFETCH_SEARCH_API_KEY", "").strip()
+        self._api_key = (
+            os.environ.get("MANTISFETCH_BOCHA_API_KEY", "").strip()
+            or os.environ.get("MANTISFETCH_SEARCH_API_KEY", "").strip()
+        )
         if not self._api_key:
             raise RuntimeError(
-                "MANTISFETCH_SEARCH_API_KEY is not set (required for the bocha search provider)."
+                "MANTISFETCH_BOCHA_API_KEY / MANTISFETCH_SEARCH_API_KEY is not set "
+                "(required for the bocha search provider)."
             )
         self._base_url = os.environ.get("MANTISFETCH_BOCHA_URL", "https://api.bochaai.com").rstrip(
             "/"

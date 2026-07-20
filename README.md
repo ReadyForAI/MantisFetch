@@ -316,7 +316,8 @@ For **China deployments**, SearXNG's default upstreams (Google, DuckDuckGo) are 
 | `MANTISFETCH_SEARCH_PROVIDER` | — | `searxng` / `tavily` / `bocha` / `brave`; unset disables search |
 | `MANTISFETCH_SEARCH_FALLBACK` | — | Comma-separated fallback chain, e.g. `tavily,searxng` |
 | `MANTISFETCH_SEARXNG_URL` | — | SearXNG instance URL (the `search` compose profile defaults it to `http://searxng:8080`) |
-| `MANTISFETCH_SEARCH_API_KEY` | — | API key for the active provider (Tavily / Bocha / Brave) |
+| `MANTISFETCH_SEARCH_API_KEY` | — | Shared API key (fallback for Tavily / Bocha / Brave) |
+| `MANTISFETCH_{TAVILY,BOCHA,BRAVE}_API_KEY` | — | Per-provider API key; overrides the shared one (set these to run several API providers at once) |
 | `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | Default result cap (hard max 20) |
 | `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | Minimum seconds between searches (`429` when exceeded) |
 
@@ -641,7 +642,8 @@ MANTISFETCH_SEARCH_PROVIDER=searxng docker compose --profile search up
 | `MANTISFETCH_SEARCH_PROVIDER` | — | `searxng` / `tavily` / `bocha` / `brave`；不设则禁用搜索 |
 | `MANTISFETCH_SEARCH_FALLBACK` | — | 逗号分隔的降级链，如 `tavily,searxng` |
 | `MANTISFETCH_SEARXNG_URL` | — | SearXNG 实例地址（`search` compose profile 默认为 `http://searxng:8080`） |
-| `MANTISFETCH_SEARCH_API_KEY` | — | 当前 provider 的 API key（Tavily / 博查 / Brave） |
+| `MANTISFETCH_SEARCH_API_KEY` | — | 共享 API key（Tavily / 博查 / Brave 的回退） |
+| `MANTISFETCH_{TAVILY,BOCHA,BRAVE}_API_KEY` | — | 各 provider 专属 key；优先于共享 key（同时配置多家 API provider 时用） |
 | `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | 单次结果上限（硬顶 20） |
 | `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | 两次搜索的最小间隔秒数（超出返回 `429`） |
 
