@@ -1740,7 +1740,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
 
-app = FastAPI(title="Doc Reader API", version="1.5.0", lifespan=lifespan)
+app = FastAPI(title="Doc Reader API", version="1.5.1", lifespan=lifespan)
 PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
     "0",
     "false",
@@ -2578,7 +2578,7 @@ def _search_score(*parts: tuple[bool, float]) -> float:
 async def health():
     return {
         "ok": True,
-        "version": "1.5.0",
+        "version": "1.5.1",
         "docs_dir": _mask_path(_get_docs_dir()),
         "supported_formats": SUPPORTED_FORMATS,
     }
