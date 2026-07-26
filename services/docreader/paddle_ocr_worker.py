@@ -147,8 +147,10 @@ def _flatten_paddle_ocr_result(result: Any) -> str:
 def _paddle_supports_onednn() -> bool:
     """True on the paddlepaddle 3.2.x line and older, where oneDNN inference works.
 
-    3.3.0 broke it (Paddle#77340). An unreadable/absent version resolves to False:
-    slow-but-working beats crashing on every page.
+    3.3.0 broke it (Paddle#77340). Keep this bound in step with the paddlepaddle pin
+    in requirements-ocr-linux-x86_64.txt: moving one without the other either
+    re-enables the crash or silently forfeits the ~6x. An unreadable/absent version
+    resolves to False — slow-but-working beats crashing on every page.
     """
     try:
         parts = importlib.metadata.version("paddlepaddle").split(".")
