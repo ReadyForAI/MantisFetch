@@ -169,6 +169,9 @@ class ParsedDocument:
     pages: list[PageContent]
     sections: list[Section]
     ocr_page_count: int = 0
+    # Planned OCR pages where no backend produced usable text (see parse_pdf's
+    # honest accounting) — ocr_page_count counts only successes.
+    ocr_failed_pages: list[int] = field(default_factory=list)
     table_count: int = 0
     images: list[EmbeddedImage] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)

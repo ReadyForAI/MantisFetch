@@ -968,6 +968,8 @@ def _build_doc_meta(
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
         "ocr_page_count": parsed.ocr_page_count,
+        "ocr_failed_page_count": len(parsed.ocr_failed_pages),
+        "ocr_failed_pages": list(parsed.ocr_failed_pages),
         "table_count": table_count,
         "image_count": image_count,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1209,6 +1211,8 @@ def write_output(
         "table_count": table_count,
         "image_count": image_count,
         "ocr_page_count": parsed.ocr_page_count,
+        "ocr_failed_page_count": len(parsed.ocr_failed_pages),
+        "ocr_failed_pages": list(parsed.ocr_failed_pages),
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
@@ -1372,6 +1376,8 @@ def write_output_extract_only(
         "table_count": table_count,
         "image_count": image_count,
         "ocr_page_count": parsed.ocr_page_count,
+        "ocr_failed_page_count": len(parsed.ocr_failed_pages),
+        "ocr_failed_pages": list(parsed.ocr_failed_pages),
         "metadata": metadata or {},
         "parse_metadata": parsed.metadata or {},
         "source_file": source_record or {},
@@ -1644,7 +1650,12 @@ class ParseResponse(BaseModel):
     section_count: int
     table_count: int
     image_count: int = 0
+    # ocr_page_count counts pages where OCR actually produced usable text;
+    # planned pages where every backend failed are listed separately so callers
+    # can tell a degraded ingest from a complete one.
     ocr_page_count: int
+    ocr_failed_page_count: int = 0
+    ocr_failed_pages: list[int] = []
     digest: str
     manifest_path: str
     processing_time_sec: float
@@ -2297,6 +2308,14 @@ def _load_parsed_document_from_storage(docs_dir: Path, doc_id: str) -> tuple[Par
         pages=[],
         sections=sections,
         ocr_page_count=int((manifest.get("parse_metadata") or {}).get("ocr_page_count") or 0),
+        ocr_failed_pages=[
+            int(p)
+            for p in (
+                manifest.get("ocr_failed_pages")
+                or (manifest.get("parse_metadata") or {}).get("ocr_failed_pages")
+                or []
+            )
+        ],
         table_count=0,
         metadata=dict(manifest.get("parse_metadata") or {}),
     )
@@ -3057,6 +3076,8 @@ async def api_parse_doc(
                 table_count=parsed.table_count,
                 image_count=len(parsed.images),
                 ocr_page_count=parsed.ocr_page_count,
+                ocr_failed_page_count=len(parsed.ocr_failed_pages),
+                ocr_failed_pages=list(parsed.ocr_failed_pages),
                 digest=digest[:300],
                 manifest_path=f"docs/{_doc_storage_rel_path(d_id, selected_content_type)}/manifest.json",
                 processing_time_sec=elapsed,
