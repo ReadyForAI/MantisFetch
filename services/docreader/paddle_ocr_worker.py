@@ -180,6 +180,20 @@ def _build_engine():
         "on",
     }:
         v3_kwargs["enable_hpi"] = True
+    # paddlepaddle 3.x runs CPU inference through the PIR executor, whose oneDNN
+    # path raises NotImplementedError ("ConvertPirAttribute2RuntimeAttribute not
+    # support [pir::ArrayAttribute<pir::DoubleAttribute>]") on every predict call
+    # — so with oneDNN on, local OCR fails for *every* page. Only this constructor
+    # kwarg reaches the predictor; the FLAGS_use_mkldnn env var is ignored. Default
+    # it off so OCR works, and allow opting back in where the stack is healthy.
+    v3_kwargs["enable_mkldnn"] = os.environ.get(
+        "MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", ""
+    ).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     device = os.environ.get("MANTISFETCH_LOCAL_OCR_DEVICE", "").strip()
     if device:
         v3_kwargs["device"] = device
