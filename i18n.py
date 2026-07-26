@@ -196,6 +196,9 @@ TEMPLATES = {
         "section_summary_line": "**摘要**: {summary}\n\n---\n\n",
         "default_section_title": "前言",
         "full_document_title": "全文",
+        "summary_low_text_note": (
+            "**注意**: 文档可提取文本过少（{chars} 字符），未生成模型摘要。"
+        ),
     },
     "en": {
         "digest_title": "# {doc_id}: {filename}",
@@ -211,6 +214,10 @@ TEMPLATES = {
         "section_summary_line": "**Summary**: {summary}\n\n---\n\n",
         "default_section_title": "Preface",
         "full_document_title": "Full document",
+        "summary_low_text_note": (
+            "**Note**: the document contains too little extractable text "
+            "({chars} chars) for a generated summary."
+        ),
     },
 }
 

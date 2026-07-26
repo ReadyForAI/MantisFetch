@@ -27,13 +27,27 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import UTC, datetime
 
-from i18n import prompt_for_locale, t
+from i18n import prompt_for_locale, t, tmpl_for_locale
 
 from .models import DocumentProfile, ParsedDocument, Section
 
 logger = logging.getLogger("mantisfetch_docreader")
 
 SUMMARY_MAX_CHARS = 500
+# Hallucination floors: with (almost) no extractable text the LLM cannot
+# summarize, only invent — observed when a scan whose OCR silently failed left a
+# 48-char residue of a financial audit report and the generated digest/brief
+# carried specific fabricated figures and audit opinions. Below the document
+# floor no LLM summary is attempted at all; sections below the section floor
+# echo their own text instead of being sent for summarization.
+SUMMARY_MIN_INPUT_CHARS = max(
+    0,
+    int(os.environ.get("MANTISFETCH_SUMMARY_MIN_INPUT_CHARS", "200")),
+)
+SUMMARY_SECTION_MIN_INPUT_CHARS = max(
+    0,
+    int(os.environ.get("MANTISFETCH_SUMMARY_SECTION_MIN_INPUT_CHARS", "40")),
+)
 SUMMARY_BATCH_CONCURRENCY = max(
     1,
     int(os.environ.get("MANTISFETCH_SUMMARY_BATCH_CONCURRENCY", "1")),
@@ -166,6 +180,29 @@ def generate_summaries(
     logger.info("Generating summaries...")
     summary_locale = _parsed_document_locale(parsed)
 
+    # Document floor: below it, return the actual content instead of an LLM
+    # "summary" that could only be invention (see SUMMARY_MIN_INPUT_CHARS).
+    collapsed_input = re.sub(r"\s+", " ", " ".join(sec.text for sec in parsed.sections)).strip()
+    if len(collapsed_input) < SUMMARY_MIN_INPUT_CHARS:
+        logger.warning(
+            "Document text below summary floor (%d < %d chars) — skipping LLM "
+            "summaries and returning the extracted content verbatim",
+            len(collapsed_input),
+            SUMMARY_MIN_INPUT_CHARS,
+        )
+        note = tmpl_for_locale(
+            summary_locale, "summary_low_text_note", chars=len(collapsed_input)
+        )
+        # The note leads in both tiers so digest[:300] consumers can tell this
+        # is raw content, not a generated summary; sections echo their own text
+        # (same policy as the section floor below).
+        digest = f"{note}\n\n{collapsed_input}".strip()
+        brief = digest
+        for sec in parsed.sections:
+            if not sec.summary:
+                sec.summary = _local_section_preview(sec)
+        return digest, brief, parsed.sections
+
     if _should_skip_section_summaries(parsed):
         logger.info(
             "Skipping per-section summaries for long document: %s sections > limit %s",
@@ -181,6 +218,11 @@ def generate_summaries(
         current_tokens = 0
 
         for sec in parsed.sections:
+            if len(re.sub(r"\s+", " ", sec.text).strip()) < SUMMARY_SECTION_MIN_INPUT_CHARS:
+                # Section floor: a title-sized fragment cannot be summarized,
+                # only embellished — echo its own text as the summary.
+                sec.summary = _local_section_preview(sec)
+                continue
             sec_tokens = _estimate_tokens(sec.text) + _estimate_tokens(sec.title) + 20
             if current_tokens + sec_tokens > BATCH_TOKEN_LIMIT and current_batch:
                 batches.append(current_batch)
