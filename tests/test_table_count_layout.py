@@ -85,6 +85,31 @@ def test_table_count_includes_layout_tables(tmp_path):
     assert parsed.table_count == 1
 
 
+def test_preserve_extracted_self_heals_stale_zero_count(tmp_path):
+    """A doc written before the count fix (manifest table_count=0 but a populated
+    tables list) must report the real count after a preserve_extracted rewrite
+    (the deferred-summary retry path)."""
+    parsed = _scanned_parsed()
+    docs_dir = tmp_path / "docs"
+    write_output_extract_only("DOC-T12", parsed, docs_dir, content_type="General")
+    doc_dir = docs_dir / "General" / "DOC-T12"
+
+    # Simulate the pre-fix state: entries on disk, count stuck at 0.
+    manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["tables"], "fixture must have materialized tables"
+    manifest["table_count"] = 0
+    (doc_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+    )
+
+    write_output_extract_only(
+        "DOC-T12", parsed, docs_dir, content_type="General", preserve_extracted=True
+    )
+
+    healed = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert healed["table_count"] == 1
+
+
 def test_table_count_zero_when_extract_tables_disabled(tmp_path):
     parsed = _scanned_parsed()
     parsed.extract_tables = False
