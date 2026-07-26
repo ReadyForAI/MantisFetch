@@ -144,6 +144,21 @@ def _flatten_paddle_ocr_result(result: Any) -> str:
     return "\n".join(lines).strip()
 
 
+def _paddle_supports_onednn() -> bool:
+    """True on the paddlepaddle 3.2.x line and older, where oneDNN inference works.
+
+    3.3.0 broke it (Paddle#77340). Keep this bound in step with the paddlepaddle pin
+    in requirements-ocr-linux-x86_64.txt: moving one without the other either
+    re-enables the crash or silently forfeits the ~6x. An unreadable/absent version
+    resolves to False — slow-but-working beats crashing on every page.
+    """
+    try:
+        parts = importlib.metadata.version("paddlepaddle").split(".")
+        return (int(parts[0]), int(parts[1])) < (3, 3)
+    except Exception:
+        return False
+
+
 def _build_engine():
     os.environ.setdefault("FLAGS_enable_pir_api", "0")
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
@@ -180,20 +195,22 @@ def _build_engine():
         "on",
     }:
         v3_kwargs["enable_hpi"] = True
-    # paddlepaddle 3.x runs CPU inference through the PIR executor, whose oneDNN
-    # path raises NotImplementedError ("ConvertPirAttribute2RuntimeAttribute not
-    # support [pir::ArrayAttribute<pir::DoubleAttribute>]") on every predict call
-    # — so with oneDNN on, local OCR fails for *every* page. Only this constructor
-    # kwarg reaches the predictor; the FLAGS_use_mkldnn env var is ignored. Default
-    # it off so OCR works, and allow opting back in where the stack is healthy.
-    v3_kwargs["enable_mkldnn"] = os.environ.get(
-        "MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", ""
-    ).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    # oneDNN is worth ~6x on CPU (10.9s -> 1.8s per page, PP-OCRv5_mobile at 144dpi,
+    # byte-identical text), but paddlepaddle >= 3.3.0 raises NotImplementedError
+    # ("ConvertPirAttribute2RuntimeAttribute not support
+    # [pir::ArrayAttribute<pir::DoubleAttribute>]") on *every* predict call in the
+    # PIR -> oneDNN attribute conversion — upstream Paddle#77340, still open. Pick
+    # the default from the installed version so pinning paddle back to the 3.2.x
+    # line is the only thing needed to get the speedup, and upgrading past it
+    # degrades to slow-but-working instead of crashing. Only this constructor kwarg
+    # reaches the predictor; the FLAGS_use_mkldnn env var is ignored.
+    override = os.environ.get("MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        v3_kwargs["enable_mkldnn"] = True
+    elif override in {"0", "false", "no", "off"}:
+        v3_kwargs["enable_mkldnn"] = False
+    else:
+        v3_kwargs["enable_mkldnn"] = _paddle_supports_onednn()
     device = os.environ.get("MANTISFETCH_LOCAL_OCR_DEVICE", "").strip()
     if device:
         v3_kwargs["device"] = device
