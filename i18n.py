@@ -197,7 +197,7 @@ TEMPLATES = {
         "default_section_title": "前言",
         "full_document_title": "全文",
         "summary_low_text_note": (
-            "**注意**: 文档可提取文本过少（{chars} 字符），未生成模型摘要；以下为全部提取内容。"
+            "**注意**: 文档可提取文本过少（{chars} 字符），未生成模型摘要。"
         ),
     },
     "en": {
@@ -216,8 +216,7 @@ TEMPLATES = {
         "full_document_title": "Full document",
         "summary_low_text_note": (
             "**Note**: the document contains too little extractable text "
-            "({chars} chars) for a generated summary; the full extracted "
-            "content follows."
+            "({chars} chars) for a generated summary."
         ),
     },
 }

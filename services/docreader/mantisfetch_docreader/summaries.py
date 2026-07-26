@@ -38,8 +38,8 @@ SUMMARY_MAX_CHARS = 500
 # summarize, only invent — observed when a scan whose OCR silently failed left a
 # 48-char residue of a financial audit report and the generated digest/brief
 # carried specific fabricated figures and audit opinions. Below the document
-# floor no LLM summary is attempted at all; sections at or below the section
-# floor echo their own text instead of being sent for summarization.
+# floor no LLM summary is attempted at all; sections below the section floor
+# echo their own text instead of being sent for summarization.
 SUMMARY_MIN_INPUT_CHARS = max(
     0,
     int(os.environ.get("MANTISFETCH_SUMMARY_MIN_INPUT_CHARS", "200")),
@@ -193,8 +193,14 @@ def generate_summaries(
         note = tmpl_for_locale(
             summary_locale, "summary_low_text_note", chars=len(collapsed_input)
         )
-        digest = collapsed_input or note
-        brief = f"{note}\n\n{collapsed_input}".strip()
+        # The note leads in both tiers so digest[:300] consumers can tell this
+        # is raw content, not a generated summary; sections echo their own text
+        # (same policy as the section floor below).
+        digest = f"{note}\n\n{collapsed_input}".strip()
+        brief = digest
+        for sec in parsed.sections:
+            if not sec.summary:
+                sec.summary = _local_section_preview(sec)
         return digest, brief, parsed.sections
 
     if _should_skip_section_summaries(parsed):
@@ -212,10 +218,7 @@ def generate_summaries(
         current_tokens = 0
 
         for sec in parsed.sections:
-            if (
-                len(re.sub(r"\s+", " ", sec.text).strip())
-                <= SUMMARY_SECTION_MIN_INPUT_CHARS
-            ):
+            if len(re.sub(r"\s+", " ", sec.text).strip()) < SUMMARY_SECTION_MIN_INPUT_CHARS:
                 # Section floor: a title-sized fragment cannot be summarized,
                 # only embellished — echo its own text as the summary.
                 sec.summary = _local_section_preview(sec)

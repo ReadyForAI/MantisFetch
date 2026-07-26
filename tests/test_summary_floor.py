@@ -43,12 +43,15 @@ def test_below_document_floor_never_calls_llm(monkeypatch):
     ]
     digest, brief, out_sections = generate_summaries(_doc(sections))
 
-    # The "summary" is the actual content, not an invention.
+    # The "summary" is the actual content, not an invention — and the leading
+    # note tells consumers no model summary was generated.
+    assert "未生成模型摘要" in digest
     assert "2025年财务审计报告" in digest
+    assert "未生成模型摘要" in brief
     assert "2025年财务审计报告" in brief
     assert "2022年财务审计报告" in brief
-    # No section acquired an LLM summary (Section.summary defaults to "").
-    assert all(not s.summary for s in out_sections)
+    # Sections echo their own text, same policy as the section floor.
+    assert [s.summary for s in out_sections] == [s.text for s in out_sections]
 
 
 def test_empty_document_returns_note_digest(monkeypatch):
@@ -62,7 +65,9 @@ def test_empty_document_returns_note_digest(monkeypatch):
 
     digest, brief, _ = generate_summaries(_doc([_section(1, "Page 1", "")]))
 
-    assert digest.strip()  # the note, not an empty string
+    # The note alone (English locale for an ASCII-only document), no dangling
+    # claim about content that doesn't exist.
+    assert "too little extractable text" in digest
     assert brief.strip()
 
 
