@@ -59,7 +59,18 @@ def test_generate_summaries_uses_chinese_prompt_for_chinese_documents(monkeypatc
                 index=1,
                 title="1.1 项目概况",
                 level=2,
-                text="这是中文招标文件正文，包含项目目标、招标依据和验收要求。",
+                # Long enough to clear SUMMARY_MIN_INPUT_CHARS — this test is
+                # about prompt-locale selection, not the near-empty floor.
+                text=(
+                    "这是中文招标文件正文，包含项目目标、招标依据和验收要求。"
+                    "招标范围涵盖软件开发、系统集成与运行维护三个部分，"
+                    "投标人须具备相应资质并按要求提交技术方案与商务报价，"
+                    "评标委员会将依据综合评分法确定中标候选人并进行公示。"
+                    "项目建设周期为十二个月，分需求确认、开发实施、试运行与终验四个阶段，"
+                    "各阶段交付物须经建设单位书面确认后方可进入下一阶段。"
+                    "质保期自终验合格之日起计算，为期二十四个月，"
+                    "期间投标人应提供七乘二十四小时的运维响应服务。"
+                ),
                 page_range="p.1-1",
             )
         ],
