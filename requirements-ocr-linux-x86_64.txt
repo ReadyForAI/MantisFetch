@@ -1,5 +1,9 @@
 # Linux x86_64 production OCR baseline.
 # Keep this on the PaddleOCR 3.x line so production can use HPI/OpenVINO/TensorRT
 # optimizations. Exact patch versions should be promoted after OCR benchmark runs.
-paddlepaddle>=3.2.0,<4.0.0
+# Held below 3.3.0: paddlepaddle 3.3.x crashes on every predict call in the
+# PIR -> oneDNN attribute conversion (Paddle#77340, still open), so oneDNN has to
+# be switched off there — which costs ~6x on CPU OCR (10.9s vs 1.8s per page,
+# byte-identical text). Lift this pin once #77340 ships a fix.
+paddlepaddle>=3.2.0,<3.3.0
 paddleocr>=3.3.0,<4.0.0
