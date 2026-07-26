@@ -96,7 +96,14 @@ def test_all_pages_failed_ocr_is_reported_not_hidden(scan_pdf, monkeypatch):
     def fake_gemini(img_bytes, page_num, proofread=True):
         return "[OCR failed: provider down]"
 
+    def fake_local(img_bytes, page_num, backend):
+        # The scan-like fallback kicks in after the LLM failures; keep it failing
+        # too so "all backends failed" is what the test actually exercises
+        # regardless of whether a real local worker exists on this machine.
+        return "[OCR failed: no local worker]", None
+
     monkeypatch.setattr(dr, "gemini_ocr", fake_gemini)
+    monkeypatch.setattr(dr, "local_ocr_with_layout", fake_local)
 
     parsed = dr.parse_pdf(scan_pdf, force_ocr=True, concurrency=2)
 
@@ -129,7 +136,11 @@ def test_manifest_carries_ocr_failure_fields(scan_pdf, tmp_path, monkeypatch):
     def fake_gemini(img_bytes, page_num, proofread=True):
         return "[OCR failed: provider down]"
 
+    def fake_local(img_bytes, page_num, backend):
+        return "[OCR failed: no local worker]", None
+
     monkeypatch.setattr(dr, "gemini_ocr", fake_gemini)
+    monkeypatch.setattr(dr, "local_ocr_with_layout", fake_local)
 
     parsed = dr.parse_pdf(scan_pdf, force_ocr=True, concurrency=2)
     docs_dir = tmp_path / "docs"

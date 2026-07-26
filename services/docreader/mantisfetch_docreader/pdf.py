@@ -446,11 +446,12 @@ def parse_pdf(
                 assessment.get("sparse_pages") or []
             )
         fallback_tasks: list[tuple[int, Path]] = []
-        for pn in sorted(llm_ocr_set & (local_ocr_set | scan_like_fallback)):
+        for pn in sorted(llm_ocr_set & scan_like_fallback):
             llm_text = llm_ocr_results.get(pn)
             if llm_text and not _is_ocr_failed_text(llm_text):
                 continue
-            if pn in local_ocr_results:
+            existing_local = local_ocr_results.get(pn)
+            if existing_local and not _is_ocr_failed_text(existing_local):
                 continue
             page = doc[pn - 1]
             scale, _pixels, _capped, skip = _resolve_ocr_render_scale(

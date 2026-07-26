@@ -1655,7 +1655,7 @@ class ParseResponse(BaseModel):
     # can tell a degraded ingest from a complete one.
     ocr_page_count: int
     ocr_failed_page_count: int = 0
-    ocr_failed_pages: list[int] = []
+    ocr_failed_pages: list[int] = Field(default_factory=list)
     digest: str
     manifest_path: str
     processing_time_sec: float
