@@ -37,6 +37,7 @@ from .models import (
     ProcessingPolicy,
 )
 from .ocr.engines import (
+    LOCAL_OCR_ENABLED,
     _is_ocr_failed_text,
     _ocr_cache_key,
     _ocr_cache_path,
@@ -369,6 +370,27 @@ def parse_pdf(
         # covers a render-time failure (a partially-spilled scratch dir). The fitz
         # doc stays open during OCR — ~file-size in memory, far less than the page
         # PNGs we no longer keep resident.
+        def _do_local_ocr(args):
+            # Shared by the planned local batch below and the LLM-failure fallback
+            # batch further down, so both cache and clean up identically.
+            pn, png_path = args
+            try:
+                img_b = png_path.read_bytes()
+                text, page_blocks = local_ocr_with_layout(img_b, pn, ocr_plan["local_backend"])
+                if (
+                    cache_dir
+                    and profile
+                    and profile.cache_policy.page_ocr
+                    and not _is_ocr_failed_text(text)
+                ):
+                    _ocr_cache_variant_path(
+                        cache_dir,
+                        f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_b)}.txt",
+                    ).write_text(text, encoding="utf-8")
+                return pn, text, page_blocks
+            finally:
+                png_path.unlink(missing_ok=True)
+
         if local_tasks:
             logger.info(
                 "Concurrent local OCR: %d pages (%d workers, backend=%s)...",
@@ -376,25 +398,6 @@ def parse_pdf(
                 LOCAL_OCR_CONCURRENCY,
                 ocr_plan["local_backend"],
             )
-
-            def _do_local_ocr(args):
-                pn, png_path = args
-                try:
-                    img_b = png_path.read_bytes()
-                    text, page_blocks = local_ocr_with_layout(img_b, pn, ocr_plan["local_backend"])
-                    if (
-                        cache_dir
-                        and profile
-                        and profile.cache_policy.page_ocr
-                        and not _is_ocr_failed_text(text)
-                    ):
-                        _ocr_cache_variant_path(
-                            cache_dir,
-                            f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_b)}.txt",
-                        ).write_text(text, encoding="utf-8")
-                    return pn, text, page_blocks
-                finally:
-                    png_path.unlink(missing_ok=True)
 
             with ThreadPoolExecutor(max_workers=LOCAL_OCR_CONCURRENCY) as pool:
                 futures = {pool.submit(_do_local_ocr, task): task for task in local_tasks}
@@ -428,6 +431,71 @@ def parse_pdf(
                     pn, result = fut.result()
                     llm_ocr_results[pn] = result
                     logger.info(f"Page {pn}/{total_pages}: LLM OCR done")
+
+        # An LLM-designated page is rendered only for the LLM (the planner also
+        # subtracts explicit upgrade pages from the local set), so a provider
+        # failure would otherwise leave a scan-like page with no OCR text and no
+        # layout blocks at all — observed as lost pages/tables when the provider
+        # timed out mid-upgrade. Fall back to a local pass for scan-like pages so
+        # an unavailable provider degrades to the un-upgraded result instead of
+        # losing content the local worker can produce. Text-like pages keep their
+        # native text via _usable_page_text, so they need no fallback.
+        scan_like_fallback: set[int] = set()
+        if LOCAL_OCR_ENABLED:
+            scan_like_fallback = set(assessment.get("scan_like_pages") or []) | set(
+                assessment.get("sparse_pages") or []
+            )
+        fallback_tasks: list[tuple[int, Path]] = []
+        for pn in sorted(llm_ocr_set & scan_like_fallback):
+            llm_text = llm_ocr_results.get(pn)
+            if llm_text and not _is_ocr_failed_text(llm_text):
+                continue
+            existing_local = local_ocr_results.get(pn)
+            if existing_local and not _is_ocr_failed_text(existing_local):
+                continue
+            page = doc[pn - 1]
+            scale, _pixels, _capped, skip = _resolve_ocr_render_scale(
+                page,
+                requested_scale=processing_policy.local_ocr_render_scale,
+                max_pixels=processing_policy.max_local_ocr_pixels,
+                min_scale=processing_policy.min_ocr_render_scale,
+            )
+            if skip:
+                continue
+            pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+            img_bytes = pix.tobytes("png")
+            if cache_dir:
+                ck_path = _ocr_cache_variant_path(
+                    cache_dir,
+                    f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_bytes)}.txt",
+                )
+                if ck_path.exists():
+                    cached = ck_path.read_text(encoding="utf-8")
+                    if not _is_ocr_failed_text(cached):
+                        local_ocr_results[pn] = cached
+                        logger.info(
+                            "Page %d/%d: local OCR cache hit (LLM OCR fallback)",
+                            pn,
+                            total_pages,
+                        )
+                        continue
+            png_path = ocr_png_scratch / f"ocr_p{pn:04d}.local-fallback.png"
+            png_path.write_bytes(img_bytes)
+            fallback_tasks.append((pn, png_path))
+        if fallback_tasks:
+            logger.warning(
+                "LLM OCR failed on %d page(s) %s — falling back to local OCR",
+                len(fallback_tasks),
+                [pn for pn, _ in fallback_tasks],
+            )
+            with ThreadPoolExecutor(max_workers=LOCAL_OCR_CONCURRENCY) as pool:
+                futures = {pool.submit(_do_local_ocr, task): task for task in fallback_tasks}
+                for fut in as_completed(futures):
+                    pn, result, page_blocks = fut.result()
+                    local_ocr_results[pn] = result
+                    if page_blocks is not None and not _is_ocr_failed_text(result):
+                        local_ocr_layout_pages[pn] = page_blocks
+                    logger.info(f"Page {pn}/{total_pages}: local OCR fallback done")
     finally:
         doc.close()
         if ocr_png_scratch is not None:
@@ -436,13 +504,39 @@ def parse_pdf(
     pages: list[PageContent] = []
     ocr_table_count = 0
     pdf_table_count = 0
-    ocr_count = len(local_ocr_set | llm_ocr_set)
+    # Honest OCR accounting: a planned page only counts as OCR'd when some
+    # backend actually produced usable text. Failures are reported, not folded
+    # into the success count — an all-pages-failed scan must not look identical
+    # to a fully-OCR'd one in the response/manifest.
+    def _page_ocr_succeeded(pn: int) -> bool:
+        for results in (llm_ocr_results, local_ocr_results):
+            text = results.get(pn)
+            if text and not _is_ocr_failed_text(text):
+                return True
+        return False
+
+    ocr_attempted = local_ocr_set | llm_ocr_set
+    ocr_failed_pages = sorted(pn for pn in ocr_attempted if not _page_ocr_succeeded(pn))
+    ocr_count = len(ocr_attempted) - len(ocr_failed_pages)
+    if ocr_failed_pages:
+        logger.warning(
+            "OCR produced no usable text on %d of %d planned page(s): %s",
+            len(ocr_failed_pages),
+            len(ocr_attempted),
+            ocr_failed_pages,
+        )
     for page_num in range(1, total_pages + 1):
         raw_text = page_texts.get(page_num, "")
         page_text = raw_text
         page_tables: list[str] = []
         tables_in_text = False
-        enhanced = llm_ocr_results.get(page_num) or local_ocr_results.get(page_num)
+        llm_text = llm_ocr_results.get(page_num)
+        local_text = local_ocr_results.get(page_num)
+        if _is_ocr_failed_text(llm_text) and local_text and not _is_ocr_failed_text(local_text):
+            # The LLM upgrade failed but a local pass succeeded — use the local
+            # text instead of letting the failure marker shadow real content.
+            llm_text = None
+        enhanced = llm_text or local_text
         if enhanced:
             page_text = _cleanup_ocr_text(_usable_page_text(raw_text, enhanced))
             if extract_tables:
@@ -559,6 +653,7 @@ def parse_pdf(
         pages=pages,
         sections=sections,
         ocr_page_count=ocr_count,
+        ocr_failed_pages=ocr_failed_pages,
         table_count=table_count,
         ocr_blocks=(
             OCRBlocksSidecar(
@@ -575,6 +670,7 @@ def parse_pdf(
             "source_file": source_file_meta,
             "quality_assessment": assessment,
             "ocr_plan": ocr_plan,
+            "ocr_failed_pages": ocr_failed_pages,
             "ocr_rendering": render_meta,
             "field_ocr": field_ocr_meta,
         },
