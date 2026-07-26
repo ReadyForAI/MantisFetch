@@ -921,8 +921,15 @@ def _resolve_extracted_outputs(
             if isinstance(prior.get("layout"), dict)
             else _build_layout_manifest_entry(available=False)
         )
+        # Prefer counting the carried-forward entries so documents written before
+        # the count fix self-heal on a summary rewrite; fall back to the prior
+        # count for legacy manifests that had a count but no entries list.
+        prior_table_count = (
+            len(table_entries) if table_entries else int(prior.get("table_count") or 0)
+        )
+        parsed.table_count = prior_table_count
         return (
-            int(prior.get("table_count") or 0),
+            prior_table_count,
             int(prior.get("image_count") or 0),
             table_entries,
             image_entries,
@@ -946,7 +953,16 @@ def _resolve_extracted_outputs(
                 coordinate_system=parsed.ocr_blocks.coordinate_system,
             ),
         )
-    return (parsed.table_count, len(parsed.images), table_entries, image_entries, layout_entry)
+    # Count what was actually materialized on disk. parsed.table_count only sees
+    # parse-time tables (native PDF + OCR-text markdown); the geometry-reconstructed
+    # "layout" tables are built HERE from ocr_blocks by _write_tables — and for a
+    # scanned document those are all of its tables, so the parse-time count is
+    # structurally 0 (observed: table_count=0 while tables.json held 125 tables).
+    # Sync parsed.table_count so the parse response (built from parsed after
+    # persist) agrees with the manifest.
+    table_count = len(table_entries)
+    parsed.table_count = table_count
+    return (table_count, len(parsed.images), table_entries, image_entries, layout_entry)
 
 
 def _build_doc_meta(
