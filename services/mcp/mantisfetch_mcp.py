@@ -588,14 +588,16 @@ async def doc_parse(
     synchronous, so such a document surfaces as a client-side timeout rather than
     a tool error.
 
-    A timed-out parse may or may not have persisted: the disconnect cancels the
-    request, and measurement shows the write can be cut off after the parse
-    itself finished, leaving nothing in the library. So pass an explicit doc_id
-    whenever a document might be large, and after a timeout probe
-    doc_manifest(doc_id) ONCE. If it answers, the document landed — read it by
-    doc_id. If it misses, the work did not persist; report the timeout rather
-    than re-calling, because a retry pays the same minutes again and times out
-    the same way."""
+    A timed-out parse may or may not have persisted, depending on where the
+    disconnect landed: it cancels the request, which can cut the write off after
+    the parse itself finished, but a write already handed to a worker thread runs
+    to completion regardless. So pass an explicit doc_id whenever a document
+    might be large, and after a timeout probe doc_manifest(doc_id) a few times
+    over the next several seconds rather than once — the document can appear a
+    moment after the call died. If it answers, the document landed: read it by
+    doc_id. If it is still missing after that, the work did not persist; report
+    the timeout rather than re-calling, because a retry pays the same minutes
+    again and times out the same way."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
