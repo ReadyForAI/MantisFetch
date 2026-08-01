@@ -38,6 +38,9 @@ def _install(monkeypatch: pytest.MonkeyPatch, paddle_version: str) -> type[_Fake
 
     monkeypatch.setattr(paddle_ocr_worker.importlib.metadata, "version", _version)
     monkeypatch.delenv("MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", raising=False)
+    # Both of these change what _build_engine() does, so a developer machine that
+    # exports either one must not decide the outcome of these tests.
+    monkeypatch.delenv("MANTISFETCH_LOCAL_OCR_DEVICE", raising=False)
     _FakePaddleOCR.last_kwargs = {}
     return _FakePaddleOCR
 

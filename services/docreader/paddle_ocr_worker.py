@@ -233,10 +233,10 @@ def _build_engine():
         if not v3_kwargs["enable_mkldnn"] and _paddle_version() != _UNKNOWN_VERSION:
             if device.lower() in {"", "cpu"}:
                 print(
-                    f"[local-ocr] oneDNN disabled: paddlepaddle {_paddle_version()} is outside "
-                    "the >=3.2.0,<3.3.0 pin in requirements-ocr-linux-x86_64.txt. CPU OCR runs "
-                    "~6x slower (about 10.9s vs 1.8s per page); text is unaffected. Reinstall "
-                    "from that file to restore it.",
+                    f"[local-ocr] oneDNN disabled: paddlepaddle {_paddle_version()} is newer "
+                    "than the pinned OCR stack supports (Paddle#77340). CPU OCR runs ~6x "
+                    "slower (about 10.9s vs 1.8s per page); text is unaffected. Reinstall the "
+                    "pinned stack with scripts/install_ocr_deps.sh to restore it.",
                     file=sys.stderr,
                     flush=True,
                 )
