@@ -580,7 +580,15 @@ async def doc_parse(
     when that misses. A 409 "already exists" from this call means it is already in
     the library — stop and read it by doc_id; do NOT pass replace= or mint a new
     id. A "passed its staging TTL" error means the attachment expired: ask the user
-    to re-upload."""
+    to re-upload.
+
+    Large scanned or table-heavy documents can take minutes to OCR and summarize,
+    which is longer than an MCP client's per-request timeout typically allows (the
+    NodalOS agentd client, for one, caps every upstream call at 60s). This call is
+    synchronous, so such a document fails as a client-side timeout rather than a
+    tool error, and retrying it over MCP will time out the same way. When that
+    happens, hand the file to the /doc/parse REST endpoint instead and come back
+    with the resulting doc_id — do not loop on this tool."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
