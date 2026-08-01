@@ -582,12 +582,18 @@ async def doc_parse(
     id. A "passed its staging TTL" error means the attachment expired: ask the user
     to re-upload.
 
-    Large scanned or table-heavy documents can take minutes to OCR and summarize,
-    which is longer than an MCP client's per-request timeout typically allows (the
-    NodalOS agentd client, for one, caps every upstream call at 60s). This call is
-    synchronous, so such a document surfaces as a client-side timeout rather than
-    a tool error, and retrying it here times out the same way — report the timeout
-    to the user instead of looping on this tool."""
+    Large scanned documents can take minutes to OCR, which is longer than an MCP
+    client's per-request timeout typically allows (the NodalOS agentd client, for
+    one, caps every upstream call at 60s). This call is synchronous, so such a
+    document surfaces as a client-side timeout rather than a tool error.
+
+    A timeout does not cancel the parse: it finishes on the server and the
+    document lands in the library, indexed and readable. So pass an explicit
+    doc_id whenever a document might be large, and when the call times out, poll
+    doc_manifest(doc_id) — it starts answering once the parse finishes. Calling
+    doc_parse again with the same doc_id is safe (calls for one doc_id serialize
+    and the work is not repeated), but it will block and then return 409 "already
+    exists", which means "read it by doc_id", not "retry"."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
