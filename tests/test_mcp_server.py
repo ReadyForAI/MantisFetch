@@ -48,6 +48,14 @@ def test_tool_registry_matches_contract() -> None:
     assert len(names) <= 40  # NodalOS mcp.products[].max_tools cap
 
 
+def test_request_body_limit_fits_a_max_size_inline_doc() -> None:
+    # SDK v2 defaults the streamable-HTTP body cap to 4 MiB and answers 413 before
+    # parsing, which would reject an inline doc_parse well under _MAX_INLINE_DOC_BYTES
+    # (base64 inflates by 4/3). Guard the two limits against drifting apart.
+    b64_size = mm._MAX_INLINE_DOC_BYTES * 4 // 3
+    assert mm.mcp.session_manager.max_request_body_size >= b64_size
+
+
 def test_transport_security_allows_http_and_https_origins(monkeypatch) -> None:
     monkeypatch.setenv("PORT", "9898")
     monkeypatch.setenv("MANTISFETCH_MCP_ALLOWED_HOSTS", "192.168.0.5:*")
