@@ -585,10 +585,9 @@ async def doc_parse(
     Large scanned or table-heavy documents can take minutes to OCR and summarize,
     which is longer than an MCP client's per-request timeout typically allows (the
     NodalOS agentd client, for one, caps every upstream call at 60s). This call is
-    synchronous, so such a document fails as a client-side timeout rather than a
-    tool error, and retrying it over MCP will time out the same way. When that
-    happens, hand the file to the /doc/parse REST endpoint instead and come back
-    with the resulting doc_id — do not loop on this tool."""
+    synchronous, so such a document surfaces as a client-side timeout rather than
+    a tool error, and retrying it here times out the same way — report the timeout
+    to the user instead of looping on this tool."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
