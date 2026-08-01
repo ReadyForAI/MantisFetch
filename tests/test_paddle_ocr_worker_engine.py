@@ -53,6 +53,41 @@ def test_mkldnn_off_by_default_on_broken_paddle(
     assert fake.last_kwargs["enable_mkldnn"] is False
 
 
+def test_disabled_onednn_is_announced_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """A drifted install must say so: the only other symptom is being ~6x slower."""
+    _install(monkeypatch, "3.3.1")
+
+    paddle_ocr_worker._build_engine()
+
+    err = capsys.readouterr().err
+    assert "oneDNN disabled" in err
+    assert "3.3.1" in err
+
+
+def test_no_onednn_warning_when_it_is_enabled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    _install(monkeypatch, "3.2.2")
+
+    paddle_ocr_worker._build_engine()
+
+    assert "oneDNN disabled" not in capsys.readouterr().err
+
+
+def test_no_onednn_warning_when_operator_switched_it_off(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """An explicit opt-out is a choice, not drift — don't nag about it."""
+    _install(monkeypatch, "3.3.1")
+    monkeypatch.setenv("MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", "0")
+
+    paddle_ocr_worker._build_engine()
+
+    assert "oneDNN disabled" not in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("paddle_version", ["3.2.2", "3.2.0", "3.1.1", "3.0.0"])
 def test_mkldnn_on_by_default_on_working_paddle(
     monkeypatch: pytest.MonkeyPatch, paddle_version: str

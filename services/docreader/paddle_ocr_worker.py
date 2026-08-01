@@ -144,6 +144,14 @@ def _flatten_paddle_ocr_result(result: Any) -> str:
     return "\n".join(lines).strip()
 
 
+def _paddle_version() -> str:
+    """Installed paddlepaddle version, or a placeholder when it cannot be read."""
+    try:
+        return importlib.metadata.version("paddlepaddle")
+    except Exception:
+        return "unknown"
+
+
 def _paddle_supports_onednn() -> bool:
     """True on the paddlepaddle 3.2.x line and older, where oneDNN inference works.
 
@@ -211,6 +219,18 @@ def _build_engine():
         v3_kwargs["enable_mkldnn"] = False
     else:
         v3_kwargs["enable_mkldnn"] = _paddle_supports_onednn()
+        if not v3_kwargs["enable_mkldnn"]:
+            # Say it out loud: an install that drifts past the pin loses the ~6x
+            # with no other symptom (the text is byte-identical, just slow), so
+            # silence here is how a slow build reaches production unnoticed.
+            print(
+                f"[local-ocr] oneDNN disabled: paddlepaddle {_paddle_version()} is outside "
+                "the >=3.2.0,<3.3.0 pin in requirements-ocr-linux-x86_64.txt. CPU OCR runs "
+                "~6x slower (about 10.9s vs 1.8s per page); text is unaffected. Reinstall "
+                "from that file to restore it.",
+                file=sys.stderr,
+                flush=True,
+            )
     device = os.environ.get("MANTISFETCH_LOCAL_OCR_DEVICE", "").strip()
     if device:
         v3_kwargs["device"] = device
