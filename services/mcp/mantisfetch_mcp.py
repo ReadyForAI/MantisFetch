@@ -9,9 +9,10 @@ Design (per IRP ReadyForAI/SharedSpecs#182):
   via ``httpx.ASGITransport`` — the MCP server is a thin new front-end on top of
   the HTTP API and does not touch the /web /doc contracts or reach into handler
   internals (Form/Query/multipart resolve through the real FastAPI stack).
-- Statefulness: the MCP transport is stateless; browser state lives in
-  MantisFetch's own SessionManager keyed by ``session_id``, which is threaded
-  through the web tool arguments.
+- Statefulness: the MCP transport is stateless (``stateless_http=True`` on
+  ``streamable_http_app()``); browser state lives in MantisFetch's own
+  SessionManager keyed by ``session_id``, which is threaded through the web tool
+  arguments.
 - Three-tier loading is preserved as *separate tools* (doc_digest / doc_brief /
   doc_section; web capture→digest, distill→brief, read_sections→section) so the
   model sees each tier's token cost and picks the cheapest.
@@ -42,11 +43,11 @@ from typing import Any
 import httpx
 import mantisfetch_browser as _web_mod
 import mantisfetch_docreader as _doc_mod
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 try:  # ToolError gives the agent a clean message; fall back if the path moves.
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 except Exception:  # pragma: no cover - defensive
     ToolError = RuntimeError  # type: ignore[assignment, misc]
 
@@ -60,7 +61,7 @@ def _transport_security() -> TransportSecuritySettings:
     deployments come from MANTISFETCH_MCP_ALLOWED_HOSTS (comma-separated).
 
     Origins cover both http and https: a browser/Electron MCP client sends
-    Origin: https://<host> once the server is run with TLS, and FastMCP rejects
+    Origin: https://<host> once the server is run with TLS, and MCPServer rejects
     an unlisted Origin before bearer auth.
     """
     port = os.environ.get("PORT", "9898")
@@ -78,12 +79,10 @@ def _transport_security() -> TransportSecuritySettings:
     )
 
 
-mcp = FastMCP(
-    "mantisfetch",
-    stateless_http=True,
-    streamable_http_path="/",
-    transport_security=_transport_security(),
-)
+# Transport settings (stateless_http / path / transport_security) are not
+# constructor arguments in SDK v2 — they belong to streamable_http_app() at the
+# bottom of this module, which is what actually builds the ASGI app.
+mcp = MCPServer("mantisfetch")
 
 # In-process transports to the existing apps. Browser/docreader routes are
 # unprefixed (the unified server mounts them at /web and /doc), so paths here are
@@ -761,4 +760,10 @@ class _McpAuthGate:
         await self.app(scope, receive, send)
 
 
-mcp_app = _McpAuthGate(mcp.streamable_http_app())
+mcp_app = _McpAuthGate(
+    mcp.streamable_http_app(
+        streamable_http_path="/",
+        stateless_http=True,
+        transport_security=_transport_security(),
+    )
+)
