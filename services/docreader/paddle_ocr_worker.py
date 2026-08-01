@@ -144,6 +144,17 @@ def _flatten_paddle_ocr_result(result: Any) -> str:
     return "\n".join(lines).strip()
 
 
+_UNKNOWN_VERSION = "unknown"
+
+
+def _paddle_version() -> str:
+    """Installed paddlepaddle version, or ``_UNKNOWN_VERSION`` when it cannot be read."""
+    try:
+        return importlib.metadata.version("paddlepaddle")
+    except Exception:
+        return _UNKNOWN_VERSION
+
+
 def _paddle_supports_onednn() -> bool:
     """True on the paddlepaddle 3.2.x line and older, where oneDNN inference works.
 
@@ -204,6 +215,7 @@ def _build_engine():
     # line is the only thing needed to get the speedup, and upgrading past it
     # degrades to slow-but-working instead of crashing. Only this constructor kwarg
     # reaches the predictor; the FLAGS_use_mkldnn env var is ignored.
+    device = os.environ.get("MANTISFETCH_LOCAL_OCR_DEVICE", "").strip()
     override = os.environ.get("MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", "").strip().lower()
     if override in {"1", "true", "yes", "on"}:
         v3_kwargs["enable_mkldnn"] = True
@@ -211,7 +223,23 @@ def _build_engine():
         v3_kwargs["enable_mkldnn"] = False
     else:
         v3_kwargs["enable_mkldnn"] = _paddle_supports_onednn()
-    device = os.environ.get("MANTISFETCH_LOCAL_OCR_DEVICE", "").strip()
+        # Say it out loud: drifting past the pin loses the ~6x with no other
+        # symptom (the text is byte-identical, just slow), so silence here is how
+        # a slow build reaches production unnoticed. Only claim drift we can
+        # actually see: an unreadable version means paddlepaddle isn't installed
+        # under that name (a GPU build ships as paddlepaddle-gpu), where neither
+        # the diagnosis nor the CPU reinstall would be right. Same for a non-CPU
+        # device, which oneDNN does not apply to.
+        if not v3_kwargs["enable_mkldnn"] and _paddle_version() != _UNKNOWN_VERSION:
+            if device.lower() in {"", "cpu"}:
+                print(
+                    f"[local-ocr] oneDNN disabled: paddlepaddle {_paddle_version()} is newer "
+                    "than the pinned OCR stack supports (Paddle#77340). CPU OCR runs ~6x "
+                    "slower (about 10.9s vs 1.8s per page); text is unaffected. Reinstall the "
+                    "pinned stack with scripts/install_ocr_deps.sh to restore it.",
+                    file=sys.stderr,
+                    flush=True,
+                )
     if device:
         v3_kwargs["device"] = device
     try:

@@ -7,6 +7,7 @@ picks the default from the installed paddlepaddle version rather than giving it 
 everywhere — on where it works, off where it crashes, with an env override.
 """
 
+import importlib.metadata
 import sys
 import types
 
@@ -37,6 +38,9 @@ def _install(monkeypatch: pytest.MonkeyPatch, paddle_version: str) -> type[_Fake
 
     monkeypatch.setattr(paddle_ocr_worker.importlib.metadata, "version", _version)
     monkeypatch.delenv("MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", raising=False)
+    # Both of these change what _build_engine() does, so a developer machine that
+    # exports either one must not decide the outcome of these tests.
+    monkeypatch.delenv("MANTISFETCH_LOCAL_OCR_DEVICE", raising=False)
     _FakePaddleOCR.last_kwargs = {}
     return _FakePaddleOCR
 
@@ -51,6 +55,74 @@ def test_mkldnn_off_by_default_on_broken_paddle(
 
     assert api_version == "v3"
     assert fake.last_kwargs["enable_mkldnn"] is False
+
+
+def test_disabled_onednn_is_announced_on_stderr(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """A drifted install must say so: the only other symptom is being ~6x slower."""
+    _install(monkeypatch, "3.3.1")
+
+    paddle_ocr_worker._build_engine()
+
+    err = capsys.readouterr().err
+    assert "oneDNN disabled" in err
+    assert "3.3.1" in err
+
+
+def test_no_onednn_warning_when_it_is_enabled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    _install(monkeypatch, "3.2.2")
+
+    paddle_ocr_worker._build_engine()
+
+    assert "oneDNN disabled" not in capsys.readouterr().err
+
+
+def test_no_onednn_warning_on_a_gpu_worker(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """oneDNN does not apply to a GPU device, and the CPU reinstall it recommends
+    would replace that worker's GPU runtime."""
+    _install(monkeypatch, "3.3.1")
+    monkeypatch.setenv("MANTISFETCH_LOCAL_OCR_DEVICE", "gpu")
+
+    paddle_ocr_worker._build_engine()
+
+    assert "oneDNN disabled" not in capsys.readouterr().err
+
+
+def test_no_onednn_warning_when_paddle_version_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """A GPU build ships as paddlepaddle-gpu, so the CPU name is missing — that is
+    not evidence of drift, and the reinstall advice would be wrong."""
+    fake = _install(monkeypatch, "3.2.2")
+
+    def _boom(name: str) -> str:
+        if name == "paddlepaddle":
+            raise importlib.metadata.PackageNotFoundError(name)
+        return "3.7.0"
+
+    monkeypatch.setattr(paddle_ocr_worker.importlib.metadata, "version", _boom)
+
+    paddle_ocr_worker._build_engine()
+
+    assert fake.last_kwargs["enable_mkldnn"] is False  # still degrades safely
+    assert "oneDNN disabled" not in capsys.readouterr().err
+
+
+def test_no_onednn_warning_when_operator_switched_it_off(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """An explicit opt-out is a choice, not drift — don't nag about it."""
+    _install(monkeypatch, "3.3.1")
+    monkeypatch.setenv("MANTISFETCH_LOCAL_OCR_ENABLE_MKLDNN", "0")
+
+    paddle_ocr_worker._build_engine()
+
+    assert "oneDNN disabled" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("paddle_version", ["3.2.2", "3.2.0", "3.1.1", "3.0.0"])
