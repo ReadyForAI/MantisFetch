@@ -54,6 +54,12 @@ except Exception:  # pragma: no cover - defensive
 # Cap an inline base64 document so a large blob can't blow up the agent context.
 _MAX_INLINE_DOC_BYTES = 8 * 1024 * 1024
 
+# SDK v2 caps streamable-HTTP POST bodies at 4 MiB and answers 413 before parsing,
+# which is below what a max-size inline doc needs: base64 inflates by 4/3. Derive
+# the transport limit from the doc cap so the two cannot drift apart; the slack
+# covers the JSON-RPC envelope and the other doc_parse arguments.
+_MAX_REQUEST_BODY_BYTES = _MAX_INLINE_DOC_BYTES * 4 // 3 + 256 * 1024
+
 
 def _transport_security() -> TransportSecuritySettings:
     """Keep DNS-rebinding protection on, but allow the intended loopback host:port
@@ -765,5 +771,6 @@ mcp_app = _McpAuthGate(
         streamable_http_path="/",
         stateless_http=True,
         transport_security=_transport_security(),
+        max_request_body_size=_MAX_REQUEST_BODY_BYTES,
     )
 )
