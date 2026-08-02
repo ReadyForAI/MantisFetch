@@ -593,15 +593,30 @@ async def doc_parse(
     synchronous, so such a document surfaces as a client-side timeout rather than
     a tool error.
 
-    After a timeout the outcome is genuinely unknown: the disconnect cancels the
-    request, which may cut the write off entirely, while a write already handed
-    to a worker thread finishes on its own schedule. Pass an explicit doc_id
-    whenever a document might be large, so the result is findable at all, and
-    then check doc_manifest(doc_id) — treating a hit as "something is there"
-    rather than proof this parse finished (with replace=true the previous
-    manifest stays in place throughout). Do not re-call doc_parse to find out: a
-    retry pays the same minutes again and times out the same way. Report the
-    timeout and what the probe showed, and let the user decide."""
+    Once the upload has been received the parse is no longer abandoned when the
+    client goes away: it keeps running, and then succeeds or fails on its own
+    merits exactly as it would have with you still connected. Pass an explicit
+    doc_id whenever a document might be large, so a result is findable at all,
+    then check doc_manifest(doc_id).
+
+    A hit means "something is there", not proof this parse finished (with
+    replace=true the previous manifest stays in place throughout). A miss is
+    unresolved, and stays unresolved: it looks identical whether the parse is
+    still running (a large scan legitimately takes minutes), failed after you
+    disconnected with nowhere to report the error, or never started because the
+    disconnect landed while the upload was still arriving. Nothing available to
+    you today separates those, and elapsed time does not either — do not report
+    a miss as failure, report it as unknown.
+
+    Do not immediately re-call doc_parse: a retry pays the same minutes again,
+    times out the same way, and competes for parse capacity with a first attempt
+    that may still be running. And if a follow-up call reports an unknown tool,
+    that is expected right after a timeout on some agent runtimes — the
+    MantisFetch tools can briefly drop out of the catalog while the runtime
+    reconnects. It does not mean the server died or that the parse failed; wait
+    for the tools to reappear and probe again.
+
+    Report the timeout and what the probe showed, and let the user decide."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
