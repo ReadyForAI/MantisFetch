@@ -25,6 +25,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI
 
+from mantisfetch_common import __version__
 from mantisfetch_deliverables import deliverables_app
 
 logger = logging.getLogger("mantisfetch")
@@ -73,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="MantisFetch",
-    version="1.6.0",
+    version=__version__,
     description="Open-source data collection and document parsing platform by ReadyForAI.",
     lifespan=lifespan,
 )
@@ -84,7 +85,7 @@ async def health() -> dict:
     """Return aggregated health status for all mounted services."""
     return {
         "ok": True,
-        "version": "1.6.0",
+        "version": __version__,
         "services": {
             "browser": "mounted at /web",
             "docreader": "mounted at /doc",

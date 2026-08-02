@@ -46,6 +46,8 @@ import mantisfetch_docreader as _doc_mod
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
+from mantisfetch_common import __version__
+
 try:  # ToolError gives the agent a clean message; fall back if the path moves.
     from mcp.server.mcpserver.exceptions import ToolError
 except Exception:  # pragma: no cover - defensive
@@ -88,7 +90,10 @@ def _transport_security() -> TransportSecuritySettings:
 # Transport settings (stateless_http / path / transport_security) are not
 # constructor arguments in SDK v2 — they belong to streamable_http_app() at the
 # bottom of this module, which is what actually builds the ASGI app.
-mcp = MCPServer("mantisfetch")
+# `version` defaults to "" in the SDK, which is what every tool result's
+# serverInfo carried until now — pass it so clients keying off the server
+# version see something.
+mcp = MCPServer("mantisfetch", version=__version__)
 
 # In-process transports to the existing apps. Browser/docreader routes are
 # unprefixed (the unified server mounts them at /web and /doc), so paths here are

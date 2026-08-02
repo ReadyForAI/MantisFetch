@@ -28,6 +28,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, Response, Uploa
 from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
+from mantisfetch_common import __version__
 from mantisfetch_common.atomic import _write_json, _write_text
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
@@ -1767,7 +1768,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
 
-app = FastAPI(title="Doc Reader API", version="1.6.0", lifespan=lifespan)
+app = FastAPI(title="Doc Reader API", version=__version__, lifespan=lifespan)
 PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
     "0",
     "false",
@@ -2613,7 +2614,7 @@ def _search_score(*parts: tuple[bool, float]) -> float:
 async def health():
     return {
         "ok": True,
-        "version": "1.6.0",
+        "version": __version__,
         "docs_dir": _mask_path(_get_docs_dir()),
         "supported_formats": SUPPORTED_FORMATS,
     }

@@ -18,6 +18,7 @@ from fastapi import FastAPI, HTTPException
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from i18n import t
+from mantisfetch_common import __version__
 from mantisfetch_common import metrics as metrics
 from mantisfetch_common.atomic import _write_json
 from mantisfetch_common.atomic import _write_text as _write_text_atomic
@@ -2417,7 +2418,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(
-    title="Agent Browser Service (Playwright + WebMCP)", version="0.6.0", lifespan=lifespan
+    title="Agent Browser Service (Playwright + WebMCP)", version=__version__, lifespan=lifespan
 )
 
 
