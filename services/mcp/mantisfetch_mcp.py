@@ -594,9 +594,10 @@ async def doc_parse(
     a tool error.
 
     Once the upload has been received the parse is no longer abandoned when the
-    client goes away — it runs to completion and writes its result. Pass an
-    explicit doc_id whenever a document might be large, so that result is
-    findable at all, then check doc_manifest(doc_id).
+    client goes away: it keeps running, and then succeeds or fails on its own
+    merits exactly as it would have with you still connected. Pass an explicit
+    doc_id whenever a document might be large, so a result is findable at all,
+    then check doc_manifest(doc_id).
 
     A hit means "something is there", not proof this parse finished (with
     replace=true the previous manifest stays in place throughout). A miss is
