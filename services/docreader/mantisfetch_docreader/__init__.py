@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import hashlib
 import json
 import logging
@@ -2620,7 +2622,99 @@ async def health():
     }
 
 
+_detach_signal: contextvars.ContextVar[asyncio.Event | None] = contextvars.ContextVar(
+    "mantisfetch_detach_signal", default=None
+)
+
+
+def _allow_running_detached() -> None:
+    """Declare that this handler no longer needs anything the request owns.
+
+    Called once the upload has been copied out of the multipart ``UploadFile``;
+    see ``_survives_client_disconnect``. A no-op outside a decorated handler.
+    """
+    signal = _detach_signal.get()
+    if signal is not None:
+        signal.set()
+
+
+def _survives_client_disconnect(fn):
+    """Run an endpoint in a task that the client's disconnect cannot cancel.
+
+    Parsing hands its real work to executor threads, and a thread cannot be
+    cancelled — so a disconnect never actually stops the work, it only unwinds
+    the coroutine that was waiting for it. The result was that a client-side
+    timeout in the middle of a several-minute parse threw away everything the
+    machine had already computed: the parse thread ran to completion, logged
+    "Parse complete", and then nothing was written, because the coroutine that
+    would have written it was gone. The library kept only an empty document
+    directory (#199).
+
+    Shielding the whole handler means the disconnect still returns immediately
+    to the client, while the work that was going to happen regardless now also
+    lands. The handler keeps its own locks, parse slot and scratch file until it
+    finishes, so nothing is released early on the caller's behalf.
+
+    Detaching is only safe once the handler owns its input. Until the upload has
+    been copied to the scratch file, the bytes still live in a multipart
+    ``UploadFile`` that FastAPI closes as the request unwinds, and a detached
+    task would fault on it ("I/O operation on closed file") instead of writing
+    anything. Nothing is lost by giving up that early — the document was never
+    received in full — so the handler calls ``_allow_running_detached()`` at the
+    point it stops needing the request, and a disconnect before that cancels for
+    real.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        detachable = asyncio.Event()
+        token = _detach_signal.set(detachable)
+        try:
+            # ensure_future copies the current context, so the handler sees this
+            # same Event object and setting it there is visible here.
+            task = asyncio.ensure_future(fn(*args, **kwargs))
+        finally:
+            _detach_signal.reset(token)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+            if not detachable.is_set():
+                logger.info(
+                    "Client disconnected during %s before its upload was staged; "
+                    "nothing to preserve",
+                    fn.__name__,
+                )
+                task.cancel()
+                raise
+            logger.warning(
+                "Client disconnected during %s; it keeps running and will still "
+                "write its result",
+                fn.__name__,
+            )
+            # Nobody is left to await the task, so retrieve whatever it ends up
+            # raising — otherwise the loop reports it as never-retrieved at GC
+            # time, long after the fact and with no context.
+            task.add_done_callback(_log_detached_endpoint_result)
+            raise
+
+    return wrapper
+
+
+def _log_detached_endpoint_result(task: asyncio.Future) -> None:
+    """Consume the outcome of a handler whose client had already gone away."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Detached endpoint finished with an error: %r", exc)
+    else:
+        logger.info("Detached endpoint finished after the client disconnected")
+
+
 @app.post("/parse", response_model=ParseResponse)
+@_survives_client_disconnect
 async def api_parse_doc(
     file: UploadFile = File(...),
     doc_id: str | None = Form(None),
@@ -2729,6 +2823,11 @@ async def api_parse_doc(
                 except OSError:
                     pass
                 scratch_path = None
+
+    # The bytes are ours now (in scratch_path) and the request's UploadFile is
+    # no longer touched, so from here a client disconnect must not discard the
+    # work — see _survives_client_disconnect.
+    _allow_running_detached()
 
     try:
         # The early-reject above was a snapshot before the upload started.
