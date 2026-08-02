@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock
 import mantisfetch_mcp as mm
 import pytest
 
+from mantisfetch_common import __version__
+
 EXPECTED_TOOLS = {
     # web (10)
     "web_capture",
@@ -54,6 +56,13 @@ def test_request_body_limit_fits_a_max_size_inline_doc() -> None:
     # (base64 inflates by 4/3). Guard the two limits against drifting apart.
     b64_size = mm._MAX_INLINE_DOC_BYTES * 4 // 3
     assert mm.mcp.session_manager.max_request_body_size >= b64_size
+
+
+def test_server_info_carries_the_version() -> None:
+    # MCPServer defaults version to "", which every tool result's serverInfo
+    # carried on the wire until it was passed explicitly.
+    assert mm.mcp.version == __version__
+    assert mm.mcp.version != ""
 
 
 def test_transport_security_allows_http_and_https_origins(monkeypatch) -> None:
