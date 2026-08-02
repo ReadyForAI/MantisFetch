@@ -602,12 +602,19 @@ async def doc_parse(
     rather than proof this parse finished (with replace=true the previous
     manifest stays in place throughout).
 
-    Two things not to conclude. Do not re-call doc_parse to find out: a retry
-    pays the same minutes again and times out the same way. And if a follow-up
-    call reports an unknown tool, that is expected right after a timeout on some
-    agent runtimes — the MantisFetch tools can briefly drop out of the catalog
-    while the runtime reconnects. It does not mean the server died or that the
-    parse failed; wait for the tools to reappear and probe again.
+    Do not keep probing forever. A parse that fails after you disconnected has
+    nowhere to deliver its error, so it surfaces only as a manifest that never
+    appears. Probe every so often for a few minutes — a large scanned document
+    can legitimately need that long — and if it is still missing after that,
+    treat it as failed, say so, and let the user decide whether to retry.
+
+    Two things not to conclude before then. Do not immediately re-call doc_parse
+    to find out: a retry pays the same minutes again and times out the same way.
+    And if a follow-up call reports an unknown tool, that is expected right
+    after a timeout on some agent runtimes — the MantisFetch tools can briefly
+    drop out of the catalog while the runtime reconnects. It does not mean the
+    server died or that the parse failed; wait for the tools to reappear and
+    probe again.
 
     Report the timeout and what the probe showed, and let the user decide."""
     sources = [s for s in (rel_path, content_b64) if s]
