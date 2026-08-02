@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -2620,7 +2621,59 @@ async def health():
     }
 
 
+def _survives_client_disconnect(fn):
+    """Run an endpoint in a task that the client's disconnect cannot cancel.
+
+    Parsing hands its real work to executor threads, and a thread cannot be
+    cancelled — so a disconnect never actually stops the work, it only unwinds
+    the coroutine that was waiting for it. The result was that a client-side
+    timeout in the middle of a several-minute parse threw away everything the
+    machine had already computed: the parse thread ran to completion, logged
+    "Parse complete", and then nothing was written, because the coroutine that
+    would have written it was gone. The library kept only an empty document
+    directory (#199).
+
+    Shielding the whole handler means the disconnect still returns immediately
+    to the client, while the work that was going to happen regardless now also
+    lands. The handler keeps its own locks, parse slot and scratch file until it
+    finishes, so nothing is released early on the caller's behalf.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        task = asyncio.ensure_future(fn(*args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                raise
+            logger.warning(
+                "Client disconnected during %s; it keeps running and will still "
+                "write its result",
+                fn.__name__,
+            )
+            # Nobody is left to await the task, so retrieve whatever it ends up
+            # raising — otherwise the loop reports it as never-retrieved at GC
+            # time, long after the fact and with no context.
+            task.add_done_callback(_log_detached_endpoint_result)
+            raise
+
+    return wrapper
+
+
+def _log_detached_endpoint_result(task: asyncio.Future) -> None:
+    """Consume the outcome of a handler whose client had already gone away."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Detached endpoint finished with an error: %r", exc)
+    else:
+        logger.info("Detached endpoint finished after the client disconnected")
+
+
 @app.post("/parse", response_model=ParseResponse)
+@_survives_client_disconnect
 async def api_parse_doc(
     file: UploadFile = File(...),
     doc_id: str | None = Form(None),
