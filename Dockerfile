@@ -79,6 +79,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Ret
 # Install Playwright browser (Chromium only — smallest footprint)
 RUN playwright install chromium
 
+# Bake the default PaddleOCR weights (~22 MB) into the image. Without them the
+# runtime fetches them from HuggingFace on the first OCR call, which makes the
+# WITH_LOCAL_OCR=true variant *not* actually offline — the one thing it exists
+# for. An air-gapped install fails outright, and even a connected one re-pays
+# the download after every container recreate, since /root/.paddlex lives in the
+# container layer rather than a volume.
+#
+# Go through the worker's own _build_engine() rather than naming models here, so
+# the baked weights cannot drift from the ones the runtime asks for (it reads
+# MANTISFETCH_LOCAL_OCR_{DET,REC}_MODEL, defaulting to PP-OCRv5_mobile_*). The
+# file is copied on its own, ahead of the full source, so an unrelated source
+# change does not invalidate this layer.
+# The cache path differs by API era — paddleocr 3.x (x86_64) writes /root/.paddlex,
+# 2.10 (arm64, per requirements-ocr-arm64.txt) writes /root/.paddleocr — so the
+# size report probes both and cannot fail the build; only _build_engine() itself
+# is fatal. Keeping `|| true` inside the parens matters: a bare
+# `python … && du … || true` would swallow a real engine failure too.
+COPY services/docreader/paddle_ocr_worker.py ./services/docreader/paddle_ocr_worker.py
+RUN if [ "$WITH_LOCAL_OCR" = "true" ]; then \
+        python -c "import sys; sys.path.insert(0, 'services/docreader'); \
+from paddle_ocr_worker import _build_engine; _build_engine()" \
+        && (du -sh /root/.paddlex /root/.paddleocr 2>/dev/null || true); \
+    else echo "WITH_LOCAL_OCR=$WITH_LOCAL_OCR — skipping OCR model bake"; fi
+
 # Copy application source
 COPY . .
 
