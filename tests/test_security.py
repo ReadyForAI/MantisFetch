@@ -17,6 +17,24 @@ def doc_client():
     return TestClient(app, raise_server_exceptions=False)
 
 
+def test_suite_never_writes_to_the_real_document_library() -> None:
+    """No test may mint doc_ids in the developer's own ~/.mantisfetch/docs.
+
+    test_small_upload_passes_size_check below posts a deliberately malformed PDF
+    and only asserts "not 413" — but the handler still takes a doc_id from the
+    library counter and creates its directory before the parse fails, leaving an
+    empty one behind. Every full run was adding a document to the real library
+    until conftest's _hermetic_docs_dir redirected it; this pins that guard.
+    """
+    from pathlib import Path
+
+    import mantisfetch_common.storage as storage
+
+    real = Path.home() / ".mantisfetch"
+    assert real not in storage.DEFAULT_DOCS_DIR.parents
+    assert storage.DEFAULT_DOCS_DIR != real / "docs"
+
+
 class TestDocIdTraversal:
     """C5: doc_id path traversal must be rejected.
 

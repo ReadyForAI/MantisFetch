@@ -36,6 +36,26 @@ def _hermetic_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_docs_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
+    """Keep the document library per-test, never the developer's real one.
+
+    A test that posts to /parse without redirecting the library mints a doc_id
+    from the real ``~/.mantisfetch/docs`` counter and creates the directory
+    there — and if the parse then fails, that directory stays behind, empty.
+    That is how a full test run was quietly adding a document to the developer's
+    own library on every invocation.
+
+    Tests that need their own path still monkeypatch DEFAULT_DOCS_DIR; theirs
+    runs after this one and wins.
+    """
+    import mantisfetch_common.storage as storage  # noqa: PLC0415
+
+    docs_dir = tmp_path / "hermetic-docs"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", docs_dir)
+
+
 def _make_playwright_mock() -> MagicMock:
     """Build a mock satisfying ``await async_playwright().start()``."""
     mock_browser = AsyncMock()
