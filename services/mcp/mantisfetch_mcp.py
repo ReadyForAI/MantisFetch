@@ -593,15 +593,23 @@ async def doc_parse(
     synchronous, so such a document surfaces as a client-side timeout rather than
     a tool error.
 
-    After a timeout the outcome is genuinely unknown: the disconnect cancels the
-    request, which may cut the write off entirely, while a write already handed
-    to a worker thread finishes on its own schedule. Pass an explicit doc_id
-    whenever a document might be large, so the result is findable at all, and
-    then check doc_manifest(doc_id) — treating a hit as "something is there"
+    A timeout no longer loses the work: the parse keeps running server-side and
+    writes its result. What a timeout does not tell you is *when* — the document
+    may still be mid-write when you look. Pass an explicit doc_id whenever a
+    document might be large, so the result is findable at all, and then check
+    doc_manifest(doc_id). A miss shortly after the timeout means "not finished
+    yet", not "failed"; wait and look again. A hit means "something is there"
     rather than proof this parse finished (with replace=true the previous
-    manifest stays in place throughout). Do not re-call doc_parse to find out: a
-    retry pays the same minutes again and times out the same way. Report the
-    timeout and what the probe showed, and let the user decide."""
+    manifest stays in place throughout).
+
+    Two things not to conclude. Do not re-call doc_parse to find out: a retry
+    pays the same minutes again and times out the same way. And if a follow-up
+    call reports an unknown tool, that is expected right after a timeout on some
+    agent runtimes — the MantisFetch tools can briefly drop out of the catalog
+    while the runtime reconnects. It does not mean the server died or that the
+    parse failed; wait for the tools to reappear and probe again.
+
+    Report the timeout and what the probe showed, and let the user decide."""
     sources = [s for s in (rel_path, content_b64) if s]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
