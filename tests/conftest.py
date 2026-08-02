@@ -36,8 +36,28 @@ def _hermetic_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_docs_dir_session(tmp_path_factory: pytest.TempPathFactory):
+    """Redirect the library before anything session-scoped can touch it.
+
+    The per-test fixture below is function-scoped, so it is set up *after* the
+    session-scoped ``client`` — whose TestClient entry runs the docreader
+    lifespan, and whose startup manifest-tags backfill reads and patches
+    whatever library ``_get_docs_dir()`` points at. That would be the
+    developer's real one. ``client`` depends on this fixture explicitly so the
+    ordering is enforced rather than assumed.
+    """
+    import mantisfetch_common.storage as storage  # noqa: PLC0415
+
+    mp = pytest.MonkeyPatch()
+    docs_dir = tmp_path_factory.mktemp("session-docs")
+    mp.setattr(storage, "DEFAULT_DOCS_DIR", docs_dir)
+    yield docs_dir
+    mp.undo()
+
+
 @pytest.fixture(autouse=True)
-def _hermetic_docs_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: pytest.TempPathFactory) -> None:
+def _hermetic_docs_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Keep the document library per-test, never the developer's real one.
 
     A test that posts to /parse without redirecting the library mints a doc_id
@@ -71,10 +91,12 @@ def _make_playwright_mock() -> MagicMock:
 
 
 @pytest.fixture(scope="session")
-def client() -> TestClient:
+def client(_hermetic_docs_dir_session) -> TestClient:
     """Session-scoped TestClient for the unified MantisFetch app.
 
-    Playwright is mocked so the test suite runs without a real browser.
+    Playwright is mocked so the test suite runs without a real browser. The
+    docs-dir redirect is a declared dependency, not an assumption: entering the
+    TestClient runs the docreader lifespan, which touches the library.
     """
     with patch("mantisfetch_browser.async_playwright", return_value=_make_playwright_mock()):
         from mantisfetch_server import app  # noqa: PLC0415
