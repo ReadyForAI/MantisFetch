@@ -2117,25 +2117,29 @@ def _safe_source_filename(filename: str) -> str:
 #: deployment that cannot hold the pin should raise this.
 _SEC_PER_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_OCR_PAGE", "1.8"))
 
-#: A page carrying less text than this is treated as a scan needing OCR.
-_TEXT_LAYER_MIN_CHARS = 20
-
-
-def _estimate_parse_seconds(path: Path, suffix: str) -> dict[str, Any] | None:
+def _estimate_parse_seconds(
+    path: Path,
+    suffix: str,
+    *,
+    force_ocr: bool = False,
+    ocr_pages_spec: str | None = None,
+) -> dict[str, Any] | None:
     """Estimate what a synchronous parse of this file will cost, without parsing.
 
-    Opens the PDF and samples each page's text layer — pages that carry almost
-    none are scans, and OCR is what makes a parse take minutes. Measured at
-    0.07-0.18s for documents of 16-162 pages, and the estimate tracks reality:
-    a 162-page scan estimates 292s against ~300s measured, while a 103-page
-    native document estimates 0 and parses in seconds.
+    OCR is what makes a parse take minutes, so the estimate is a count of the
+    pages that will be OCR'd times what a page costs. The count has to come from
+    the same decision the parse itself will make, or the estimate is about a
+    different piece of work: ``_should_ocr`` at ``OCR_THRESHOLD`` is the real
+    predicate, ``force_ocr`` OCRs everything regardless of the text layer, and an
+    explicit page range names the pages outright.
 
     Returns None when no estimate is possible — non-PDF input, or a file that
     cannot be opened. Callers must treat that as "unknown", never as "cheap".
 
-    Deliberately covers OCR only. Summaries are excluded (they are a separate
-    synchronous cost when summary_mode=sync), and a table-heavy native document
-    is not free either, so an estimate of 0 means "no OCR cost", not "fast".
+    Covers OCR only. It is the caller's budget that keeps the rest honest: a
+    declared budget also pushes summarization off this call (see the handler), so
+    what is left to measure is extraction plus OCR. A table-heavy native document
+    is still not free, so an estimate of 0 means "no OCR cost", not "instant".
     """
     if suffix != ".pdf":
         return None
@@ -2144,9 +2148,14 @@ def _estimate_parse_seconds(path: Path, suffix: str) -> dict[str, Any] | None:
 
         with fitz.open(str(path)) as doc:
             total_pages = len(doc)
-            ocr_pages = sum(
-                1 for page in doc if len(page.get_text().strip()) < _TEXT_LAYER_MIN_CHARS
-            )
+            if force_ocr:
+                ocr_pages = total_pages
+            elif ocr_pages_spec:
+                ocr_pages = len(_parse_page_range(ocr_pages_spec, total_pages))
+            else:
+                ocr_pages = sum(
+                    1 for page in doc if _should_ocr(page, page.get_text(), OCR_THRESHOLD)
+                )
     except Exception as exc:
         logger.info("Parse cost estimate skipped for %s: %s", path.name, exc)
         return None
@@ -2788,6 +2797,9 @@ async def api_parse_doc(
     # How long the caller can wait. The single source of truth is the caller —
     # it is the only side that knows its own timeout, so nothing here has to be
     # kept in sync with it. Omit it to accept however long the parse takes.
+    # Declaring one also moves summarization off this call (it is an LLM
+    # round-trip that cannot be estimated), so the digest arrives shortly after
+    # the response rather than inside it.
     budget_seconds: float | None = Form(None, gt=0),
 ):
     """Parse uploaded document (PDF/DOCX), return structured result."""
@@ -2879,34 +2891,39 @@ async def api_parse_doc(
     # work — see _survives_client_disconnect.
     _allow_running_detached()
 
-    # Refuse a document this call cannot afford, before it costs anything. The
-    # estimate is cheap (0.07-0.18s) and runs before the doc_id is minted, so a
-    # refusal burns no id and leaves no directory.
-    #
-    # No budget means no refusal. A caller that did not ask for one is either a
-    # background ingest with time to spare (the REST leg exists to absorb exactly
-    # the documents this would reject) or predates the field; giving them a
-    # default would refuse the very work the background path is for. The MCP
-    # tool, which has a client timeout it cannot see, sends its own budget.
-    if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
-        estimate = _estimate_parse_seconds(scratch_path, suffix)
-        if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
-            raise HTTPException(
-                422,
-                {
-                    "error": "parse_budget_exceeded",
-                    "message": (
-                        f"parsing this document is estimated at "
-                        f"{estimate['estimated_seconds']}s, over the "
-                        f"{budget_seconds}s budget this call declared. It was not "
-                        f"started. Ingest it through a path that can wait for it."
-                    ),
-                    **estimate,
-                    "budget_seconds": budget_seconds,
-                },
-            )
-
     try:
+        # Refuse a document this call cannot afford, before it costs anything.
+        # The estimate is cheap and runs before the doc_id is minted, so a
+        # refusal burns no id and leaves no directory. It has to sit inside this
+        # try: its finally is what removes the staged upload, and raising above
+        # it would strand a file of up to MAX_UPLOAD_BYTES in .upload-tmp on
+        # every refusal.
+        #
+        # No budget means no refusal. A caller that did not ask for one is either
+        # a background ingest with time to spare (the REST leg exists to absorb
+        # exactly the documents this would reject) or predates the field; giving
+        # them a default would refuse the very work the background path is for.
+        # The MCP tool, which has a client timeout it cannot see, sends its own.
+        if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
+            estimate = _estimate_parse_seconds(
+                scratch_path, suffix, force_ocr=force_ocr, ocr_pages_spec=ocr_pages
+            )
+            if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
+                raise HTTPException(
+                    422,
+                    {
+                        "error": "parse_budget_exceeded",
+                        "message": (
+                            f"parsing this document is estimated at "
+                            f"{estimate['estimated_seconds']}s, over the "
+                            f"{budget_seconds}s budget this call declared. It was not "
+                            f"started. Ingest it through a path that can wait for it."
+                        ),
+                        **estimate,
+                        "budget_seconds": budget_seconds,
+                    },
+                )
+
         # The early-reject above was a snapshot before the upload started.
         # Re-check now so a burst that crowded in past the snapshot fails fast
         # instead of queueing scratch files against `_parse_sem`.
@@ -3050,6 +3067,21 @@ async def api_parse_doc(
                 generate_summary=generate_summary,
                 requested_mode=requested_summary_mode,
             )
+            if budget_seconds is not None and summary_mode == "sync":
+                # A declared budget has to mean something. Summarization is an
+                # LLM round-trip whose duration cannot be estimated at all, so
+                # leaving it inside the call would make "estimate <= budget" a
+                # statement about a fraction of the work — the timeout it exists
+                # to prevent would still happen. Hand it to the background writer
+                # instead: extraction returns inside the budget, the digest lands
+                # shortly after (doc_digest reports it as pending until then).
+                logger.info(
+                    "Deferring summary for %s: the call declared a %.0fs budget",
+                    d_id,
+                    budget_seconds,
+                )
+                summary_mode = "defer"
+                parsed_metadata.setdefault("summary_deferred_reason", "budget_declared")
 
             # Parse tags
             parsed_tags: list[str] = []

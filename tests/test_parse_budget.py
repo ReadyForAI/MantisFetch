@@ -111,6 +111,10 @@ def test_over_budget_is_refused_before_anything_is_spent(
     # nothing started: no directory, and the id was not consumed
     assert not (docs_dir / "General" / "DOC-5001").exists()
     assert not (docs_dir / ".counter").exists()
+    # and nothing left staged — a refusal must not strand the upload, which can
+    # be up to MAX_UPLOAD_BYTES and would accumulate on every refusal
+    scratch = docs_dir / ".upload-tmp"
+    assert not scratch.exists() or list(scratch.iterdir()) == []
 
 
 def test_within_budget_is_parsed(doc_client: TestClient, docs_dir: Path, tmp_path: Path) -> None:
@@ -153,6 +157,109 @@ def test_unknown_cost_is_never_refused(
         data={"doc_id": "DOC-5006", "summary_mode": "off", "budget_seconds": "0.001"},
     )
     assert resp.status_code == 200
+
+
+def test_estimate_agrees_with_the_planner_on_sparse_text(tmp_path: Path) -> None:
+    """The estimate must be about the work the parse will actually do.
+
+    A page with a little text is still OCR'd — the real predicate is
+    _should_ocr at OCR_THRESHOLD (50), not "is the page blank". The text here is
+    deliberately 33 characters: enough that a lower private threshold would call
+    the page free, still under the one the parse actually applies.
+    """
+    import fitz
+    from mantisfetch_docreader.pdf_planning import _should_ocr
+
+    sparse = "Page 3 of 40 — continued overleaf"
+    assert 20 < len(sparse) < dr.OCR_THRESHOLD, "must sit inside the divergence band"
+
+    path = tmp_path / "sparse.pdf"
+    doc = fitz.open()
+    for _ in range(10):
+        page = doc.new_page()
+        page.insert_text((72, 72), sparse)
+    doc.save(str(path))
+    doc.close()
+
+    with fitz.open(str(path)) as opened:
+        planner_says = sum(1 for p in opened if _should_ocr(p, p.get_text(), dr.OCR_THRESHOLD))
+
+    estimate = dr._estimate_parse_seconds(path, ".pdf")
+    assert estimate["ocr_pages"] == planner_says == 10
+
+
+def test_force_ocr_is_estimated_as_every_page(tmp_path: Path) -> None:
+    """force_ocr OCRs the whole document however good its text layer is."""
+    path = tmp_path / "native.pdf"
+    _native_pdf(path, 40)
+
+    assert dr._estimate_parse_seconds(path, ".pdf")["ocr_pages"] == 0
+    forced = dr._estimate_parse_seconds(path, ".pdf", force_ocr=True)
+    assert forced["ocr_pages"] == 40
+    assert forced["estimated_seconds"] > 0
+
+
+def test_explicit_ocr_pages_are_estimated(tmp_path: Path) -> None:
+    path = tmp_path / "native.pdf"
+    _native_pdf(path, 40)
+    assert dr._estimate_parse_seconds(path, ".pdf", ocr_pages_spec="1-5")["ocr_pages"] == 5
+
+
+def test_force_ocr_over_budget_is_refused(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path
+) -> None:
+    """The document is cheap; the request is not."""
+    content = _native_pdf(tmp_path / "n.pdf", 40)
+    assert _post(doc_client, content, "DOC-5007", budget_seconds="600").status_code == 200
+    resp = _post(doc_client, content, "DOC-5008", budget_seconds="10", force_ocr="true")
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["ocr_pages"] == 40
+
+
+def test_a_declared_budget_takes_summarization_out_of_the_call(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise "estimate <= budget" would describe a fraction of the work.
+
+    Summarization is an LLM round-trip that cannot be estimated, so a call that
+    declared a deadline gets it off the critical path rather than inside it.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: calls.append("deferred"))
+
+    def sync_summary(*args, **kwargs):
+        calls.append("sync")
+        return ("digest", "brief", None)
+
+    monkeypatch.setattr(dr, "generate_summaries", sync_summary)
+
+    content = _native_pdf(tmp_path / "n.pdf", 3)
+    resp = _post(
+        doc_client, content, "DOC-5009", budget_seconds="600", summary_mode="sync",
+        generate_summary="true",
+    )
+    assert resp.status_code == 200
+    assert "sync" not in calls, "summarization ran inside a budgeted call"
+    assert "deferred" in calls
+
+
+def test_without_a_budget_a_sync_summary_stays_sync(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control: the downgrade is caused by the budget, not applied to everyone."""
+    calls: list[str] = []
+    monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: calls.append("deferred"))
+
+    def sync_summary(*args, **kwargs):
+        calls.append("sync")
+        return ("digest", "brief", None)
+
+    monkeypatch.setattr(dr, "generate_summaries", sync_summary)
+
+    content = _native_pdf(tmp_path / "n.pdf", 3)
+    resp = _post(doc_client, content, "DOC-5010", summary_mode="sync", generate_summary="true")
+    assert resp.status_code == 200
+    assert "sync" in calls
 
 
 def test_mcp_doc_parse_declares_a_budget() -> None:
