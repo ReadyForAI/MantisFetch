@@ -96,9 +96,10 @@ RUN playwright install chromium
 # size report probes both and cannot fail the build; only _build_engine() itself
 # is fatal. Keeping `|| true` inside the parens matters: a bare
 # `python … && du … || true` would swallow a real engine failure too.
-COPY services/docreader/paddle_ocr_worker.py ./services/docreader/paddle_ocr_worker.py
+COPY services/docreader/mantisfetch_docreader/paddle_ocr_worker.py \
+     ./services/docreader/mantisfetch_docreader/paddle_ocr_worker.py
 RUN if [ "$WITH_LOCAL_OCR" = "true" ]; then \
-        python -c "import sys; sys.path.insert(0, 'services/docreader'); \
+        python -c "import sys; sys.path.insert(0, 'services/docreader/mantisfetch_docreader'); \
 from paddle_ocr_worker import _build_engine; _build_engine()" \
         && (du -sh /root/.paddlex /root/.paddleocr 2>/dev/null || true); \
     else echo "WITH_LOCAL_OCR=$WITH_LOCAL_OCR — skipping OCR model bake"; fi

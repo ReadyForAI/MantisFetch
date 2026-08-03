@@ -5,7 +5,8 @@
 # PIR -> oneDNN attribute conversion (Paddle#77340, still open), so oneDNN has to
 # be switched off there — which costs ~6x on CPU OCR (10.9s vs 1.8s per page,
 # byte-identical text). Lift this pin once #77340 ships a fix — and move the
-# version gate in _paddle_supports_onednn() (services/docreader/paddle_ocr_worker.py)
+# version gate in _paddle_supports_onednn()
+# (services/docreader/mantisfetch_docreader/paddle_ocr_worker.py)
 # in the same change, or oneDNN stays off on the newer version and the ~6x is lost.
 paddlepaddle>=3.2.0,<3.3.0
 paddleocr>=3.3.0,<4.0.0

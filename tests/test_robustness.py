@@ -64,7 +64,7 @@ class TestPDFParse:
     """PDF parsing should preserve page-level location hints."""
 
     def test_paddle_worker_uses_v2_api_for_paddleocr_2x(self, monkeypatch):
-        worker_path = Path(__file__).parents[1] / "services" / "docreader" / "paddle_ocr_worker.py"
+        worker_path = Path(__file__).parents[1] / "services" / "docreader" / "mantisfetch_docreader" / "paddle_ocr_worker.py"
         spec = importlib.util.spec_from_file_location("paddle_ocr_worker_test_v2", worker_path)
         assert spec is not None and spec.loader is not None
         worker = importlib.util.module_from_spec(spec)

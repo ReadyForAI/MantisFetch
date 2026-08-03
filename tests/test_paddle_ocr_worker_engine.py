@@ -11,8 +11,8 @@ import importlib.metadata
 import sys
 import types
 
-import paddle_ocr_worker
 import pytest
+from mantisfetch_docreader import paddle_ocr_worker
 
 
 class _FakePaddleOCR:
