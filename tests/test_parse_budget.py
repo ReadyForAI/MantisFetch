@@ -262,6 +262,68 @@ def test_without_a_budget_a_sync_summary_stays_sync(
     assert "sync" in calls
 
 
+def test_full_mode_estimates_every_page_as_llm_ocr(tmp_path: Path) -> None:
+    """parse_mode=full routes every non-blank page to the LLM, text layer or not."""
+    path = tmp_path / "native.pdf"
+    _native_pdf(path, 40)
+
+    assert dr._estimate_parse_seconds(path, ".pdf")["llm_ocr_pages"] == 0
+    full = dr._estimate_parse_seconds(path, ".pdf", parse_mode="full")
+    assert full["llm_ocr_pages"] == 40
+    assert full["estimated_seconds"] > 0
+
+
+def test_llm_pages_cost_more_than_local_ones(tmp_path: Path) -> None:
+    """Counting pages without the engine would be counting the wrong thing."""
+    scan = tmp_path / "scan.pdf"
+    _scanned_pdf(scan, 12)
+    native = tmp_path / "native.pdf"
+    _native_pdf(native, 12)
+
+    local = dr._estimate_parse_seconds(scan, ".pdf")  # 12 pages, local OCR
+    llm = dr._estimate_parse_seconds(native, ".pdf", force_ocr=True, concurrency=1)
+    assert local["local_ocr_pages"] == llm["llm_ocr_pages"] == 12
+    assert llm["estimated_seconds"] > local["estimated_seconds"]
+
+
+def test_llm_pages_are_batched_by_concurrency(tmp_path: Path) -> None:
+    path = tmp_path / "native.pdf"
+    _native_pdf(path, 12)
+    serial = dr._estimate_parse_seconds(path, ".pdf", force_ocr=True, concurrency=1)
+    parallel = dr._estimate_parse_seconds(path, ".pdf", force_ocr=True, concurrency=4)
+    assert parallel["estimated_seconds"] < serial["estimated_seconds"]
+
+
+@pytest.mark.parametrize("source", ["form", "metadata", "env"])
+def test_full_mode_is_honoured_from_every_source(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, source: str,
+) -> None:
+    """The mode reaches the parse from three places; a preflight that reads only
+    the form field would under-estimate on the other two."""
+    content = _native_pdf(tmp_path / "n.pdf", 40)
+    extra: dict[str, str] = {}
+    if source == "form":
+        extra["parse_mode"] = "full"
+    elif source == "metadata":
+        extra["metadata"] = '{"parse_mode": "full"}'
+    else:
+        monkeypatch.setenv("MANTISFETCH_PDF_PARSE_MODE", "full")
+
+    resp = _post(doc_client, content, f"DOC-511{source[0]}", budget_seconds="10", **extra)
+    assert resp.status_code == 422, f"{source}-sourced full mode was not estimated"
+    assert resp.json()["detail"]["llm_ocr_pages"] == 40
+
+
+def test_effective_parse_mode_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MANTISFETCH_PDF_PARSE_MODE", "fast")
+    assert dr._effective_parse_mode("full", None) == "full"
+    assert dr._effective_parse_mode(None, '{"parse_mode": "full"}') == "full"
+    assert dr._effective_parse_mode(None, None) == "fast"
+    # a malformed blob must not break the preflight; it is rejected later
+    assert dr._effective_parse_mode(None, "{not json") == "fast"
+
+
 def test_mcp_doc_parse_declares_a_budget() -> None:
     """The MCP leg cannot see its client's timeout, so it sends its own."""
     import mantisfetch_mcp as mm

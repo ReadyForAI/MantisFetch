@@ -2117,21 +2117,60 @@ def _safe_source_filename(filename: str) -> str:
 #: deployment that cannot hold the pin should raise this.
 _SEC_PER_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_OCR_PAGE", "1.8"))
 
+#: Seconds an LLM-OCR'd page costs. Unlike the local figure above this one is
+#: NOT measured — it is a deliberately pessimistic placeholder, because the
+#: direction that hurts is under-estimating: a call that was told it fits and
+#: then does not is exactly the timeout this whole mechanism exists to prevent.
+#: Tune it per deployment once its provider's latency is known.
+_SEC_PER_LLM_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_LLM_OCR_PAGE", "6.0"))
+
+
+def _effective_parse_mode(requested: str | None, metadata_raw: str | None) -> str | None:
+    """Resolve the parse mode the way the handler will, before the lock.
+
+    The mode is not just the form field: it falls back to the metadata blob and
+    then to the environment, and "full" routes every page to LLM OCR. Reading
+    only the field would estimate a different plan than the one that runs.
+    """
+    if requested and requested.strip():
+        return requested.strip()
+    if metadata_raw:
+        try:
+            meta = json.loads(metadata_raw)
+            if isinstance(meta, dict) and str(meta.get("parse_mode") or "").strip():
+                return str(meta["parse_mode"]).strip()
+        except (json.JSONDecodeError, TypeError):
+            pass  # a malformed blob is rejected later, with a better message
+    return os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip() or None
+
+
 def _estimate_parse_seconds(
     path: Path,
     suffix: str,
     *,
     force_ocr: bool = False,
     ocr_pages_spec: str | None = None,
+    parse_mode: str | None = None,
+    concurrency: int = 3,
 ) -> dict[str, Any] | None:
     """Estimate what a synchronous parse of this file will cost, without parsing.
 
-    OCR is what makes a parse take minutes, so the estimate is a count of the
-    pages that will be OCR'd times what a page costs. The count has to come from
-    the same decision the parse itself will make, or the estimate is about a
-    different piece of work: ``_should_ocr`` at ``OCR_THRESHOLD`` is the real
-    predicate, ``force_ocr`` OCRs everything regardless of the text layer, and an
-    explicit page range names the pages outright.
+    OCR is what makes a parse take minutes, so the estimate counts the pages that
+    will be OCR'd and by which engine. The count has to follow the same decisions
+    the parse will make, or the estimate is about a different piece of work —
+    ``_plan_pdf_ocr`` sends a page to the *LLM* rather than to local OCR whenever
+    an explicit page range names it, ``force_ocr`` is set, or the mode is
+    ``full``; only the ordinary scan-detection path (``_should_ocr`` at
+    ``OCR_THRESHOLD``) stays local. Those two engines do not cost the same, so
+    counting pages without knowing the engine would be counting the wrong thing.
+
+    LLM pages run ``concurrency`` at a time, so their wall clock is the number of
+    batches rather than the number of pages.
+
+    Deliberately conservative where it cannot be exact: the blank-page exclusions
+    the real planner applies are not reproduced here, so a forced or full parse is
+    estimated as the whole document. Over-estimating refuses a call that might
+    have fit; under-estimating lets through the timeout this exists to prevent.
 
     Returns None when no estimate is possible — non-PDF input, or a file that
     cannot be opened. Callers must treat that as "unknown", never as "cheap".
@@ -2143,26 +2182,33 @@ def _estimate_parse_seconds(
     """
     if suffix != ".pdf":
         return None
+    mode = (parse_mode or "").strip().lower()
     try:
         import fitz  # noqa: PLC0415
 
         with fitz.open(str(path)) as doc:
             total_pages = len(doc)
-            if force_ocr:
-                ocr_pages = total_pages
-            elif ocr_pages_spec:
-                ocr_pages = len(_parse_page_range(ocr_pages_spec, total_pages))
+            local_pages = 0
+            if ocr_pages_spec:
+                llm_pages = len(_parse_page_range(ocr_pages_spec, total_pages))
+            elif force_ocr or mode == "full":
+                llm_pages = total_pages
             else:
-                ocr_pages = sum(
+                llm_pages = 0
+                local_pages = sum(
                     1 for page in doc if _should_ocr(page, page.get_text(), OCR_THRESHOLD)
                 )
     except Exception as exc:
         logger.info("Parse cost estimate skipped for %s: %s", path.name, exc)
         return None
+    batches = -(-llm_pages // max(1, concurrency))  # ceil
+    seconds = local_pages * _SEC_PER_OCR_PAGE + batches * _SEC_PER_LLM_OCR_PAGE
     return {
         "pages": total_pages,
-        "ocr_pages": ocr_pages,
-        "estimated_seconds": round(ocr_pages * _SEC_PER_OCR_PAGE, 1),
+        "ocr_pages": local_pages + llm_pages,
+        "local_ocr_pages": local_pages,
+        "llm_ocr_pages": llm_pages,
+        "estimated_seconds": round(seconds, 1),
     }
 
 
@@ -2906,7 +2952,15 @@ async def api_parse_doc(
         # The MCP tool, which has a client timeout it cannot see, sends its own.
         if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
             estimate = _estimate_parse_seconds(
-                scratch_path, suffix, force_ocr=force_ocr, ocr_pages_spec=ocr_pages
+                scratch_path,
+                suffix,
+                force_ocr=force_ocr,
+                ocr_pages_spec=ocr_pages,
+                # The mode decides whether pages go to the LLM at all, and it can
+                # come from the metadata blob or the environment rather than the
+                # form field — resolve it the same way the handler will.
+                parse_mode=_effective_parse_mode(parse_mode, metadata),
+                concurrency=concurrency,
             )
             if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
                 raise HTTPException(
