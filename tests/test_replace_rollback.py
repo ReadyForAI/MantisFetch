@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 import mantisfetch_docreader as dr
@@ -309,3 +310,81 @@ def test_a_stale_deferred_write_leaves_every_artifact_of_the_newer_parse(
     )
 
     assert _snapshot(doc) == before, "the declined write removed the newer parse's artifacts"
+
+
+def _parsed(text: str):
+    return dr.ParsedDocument(
+        filename="doc.html",
+        file_type="html",
+        total_pages=1,
+        pages=[],
+        sections=[
+            dr.Section(
+                index=1, title="S", level=1, text=text,
+                page_range="1-1", sid="s_x", summary="",
+            )
+        ],
+        ocr_page_count=0,
+        table_count=0,
+    )
+
+
+def test_a_replacement_landing_mid_write_is_not_rolled_back_by_a_stale_writer(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard reads the on-disk generation and then acts on it.
+
+    A deferred-summary writer holds the snapshot the sync write put on disk, so
+    it passes the guard by design — and if a replacement lands between the check
+    and the write, it puts the parse it was summarising back over the newer one.
+    Whichever writer arrives first, the newer generation has to be what is left.
+    """
+    snapshot = _parsed("ORIGINAL")
+    dr.write_output_extract_only("DOC-6013", snapshot, docs_dir, source="upload", content_type="General")
+    doc = docs_dir / "General" / "DOC-6013"
+
+    inside_the_window = threading.Event()
+    let_it_finish = threading.Event()
+    real_skip = dr._skip_stale_generation
+    verdicts: list[bool] = []
+
+    def pause_after_deciding(*args, **kwargs):
+        verdict = real_skip(*args, **kwargs)
+        verdicts.append(verdict)
+        inside_the_window.set()
+        let_it_finish.wait(5)
+        return verdict
+
+    monkeypatch.setattr(dr, "_skip_stale_generation", pause_after_deciding)
+
+    # The deferred writer: same snapshot, so the guard passes and it goes on to
+    # write. That is the window.
+    stale_writer = threading.Thread(
+        target=dr.write_output,
+        args=("DOC-6013", snapshot, "DEFERRED_DIGEST", "DEFERRED_BRIEF", docs_dir),
+        kwargs={"source": "upload", "content_type": "General", "guard_stale_generation": True},
+    )
+    stale_writer.start()
+    assert inside_the_window.wait(5), "the deferred writer never reached the guard"
+
+    replacement = threading.Thread(
+        target=lambda: dr.write_output_extract_only(
+            "DOC-6013", _parsed("REPLACEMENT text"), docs_dir,
+            source="upload", content_type="General",
+        )
+    )
+    replacement.start()
+    # Give the replacement every chance to land *inside* the window — that is the
+    # interleaving under test. Serialized it cannot, and waits here instead; the
+    # release below is what lets it through, and it must still win.
+    replacement.join(0.5)
+
+    let_it_finish.set()
+    stale_writer.join(10)
+    replacement.join(10)
+    assert not stale_writer.is_alive() and not replacement.is_alive()
+    assert verdicts == [False], f"the deferred writer skipped instead of racing: {verdicts}"
+
+    full = (doc / "full.md").read_text(encoding="utf-8")
+    assert "REPLACEMENT text" in full, "a stale writer rolled the replacement back"
+    assert "ORIGINAL" not in full

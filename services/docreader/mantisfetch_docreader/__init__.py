@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -1290,6 +1291,40 @@ def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
     return False
 
 
+class _WriterLock:
+    """A threading lock that a WeakValueDictionary can hold — locks themselves
+    cannot be weak-referenced."""
+
+    __slots__ = ("lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+
+_document_writer_locks: weakref.WeakValueDictionary[str, _WriterLock] = (
+    weakref.WeakValueDictionary()
+)
+_document_writer_locks_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def _document_writer_lock(doc_dir: Path):
+    """Serialize every rewrite of one document, across threads.
+
+    Weak values so a document that is not being written holds nothing; a writer
+    keeps the entry alive for as long as it needs it, which is exactly as long as
+    another writer could collide with it.
+    """
+    key = str(doc_dir)
+    with _document_writer_locks_guard:
+        holder = _document_writer_locks.get(key)
+        if holder is None:
+            holder = _WriterLock()
+            _document_writer_locks[key] = holder
+    with holder.lock:
+        yield
+
+
 def _reversible_rewrite(impl):
     """Give a writer all-or-nothing semantics against the document on disk.
 
@@ -1305,6 +1340,15 @@ def _reversible_rewrite(impl):
     then declines to write leaves through the success path, which drops the
     holdings along with the newer parse's sections. The check has to come first,
     for the same reason it already had to come before _reset_generated_output_dirs.
+
+    Check and rewrite run under a per-document lock shared by every writer. The
+    guard reads the on-disk generation and then acts on it, so without one a
+    deferred-summary writer could pass the check, have a replacement land while
+    it worked, and roll the document back to the parse it was summarising —
+    exactly the case the guard exists to prevent. The parse handler's own per-doc
+    lock cannot cover this: it is an asyncio.Lock held by the request coroutine,
+    and the deferred writer is a plain thread that can never take it. This one is
+    a threading lock and both writers reach it, whichever arrives first.
     """
     signature = inspect.signature(impl)
 
@@ -1317,19 +1361,20 @@ def _reversible_rewrite(impl):
         doc_dir = output_dir / _doc_storage_rel_path(
             doc_id, _normalize_content_type(content_type) if content_type else None
         )
-        if a["guard_stale_generation"] and _skip_stale_generation(
-            doc_id,
-            doc_dir,
-            _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
-        ):
-            return None
-        with _restore_on_failure(
-            doc_dir,
-            include_extracted=not a.get("preserve_extracted", False),
-            docs_dir=output_dir,
-            doc_id=doc_id,
-        ):
-            return impl(*args, **kwargs)
+        with _document_writer_lock(doc_dir):
+            if a["guard_stale_generation"] and _skip_stale_generation(
+                doc_id,
+                doc_dir,
+                _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
+            ):
+                return None
+            with _restore_on_failure(
+                doc_dir,
+                include_extracted=not a.get("preserve_extracted", False),
+                docs_dir=output_dir,
+                doc_id=doc_id,
+            ):
+                return impl(*args, **kwargs)
 
     return wrapper
 
