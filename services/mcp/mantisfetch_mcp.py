@@ -610,11 +610,7 @@ async def doc_parse(
 
     Do not immediately re-call doc_parse: a retry pays the same minutes again,
     times out the same way, and competes for parse capacity with a first attempt
-    that may still be running. And if a follow-up call reports an unknown tool,
-    that is expected right after a timeout on some agent runtimes — the
-    MantisFetch tools can briefly drop out of the catalog while the runtime
-    reconnects. It does not mean the server died or that the parse failed; wait
-    for the tools to reappear and probe again.
+    that may still be running.
 
     Report the timeout and what the probe showed, and let the user decide."""
     sources = [s for s in (rel_path, content_b64) if s]
