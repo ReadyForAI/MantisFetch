@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hashlib
@@ -897,6 +898,83 @@ def _reset_generated_output_dirs(doc_dir: Path, include_extracted: bool = True) 
             path.unlink()
 
 
+#: Artifacts a rewrite deletes before regenerating — the same set
+#: _reset_generated_output_dirs clears, so they can be moved aside instead.
+_REGENERATED_TREES = ("sections",)
+_REGENERATED_FILES = ("sections.json",)
+_EXTRACTED_TREES = ("tables", "images")
+_EXTRACTED_FILES = ("tables.json", "images.json", OCR_BLOCKS_SIDECAR_PATH)
+
+#: Artifacts a rewrite overwrites in place. They stay readable during the
+#: rewrite — preserve_extracted reads the prior manifest — so these are copied
+#: rather than moved. All small text files.
+_OVERWRITTEN_FILES = (
+    "full.md",
+    "digest.md",
+    "brief.md",
+    "manifest.json",
+    ".meta.json",
+    # The lowercased search caches live under .cache/ next to the OCR caches, but
+    # unlike those they are derived from the text this rewrite is replacing. Left
+    # behind, doc_search would match the new document's words against the old
+    # one's content.
+    ".cache/search_full.lower.txt",
+    ".cache/search_sections.lower.json",
+)
+
+_ROLLBACK_DIR = ".rollback"
+
+
+@contextlib.contextmanager
+def _restore_on_failure(doc_dir: Path, *, include_extracted: bool):
+    """Put the document back the way it was if this rewrite does not finish.
+
+    Rewrites replace in place: the generated directories are deleted before the
+    new ones are written, and the manifest lands before the index is updated. A
+    failure anywhere in between left a document that was part old and part new —
+    reported to the caller as a failed replace while what is on disk had already
+    changed (#212).
+
+    The artifacts that would be deleted move aside, so the rewrite still starts
+    from a clean directory; the ones that are overwritten in place are copied,
+    because the rewrite reads some of them back (preserve_extracted carries the
+    prior manifest's table and image entries forward). On success the holdings
+    are dropped; on failure they go back. Anything a rewrite does not touch —
+    source/, .cache/ — is left alone either way.
+    """
+    backup = doc_dir / _ROLLBACK_DIR
+    shutil.rmtree(backup, ignore_errors=True)
+    moved: list[str] = []
+    copied: list[str] = []
+    if doc_dir.exists():
+        backup.mkdir(parents=True, exist_ok=True)
+        names = list(_REGENERATED_TREES) + list(_REGENERATED_FILES)
+        if include_extracted:
+            names += list(_EXTRACTED_TREES) + list(_EXTRACTED_FILES)
+        for name in names:
+            current = doc_dir / name
+            if current.exists():
+                shutil.move(str(current), str(backup / name))
+                moved.append(name)
+        for name in _OVERWRITTEN_FILES:
+            current = doc_dir / name
+            if current.exists():
+                (backup / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(current, backup / name)
+                copied.append(name)
+    try:
+        yield
+    except BaseException:
+        for name in moved + copied:
+            target = doc_dir / name
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            shutil.move(str(backup / name), str(target))
+        shutil.rmtree(backup, ignore_errors=True)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+
+
 def _resolve_extracted_outputs(
     doc_dir: Path, doc_id: str, parsed: ParsedDocument, preserve_extracted: bool
 ) -> tuple[int, int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -1094,7 +1172,36 @@ def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
     return False
 
 
-def write_output(
+def _reversible_rewrite(impl):
+    """Give a writer all-or-nothing semantics against the document on disk.
+
+    Both writers take the same first three arguments and resolve the document
+    directory the same way, so the wrapper can work it out without the writer
+    handing it over — and wrapping rather than restructuring keeps the writers'
+    bodies exactly as they were.
+    """
+
+    @functools.wraps(impl)
+    def wrapper(doc_id, parsed, *args, **kwargs):
+        output_dir = kwargs.get("output_dir")
+        if output_dir is None:
+            # write_output takes digest and brief before output_dir; both writers
+            # pass it positionally in practice, so take the first Path.
+            output_dir = next(a for a in args if isinstance(a, Path))
+        content_type = kwargs.get("content_type")
+        doc_dir = output_dir / _doc_storage_rel_path(
+            doc_id, _normalize_content_type(content_type) if content_type else None
+        )
+        with _restore_on_failure(
+            doc_dir, include_extracted=not kwargs.get("preserve_extracted", False)
+        ):
+            return impl(doc_id, parsed, *args, **kwargs)
+
+    return wrapper
+
+
+@_reversible_rewrite
+def _write_output_impl(
     doc_id: str,
     parsed: ParsedDocument,
     digest: str,
@@ -1290,7 +1397,8 @@ def write_output(
     )
 
 
-def write_output_extract_only(
+@_reversible_rewrite
+def _write_output_extract_only_impl(
     doc_id: str,
     parsed: ParsedDocument,
     output_dir: Path,
@@ -4378,3 +4486,8 @@ if __name__ == "__main__":
     logger.info(f"Docs directory: {DEFAULT_DOCS_DIR}")
 
     uvicorn.run(app, host=host, port=port)
+
+
+# Public names stay what callers import; the impl functions carry the rewrite guard.
+write_output = _write_output_impl
+write_output_extract_only = _write_output_extract_only_impl
