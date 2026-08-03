@@ -2111,6 +2111,93 @@ def _safe_source_filename(filename: str) -> str:
     return f"{safe_stem}{suffix}" if suffix else safe_stem
 
 
+#: Marker a failed parse leaves in the directory it had already reserved.
+PARSE_FAILURE_MARKER = ".parse-failed.json"
+
+
+def _record_parse_failure(
+    doc_dir: Path, doc_id: str, phase: str, error: str, *, docs_dir: Path, replacing: bool
+) -> None:
+    """Leave an explicit record that this doc_id's parse failed.
+
+    A failure already left the reserved directory behind, empty — which is
+    indistinguishable from a directory that is mid-parse, and only
+    distinguishable from "never submitted" by looking for the directory at all.
+    SharedSpecs IRP 20260801 §3.6 rules that the fix is to *record* rather than
+    delete: a caller that timed out and later probes must be able to tell "it
+    failed" from "still running" and from "never happened", and deleting the
+    directory would collapse the first into the last.
+
+    ``replacing`` is the fact as it stood *before* this request wrote anything,
+    taken from the existence check the caller already did under the per-doc lock.
+    Asking "is there a manifest now?" would be a different question with the same
+    shape and the wrong answer: the write path emits manifest.json before it
+    updates the index, so a failure in between leaves a manifest for a document
+    that was never there before — read post-hoc, a brand new document looks like
+    a pre-existing one and gets no record, while on disk it looks like a success
+    that nothing can find.
+
+    A failed replacement is not flagged: it is not that document's fault, and
+    marking it would report a document that is still readable as broken. It is,
+    however, not necessarily intact — see the caller-side note; that is a
+    separate defect in the write path, not something this record can repair.
+
+    For a document that did not exist before, everything this attempt produced is
+    cleared and the marker is all that remains, so the directory says exactly one
+    thing (SharedSpecs decision §3.6: clear the half-products, keep the record).
+    Nothing is lost — there was nothing here before — and the leftovers are not
+    evidence of anything: a source copy, tier files and metadata belonging to a
+    document that never entered the library, which a later attempt on the same
+    doc_id would then be mixing its own output into.
+
+    The page OCR cache is content-addressed (``ocr_p0001.<sha1>.txt``), so a
+    later attempt on different bytes would miss rather than read stale text —
+    dropping it costs a re-OCR on retry and risks nothing.
+
+    Not everything an attempt produces lives in its directory: the writer pushes
+    full text into the library-wide FTS table before it writes the manifest or
+    the index, so a failure in between leaves a document that is searchable but
+    has no entry anyone could delete it through. Clearing the directory alone
+    would leave that behind, so the row goes too.
+    """
+    try:
+        if replacing:
+            return
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        for child in doc_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        try:
+            # Removes both the index row and the FTS body. A new document that
+            # failed has no index row — the delete is a no-op there, and the
+            # search text is what actually needs removing.
+            from mantisfetch_common.doc_index_store import delete_document  # noqa: PLC0415
+
+            delete_document(docs_dir, doc_id)
+        except Exception as exc:
+            logger.warning("Could not clear index/FTS rows for failed %s: %s", doc_id, exc)
+        _write_json(
+            doc_dir / PARSE_FAILURE_MARKER,
+            {
+                "doc_id": doc_id,
+                "failed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "phase": phase,
+                "error": error[:2000],
+            },
+        )
+    except Exception as exc:  # pragma: no cover - never mask the original failure
+        logger.warning("Could not record parse failure for %s: %s", doc_id, exc)
+
+
+def _clear_parse_failure(doc_dir: Path) -> None:
+    """Drop a stale failure marker once a parse of the same doc_id succeeds."""
+    try:
+        (doc_dir / PARSE_FAILURE_MARKER).unlink(missing_ok=True)
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning("Could not clear parse failure marker in %s: %s", doc_dir, exc)
+
 #: Seconds a page of local OCR costs. Measured 1.8s at 144dpi with
 #: PP-OCRv5_mobile under paddlepaddle 3.2.x with oneDNN on; a drifted paddle
 #: runs ~7.5x slower (Paddle#77340), which makes the estimate optimistic, so a
@@ -3234,8 +3321,10 @@ async def api_parse_doc(
                 except json.JSONDecodeError:
                     parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
+            # Resolved outside the try so the failure recorders below always have
+            # a directory to write into — it is a pure path computation.
+            doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
             try:
-                doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
                 tmp_dir = doc_storage_dir / ".tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 # Sanitize to a basename: the raw multipart filename is
@@ -3244,9 +3333,17 @@ async def api_parse_doc(
                 tmp_path = tmp_dir / _safe_source_filename(filename)
                 shutil.move(str(scratch_path), str(tmp_path))
                 scratch_path = None
-            except HTTPException:
+            except HTTPException as e:
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "save", str(e.detail),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise
             except Exception as e:
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "save", str(e),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise HTTPException(500, t("file_save_failed", err=str(e)))
 
             # Parse
@@ -3355,9 +3452,17 @@ async def api_parse_doc(
                     )
                     if STORE_SOURCE_FILES else {}
                 )
-            except HTTPException:
+            except HTTPException as e:
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "parse", str(e.detail),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise
             except Exception as e:
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "parse", str(e),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise HTTPException(500, t("parse_failed", err=str(e)))
             finally:
                 # Cleanup temp file
@@ -3432,7 +3537,15 @@ async def api_parse_doc(
                         worker.start()
                         logger.info("Deferred summary scheduled: %s", d_id)
             except Exception as e:
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "write", str(e),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise HTTPException(500, t("write_failed", err=str(e)))
+
+            # This doc_id parsed successfully now, so any marker a previous
+            # attempt left behind is stale and would keep reporting "failed".
+            _clear_parse_failure(doc_storage_dir)
 
             elapsed = round(time.time() - t0, 2)
             return ParseResponse(
