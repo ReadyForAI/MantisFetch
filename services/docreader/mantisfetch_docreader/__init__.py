@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import mimetypes
@@ -20,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -897,6 +900,200 @@ def _reset_generated_output_dirs(doc_dir: Path, include_extracted: bool = True) 
             path.unlink()
 
 
+#: Artifacts a rewrite deletes before regenerating — the same set
+#: _reset_generated_output_dirs clears, so they can be moved aside instead.
+_REGENERATED_TREES = ("sections",)
+_REGENERATED_FILES = ("sections.json",)
+_EXTRACTED_TREES = ("tables", "images")
+_EXTRACTED_FILES = ("tables.json", "images.json", OCR_BLOCKS_SIDECAR_PATH)
+
+#: Artifacts a rewrite overwrites in place. They stay readable during the
+#: rewrite — preserve_extracted reads the prior manifest — so these are copied
+#: rather than moved. All small text files.
+_OVERWRITTEN_FILES = (
+    "full.md",
+    "digest.md",
+    "brief.md",
+    "manifest.json",
+    ".meta.json",
+    # The lowercased search caches live under .cache/ next to the OCR caches, but
+    # unlike those they are derived from the text this rewrite is replacing. Left
+    # behind, doc_search would match the new document's words against the old
+    # one's content.
+    ".cache/search_full.lower.txt",
+    ".cache/search_sections.lower.json",
+)
+
+_ROLLBACK_DIR = ".rollback"
+
+#: Where the source a replacement is about to overwrite waits. Separate from
+#: _ROLLBACK_DIR because it is taken earlier and outlives the writer's own
+#: transaction — see _stash_source.
+_SOURCE_ROLLBACK_DIR = ".rollback-source"
+
+
+def _stash_source(doc_dir: Path) -> None:
+    """Move the stored source aside so a failed replacement can put it back.
+
+    The upload is persisted before the writer runs — the writer needs the record
+    it returns, and the temp file it is copied from is gone by then — so by the
+    time a rewrite can roll itself back, source/ already holds the replacement's
+    bytes. Left there after a failure the caller is told the replace failed while
+    downloading the source hands back the new file, and the restored manifest's
+    source_sha256 describes one that is no longer on disk (#212).
+
+    Moved rather than copied: it is a rename, so a large upload costs nothing,
+    and the replacement is written into a fresh directory either way.
+    """
+    source = doc_dir / "source"
+    stash = doc_dir / _SOURCE_ROLLBACK_DIR
+    shutil.rmtree(stash, ignore_errors=True)
+    if source.exists():
+        shutil.move(str(source), str(stash))
+
+
+def _restore_stashed_source(doc_dir: Path) -> None:
+    """Put back the source a failed replacement overwrote."""
+    stash = doc_dir / _SOURCE_ROLLBACK_DIR
+    if not stash.exists():
+        return
+    source = doc_dir / "source"
+    shutil.rmtree(source, ignore_errors=True)
+    shutil.move(str(stash), str(source))
+
+
+def _discard_stashed_source(doc_dir: Path) -> None:
+    """Drop the stash once the replacement has committed.
+
+    An upload whose stored filename differs from the one it replaces does not
+    overwrite it, and did not before this stash existed either, so those files
+    go back rather than disappearing with the stash.
+
+    Runs after the replacement has committed, so nothing here is worth failing
+    the request over — the document is already correct without it.
+    """
+    stash = doc_dir / _SOURCE_ROLLBACK_DIR
+    if not stash.exists():
+        return
+    try:
+        source = doc_dir / "source"
+        source.mkdir(parents=True, exist_ok=True)
+        for kept in stash.iterdir():
+            if not (source / kept.name).exists():
+                shutil.move(str(kept), str(source / kept.name))
+        shutil.rmtree(stash, ignore_errors=True)
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning("Could not clear the source stash in %s: %s", doc_dir, exc)
+
+
+@contextlib.contextmanager
+def _restore_on_failure(
+    doc_dir: Path, *, include_extracted: bool, docs_dir: Path | None = None, doc_id: str | None = None
+):
+    """Put the document back the way it was if this rewrite does not finish.
+
+    Rewrites replace in place: the generated directories are deleted before the
+    new ones are written, and the manifest lands before the index is updated. A
+    failure anywhere in between left a document that was part old and part new —
+    reported to the caller as a failed replace while what is on disk had already
+    changed (#212).
+
+    The artifacts that would be deleted move aside, so the rewrite still starts
+    from a clean directory; the ones that are overwritten in place are copied,
+    because the rewrite reads some of them back (preserve_extracted carries the
+    prior manifest's table and image entries forward).
+
+    The document's searchable text is part of the same state even though it is
+    not a file in this directory: the writer pushes it into the library-wide FTS
+    table before the manifest lands, so a rollback that stopped at the filesystem
+    would leave the old text on disk and the replacement's words matching this
+    doc_id. The indexed body is kept and put back verbatim — re-deriving it from
+    the restored full.md would drop the section titles that also go into it.
+
+    Staging can fail too — a move can succeed and the copy after it hit a full
+    disk — so it runs under the same recovery: whatever was already set aside
+    goes back, and nothing is left in .rollback/.
+    """
+    backup = doc_dir / _ROLLBACK_DIR
+    shutil.rmtree(backup, ignore_errors=True)
+    moved: list[str] = []
+    copied: list[str] = []
+    fts_before = _read_search_index(docs_dir, doc_id)
+
+    def _put_back() -> None:
+        for name in moved + copied:
+            target = doc_dir / name
+            if target.exists():
+                shutil.rmtree(target) if target.is_dir() else target.unlink()
+            source = backup / name
+            if source.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(target))
+        shutil.rmtree(backup, ignore_errors=True)
+        _restore_search_index(docs_dir, doc_id, fts_before)
+
+    try:
+        if doc_dir.exists():
+            backup.mkdir(parents=True, exist_ok=True)
+            names = list(_REGENERATED_TREES) + list(_REGENERATED_FILES)
+            if include_extracted:
+                names += list(_EXTRACTED_TREES) + list(_EXTRACTED_FILES)
+            for name in names:
+                current = doc_dir / name
+                if current.exists():
+                    shutil.move(str(current), str(backup / name))
+                    moved.append(name)
+            for name in _OVERWRITTEN_FILES:
+                current = doc_dir / name
+                if current.exists():
+                    (backup / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(current, backup / name)
+                    copied.append(name)
+    except BaseException:
+        _put_back()
+        raise
+
+    try:
+        yield
+    except BaseException:
+        _put_back()
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+
+
+def _read_search_index(docs_dir: Path | None, doc_id: str | None) -> str | None:
+    """The document's currently indexed text, or None if it has none."""
+    if not docs_dir or not doc_id:
+        return None
+    try:
+        from mantisfetch_common.doc_index_store import read_fts  # noqa: PLC0415
+
+        return read_fts(docs_dir, doc_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not read the search index for %s: %s", doc_id, exc)
+        return None
+
+
+def _restore_search_index(docs_dir: Path | None, doc_id: str | None, body: str | None) -> None:
+    """Put back the text that was indexed before this rewrite started.
+
+    Only the FTS row: an empty body deletes it and writes nothing back, which is
+    what "there was no indexed text before" means. Reaching for delete_document
+    here would also drop the document's entry from the library index — a document
+    can legitimately have an index entry and no FTS row (an empty parse, or an
+    FTS read this rollback could not complete), and a failed replacement of one
+    would have deleted it from the library.
+    """
+    if not docs_dir or not doc_id:
+        return
+    try:
+        from mantisfetch_common.doc_index_store import upsert_fts  # noqa: PLC0415
+
+        upsert_fts(docs_dir, doc_id, body or "")
+    except Exception as exc:  # pragma: no cover - never mask the original failure
+        logger.warning("Could not restore the search index for %s: %s", doc_id, exc)
+
+
 def _resolve_extracted_outputs(
     doc_dir: Path, doc_id: str, parsed: ParsedDocument, preserve_extracted: bool
 ) -> tuple[int, int, list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
@@ -1094,7 +1291,96 @@ def _skip_stale_generation(doc_id: str, doc_dir: Path, generation: str) -> bool:
     return False
 
 
-def write_output(
+class _WriterLock:
+    """A threading lock that a WeakValueDictionary can hold — locks themselves
+    cannot be weak-referenced."""
+
+    __slots__ = ("lock", "__weakref__")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+
+_document_writer_locks: weakref.WeakValueDictionary[str, _WriterLock] = (
+    weakref.WeakValueDictionary()
+)
+_document_writer_locks_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def _document_writer_lock(doc_dir: Path):
+    """Serialize every rewrite of one document, across threads.
+
+    Weak values so a document that is not being written holds nothing; a writer
+    keeps the entry alive for as long as it needs it, which is exactly as long as
+    another writer could collide with it.
+    """
+    key = str(doc_dir)
+    with _document_writer_locks_guard:
+        holder = _document_writer_locks.get(key)
+        if holder is None:
+            holder = _WriterLock()
+            _document_writer_locks[key] = holder
+    with holder.lock:
+        yield
+
+
+def _reversible_rewrite(impl):
+    """Give a writer all-or-nothing semantics against the document on disk.
+
+    Both writers resolve the document directory from the same arguments, so the
+    wrapper can work it out without the writer handing it over — and wrapping
+    rather than restructuring keeps the writers' bodies exactly as they were. The
+    arguments are read back through the writer's own signature, so a caller that
+    passes them positionally is understood the same way the writer understands
+    it; reading kwargs alone would silently back up the wrong directory.
+
+    The stale-generation guard runs here rather than inside the writer. Staging is
+    a disk mutation like any other — it moves sections/ aside — and a writer that
+    then declines to write leaves through the success path, which drops the
+    holdings along with the newer parse's sections. The check has to come first,
+    for the same reason it already had to come before _reset_generated_output_dirs.
+
+    Check and rewrite run under a per-document lock shared by every writer. The
+    guard reads the on-disk generation and then acts on it, so without one a
+    deferred-summary writer could pass the check, have a replacement land while
+    it worked, and roll the document back to the parse it was summarising —
+    exactly the case the guard exists to prevent. The parse handler's own per-doc
+    lock cannot cover this: it is an asyncio.Lock held by the request coroutine,
+    and the deferred writer is a plain thread that can never take it. This one is
+    a threading lock and both writers reach it, whichever arrives first.
+    """
+    signature = inspect.signature(impl)
+
+    @functools.wraps(impl)
+    def wrapper(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        a = bound.arguments
+        doc_id, output_dir, content_type = a["doc_id"], a["output_dir"], a["content_type"]
+        doc_dir = output_dir / _doc_storage_rel_path(
+            doc_id, _normalize_content_type(content_type) if content_type else None
+        )
+        with _document_writer_lock(doc_dir):
+            if a["guard_stale_generation"] and _skip_stale_generation(
+                doc_id,
+                doc_dir,
+                _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
+            ):
+                return None
+            with _restore_on_failure(
+                doc_dir,
+                include_extracted=not a.get("preserve_extracted", False),
+                docs_dir=output_dir,
+                doc_id=doc_id,
+            ):
+                return impl(*args, **kwargs)
+
+    return wrapper
+
+
+@_reversible_rewrite
+def _write_output_impl(
     doc_id: str,
     parsed: ParsedDocument,
     digest: str,
@@ -1114,13 +1400,11 @@ def write_output(
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
 
-    # content_hash + generation token computed early — the generation guard must
-    # run before any disk mutation so a stale deferred writer can't wipe a newer
-    # parse's output.
     content_hash = _content_hash_of(parsed)
+    # guard_stale_generation is consumed by _reversible_rewrite, which has to run
+    # the check before it stages the rollback; the token is recomputed here only
+    # because the manifest carries it.
     generation = _generation_token(parsed, tags, metadata, source_record)
-    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
-        return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
@@ -1290,7 +1574,8 @@ def write_output(
     )
 
 
-def write_output_extract_only(
+@_reversible_rewrite
+def _write_output_extract_only_impl(
     doc_id: str,
     parsed: ParsedDocument,
     output_dir: Path,
@@ -1309,9 +1594,8 @@ def write_output_extract_only(
     sections_dir = doc_dir / "sections"
 
     content_hash = _content_hash_of(parsed)
+    # See the note in _write_output_impl: the guard itself lives in the decorator.
     generation = _generation_token(parsed, tags, metadata, source_record)
-    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
-        return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
@@ -2138,9 +2422,10 @@ def _record_parse_failure(
     that nothing can find.
 
     A failed replacement is not flagged: it is not that document's fault, and
-    marking it would report a document that is still readable as broken. It is,
-    however, not necessarily intact — see the caller-side note; that is a
-    separate defect in the write path, not something this record can repair.
+    marking it would report a document that is still readable as broken. What it
+    does need is its source back — the upload is persisted before anything that
+    can fail here, so the replacement's bytes are already on disk by now while
+    everything else has been rolled back around them (#212).
 
     For a document that did not exist before, everything this attempt produced is
     cleared and the marker is all that remains, so the directory says exactly one
@@ -2162,6 +2447,7 @@ def _record_parse_failure(
     """
     try:
         if replacing:
+            _restore_stashed_source(doc_dir)
             return
         doc_dir.mkdir(parents=True, exist_ok=True)
         for child in doc_dir.iterdir():
@@ -3445,7 +3731,11 @@ async def api_parse_doc(
                     parsed = await loop.run_in_executor(None, lambda: parse_generic(tmp_path, profile=profile))
                 # Persist the source while tmp_path still exists; the finally
                 # below removes tmp_dir, and we no longer hold the bytes in
-                # memory after the streaming upload.
+                # memory after the streaming upload. A replacement moves the
+                # source it is about to overwrite aside first, so a failure
+                # further down can put the whole document back (#212).
+                if STORE_SOURCE_FILES and will_replace:
+                    await loop.run_in_executor(None, _stash_source, doc_storage_dir)
                 source_record = (
                     await loop.run_in_executor(
                         None, _persist_source_file, doc_storage_dir, filename, tmp_path
@@ -3544,8 +3834,10 @@ async def api_parse_doc(
                 raise HTTPException(500, t("write_failed", err=str(e)))
 
             # This doc_id parsed successfully now, so any marker a previous
-            # attempt left behind is stale and would keep reporting "failed".
+            # attempt left behind is stale and would keep reporting "failed",
+            # and the source this replacement set aside is no longer needed.
             _clear_parse_failure(doc_storage_dir)
+            _discard_stashed_source(doc_storage_dir)
 
             elapsed = round(time.time() - t0, 2)
             return ParseResponse(
@@ -4378,3 +4670,8 @@ if __name__ == "__main__":
     logger.info(f"Docs directory: {DEFAULT_DOCS_DIR}")
 
     uvicorn.run(app, host=host, port=port)
+
+
+# Public names stay what callers import; the impl functions carry the rewrite guard.
+write_output = _write_output_impl
+write_output_extract_only = _write_output_extract_only_impl
