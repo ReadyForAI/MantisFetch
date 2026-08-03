@@ -2142,16 +2142,27 @@ def _record_parse_failure(
     however, not necessarily intact — see the caller-side note; that is a
     separate defect in the write path, not something this record can repair.
 
-    For a document that did not exist before, a half-written manifest is removed
-    along with recording the failure. Nothing is lost (there was nothing there),
-    and leaving it would keep claiming success.
+    For a document that did not exist before, everything this attempt produced is
+    cleared and the marker is all that remains, so the directory says exactly one
+    thing (SharedSpecs decision §3.6: clear the half-products, keep the record).
+    Nothing is lost — there was nothing here before — and the leftovers are not
+    evidence of anything: a source copy, tier files and metadata belonging to a
+    document that never entered the library, which a later attempt on the same
+    doc_id would then be mixing its own output into.
+
+    The page OCR cache is content-addressed (``ocr_p0001.<sha1>.txt``), so a
+    later attempt on different bytes would miss rather than read stale text —
+    dropping it costs a re-OCR on retry and risks nothing.
     """
     try:
         if replacing:
             return
         doc_dir.mkdir(parents=True, exist_ok=True)
-        # Not a success: it never reached the index, so nothing can find it.
-        (doc_dir / "manifest.json").unlink(missing_ok=True)
+        for child in doc_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
         _write_json(
             doc_dir / PARSE_FAILURE_MARKER,
             {

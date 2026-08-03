@@ -110,7 +110,11 @@ def test_new_document_that_fails_mid_write_is_recorded_not_left_looking_successf
     doc = docs_dir / "General" / "DOC-4007"
     assert (doc / MARKER).exists(), "a mid-write failure left no record"
     assert json.loads((doc / MARKER).read_text(encoding="utf-8"))["phase"] == "write"
-    assert not (doc / "manifest.json").exists(), "still claims success but is unindexed"
+    # Nothing but the record: a leftover manifest would keep claiming success,
+    # and the rest belongs to a document that never entered the library.
+    assert [p.name for p in doc.iterdir()] == [MARKER], (
+        f"half-built artifacts survived: {sorted(p.name for p in doc.iterdir())}"
+    )
 
 
 def test_replacement_that_fails_mid_write_is_not_flagged(
