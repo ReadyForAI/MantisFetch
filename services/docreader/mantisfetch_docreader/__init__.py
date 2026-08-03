@@ -1074,19 +1074,21 @@ def _read_search_index(docs_dir: Path | None, doc_id: str | None) -> str | None:
 
 
 def _restore_search_index(docs_dir: Path | None, doc_id: str | None, body: str | None) -> None:
-    """Put back the text that was indexed before this rewrite started."""
+    """Put back the text that was indexed before this rewrite started.
+
+    Only the FTS row: an empty body deletes it and writes nothing back, which is
+    what "there was no indexed text before" means. Reaching for delete_document
+    here would also drop the document's entry from the library index — a document
+    can legitimately have an index entry and no FTS row (an empty parse, or an
+    FTS read this rollback could not complete), and a failed replacement of one
+    would have deleted it from the library.
+    """
     if not docs_dir or not doc_id:
         return
     try:
-        from mantisfetch_common.doc_index_store import delete_document, upsert_fts  # noqa: PLC0415
+        from mantisfetch_common.doc_index_store import upsert_fts  # noqa: PLC0415
 
-        if body is None:
-            # Nothing was indexed before, so the rewrite's row is the only one
-            # here; delete_document drops it along with an index entry that a
-            # rolled-back write never committed.
-            delete_document(docs_dir, doc_id)
-        else:
-            upsert_fts(docs_dir, doc_id, body)
+        upsert_fts(docs_dir, doc_id, body or "")
     except Exception as exc:  # pragma: no cover - never mask the original failure
         logger.warning("Could not restore the search index for %s: %s", doc_id, exc)
 
@@ -1297,6 +1299,12 @@ def _reversible_rewrite(impl):
     arguments are read back through the writer's own signature, so a caller that
     passes them positionally is understood the same way the writer understands
     it; reading kwargs alone would silently back up the wrong directory.
+
+    The stale-generation guard runs here rather than inside the writer. Staging is
+    a disk mutation like any other — it moves sections/ aside — and a writer that
+    then declines to write leaves through the success path, which drops the
+    holdings along with the newer parse's sections. The check has to come first,
+    for the same reason it already had to come before _reset_generated_output_dirs.
     """
     signature = inspect.signature(impl)
 
@@ -1309,6 +1317,12 @@ def _reversible_rewrite(impl):
         doc_dir = output_dir / _doc_storage_rel_path(
             doc_id, _normalize_content_type(content_type) if content_type else None
         )
+        if a["guard_stale_generation"] and _skip_stale_generation(
+            doc_id,
+            doc_dir,
+            _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
+        ):
+            return None
         with _restore_on_failure(
             doc_dir,
             include_extracted=not a.get("preserve_extracted", False),
@@ -1341,13 +1355,11 @@ def _write_output_impl(
     doc_dir = output_dir / storage_path
     sections_dir = doc_dir / "sections"
 
-    # content_hash + generation token computed early — the generation guard must
-    # run before any disk mutation so a stale deferred writer can't wipe a newer
-    # parse's output.
     content_hash = _content_hash_of(parsed)
+    # guard_stale_generation is consumed by _reversible_rewrite, which has to run
+    # the check before it stages the rollback; the token is recomputed here only
+    # because the manifest carries it.
     generation = _generation_token(parsed, tags, metadata, source_record)
-    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
-        return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)
@@ -1537,9 +1549,8 @@ def _write_output_extract_only_impl(
     sections_dir = doc_dir / "sections"
 
     content_hash = _content_hash_of(parsed)
+    # See the note in _write_output_impl: the guard itself lives in the decorator.
     generation = _generation_token(parsed, tags, metadata, source_record)
-    if guard_stale_generation and _skip_stale_generation(doc_id, doc_dir, generation):
-        return
 
     doc_dir.mkdir(parents=True, exist_ok=True)
     _reset_generated_output_dirs(doc_dir, include_extracted=not preserve_extracted)

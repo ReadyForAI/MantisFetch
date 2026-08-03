@@ -17,7 +17,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import mantisfetch_common.storage as cs
-from mantisfetch_common.doc_index_store import search_fts
+from mantisfetch_common.doc_index_store import list_documents, search_fts, upsert_fts
 
 FIRST = b"<h1>Original</h1><p>Zarquonium bearings, part XQ-1.</p>"
 SECOND = b"<h1>Replacement</h1><p>Different content entirely.</p>"
@@ -249,3 +249,63 @@ def test_the_sync_summary_writer_rolls_back_too(
     ).status_code == 500
 
     assert _snapshot(doc) == before
+
+
+def test_a_failed_replacement_keeps_a_document_that_had_no_indexed_text(
+    doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No FTS row is not the same fact as no document.
+
+    A document can be in the library with nothing indexed under it — an empty
+    parse, or an FTS read the rollback could not complete. Restoring "nothing"
+    has to mean an empty FTS row, not removing the document.
+    """
+    assert _post(doc_client, FIRST, "DOC-6011").status_code == 200
+    upsert_fts(docs_dir, "DOC-6011", "")  # the row a document like this would have
+
+    monkeypatch.setattr(
+        dr, "_update_doc_index", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))
+    )
+    assert _post(doc_client, SECOND, "DOC-6011", replace="true").status_code == 500
+
+    assert [d["id"] for d in list_documents(docs_dir)] == ["DOC-6011"], (
+        "the failed replace dropped the document from the library index"
+    )
+    assert search_fts(docs_dir, "Different content entirely") == []
+
+
+def test_a_stale_deferred_write_leaves_every_artifact_of_the_newer_parse(
+    doc_client: TestClient, docs_dir: Path
+) -> None:
+    """The rollback guard must not turn a declined write into a deletion.
+
+    A deferred-summary thread that finds a newer parse on disk writes nothing.
+    Staging the rollback is itself a mutation — sections/ moves aside — so a
+    writer that then declines would leave through the success path and drop the
+    holdings along with the newer parse's sections.
+    """
+    assert _post(doc_client, FIRST, "DOC-6012").status_code == 200
+    doc = docs_dir / "General" / "DOC-6012"
+    before = _snapshot(doc)
+    assert any(name.startswith("sections/") for name in before)
+
+    stale = dr.ParsedDocument(
+        filename="doc.html",
+        file_type="html",
+        total_pages=1,
+        pages=[],
+        sections=[
+            dr.Section(
+                index=1, title="Stale", level=1, text="stale text",
+                page_range="1-1", sid="s_stale", summary="",
+            )
+        ],
+        ocr_page_count=0,
+        table_count=0,
+    )
+    dr.write_output(
+        "DOC-6012", stale, "STALE_DIGEST", "STALE_BRIEF", docs_dir,
+        source="upload", content_type="General", guard_stale_generation=True,
+    )
+
+    assert _snapshot(doc) == before, "the declined write removed the newer parse's artifacts"
