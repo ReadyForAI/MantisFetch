@@ -1,7 +1,8 @@
 """Document-profile loading and profile-driven field extraction.
 
-A *document profile* is a JSON config (under `configs/document_profiles/` or
-`configs/field_profiles/`) that declares how to classify a document and which
+A *document profile* is a JSON config (shipped in this package under
+`config_profiles/{document,field}/`, and overridable from the repo's
+`configs/{document,field}_profiles/`) that declares how to classify a document and which
 fields to pull out of it — alias-anchored regions to re-OCR, regex field rules,
 quality gates, and per-stage render/cache policy. This module owns:
 
