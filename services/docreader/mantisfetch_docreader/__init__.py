@@ -2111,6 +2111,52 @@ def _safe_source_filename(filename: str) -> str:
     return f"{safe_stem}{suffix}" if suffix else safe_stem
 
 
+#: Seconds a page of local OCR costs. Measured 1.8s at 144dpi with
+#: PP-OCRv5_mobile under paddlepaddle 3.2.x with oneDNN on; a drifted paddle
+#: runs ~7.5x slower (Paddle#77340), which makes the estimate optimistic, so a
+#: deployment that cannot hold the pin should raise this.
+_SEC_PER_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_OCR_PAGE", "1.8"))
+
+#: A page carrying less text than this is treated as a scan needing OCR.
+_TEXT_LAYER_MIN_CHARS = 20
+
+
+def _estimate_parse_seconds(path: Path, suffix: str) -> dict[str, Any] | None:
+    """Estimate what a synchronous parse of this file will cost, without parsing.
+
+    Opens the PDF and samples each page's text layer — pages that carry almost
+    none are scans, and OCR is what makes a parse take minutes. Measured at
+    0.07-0.18s for documents of 16-162 pages, and the estimate tracks reality:
+    a 162-page scan estimates 292s against ~300s measured, while a 103-page
+    native document estimates 0 and parses in seconds.
+
+    Returns None when no estimate is possible — non-PDF input, or a file that
+    cannot be opened. Callers must treat that as "unknown", never as "cheap".
+
+    Deliberately covers OCR only. Summaries are excluded (they are a separate
+    synchronous cost when summary_mode=sync), and a table-heavy native document
+    is not free either, so an estimate of 0 means "no OCR cost", not "fast".
+    """
+    if suffix != ".pdf":
+        return None
+    try:
+        import fitz  # noqa: PLC0415
+
+        with fitz.open(str(path)) as doc:
+            total_pages = len(doc)
+            ocr_pages = sum(
+                1 for page in doc if len(page.get_text().strip()) < _TEXT_LAYER_MIN_CHARS
+            )
+    except Exception as exc:
+        logger.info("Parse cost estimate skipped for %s: %s", path.name, exc)
+        return None
+    return {
+        "pages": total_pages,
+        "ocr_pages": ocr_pages,
+        "estimated_seconds": round(ocr_pages * _SEC_PER_OCR_PAGE, 1),
+    }
+
+
 def _persist_source_file(doc_dir: Path, filename: str, source_path: Path) -> dict[str, Any]:
     source_dir = doc_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -2739,6 +2785,10 @@ async def api_parse_doc(
     tags: str | None = Form(None),  # JSON array string: '["Q3","financial"]'
     metadata: str | None = Form(None),  # JSON object string
     replace: bool = Form(False),
+    # How long the caller can wait. The single source of truth is the caller —
+    # it is the only side that knows its own timeout, so nothing here has to be
+    # kept in sync with it. Omit it to accept however long the parse takes.
+    budget_seconds: float | None = Form(None, gt=0),
 ):
     """Parse uploaded document (PDF/DOCX), return structured result."""
     if _parse_sem.locked():
@@ -2828,6 +2878,33 @@ async def api_parse_doc(
     # no longer touched, so from here a client disconnect must not discard the
     # work — see _survives_client_disconnect.
     _allow_running_detached()
+
+    # Refuse a document this call cannot afford, before it costs anything. The
+    # estimate is cheap (0.07-0.18s) and runs before the doc_id is minted, so a
+    # refusal burns no id and leaves no directory.
+    #
+    # No budget means no refusal. A caller that did not ask for one is either a
+    # background ingest with time to spare (the REST leg exists to absorb exactly
+    # the documents this would reject) or predates the field; giving them a
+    # default would refuse the very work the background path is for. The MCP
+    # tool, which has a client timeout it cannot see, sends its own budget.
+    if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
+        estimate = _estimate_parse_seconds(scratch_path, suffix)
+        if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
+            raise HTTPException(
+                422,
+                {
+                    "error": "parse_budget_exceeded",
+                    "message": (
+                        f"parsing this document is estimated at "
+                        f"{estimate['estimated_seconds']}s, over the "
+                        f"{budget_seconds}s budget this call declared. It was not "
+                        f"started. Ingest it through a path that can wait for it."
+                    ),
+                    **estimate,
+                    "budget_seconds": budget_seconds,
+                },
+            )
 
     try:
         # The early-reject above was a snapshot before the upload started.
