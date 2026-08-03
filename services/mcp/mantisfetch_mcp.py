@@ -62,6 +62,15 @@ _MAX_INLINE_DOC_BYTES = 8 * 1024 * 1024
 # covers the JSON-RPC envelope and the other doc_parse arguments.
 _MAX_REQUEST_BODY_BYTES = _MAX_INLINE_DOC_BYTES * 4 // 3 + 256 * 1024
 
+# How long a doc_parse call may spend before it is better to refuse and say so.
+# An MCP client's per-request timeout is not on the wire — the 2026-07-28 spec
+# has no deadline field — so this is a guess at what is safely under it, and the
+# NodalOS agentd caps upstream calls at 60s. Raise it only alongside that cap
+# (its request_timeout_sec is bounded [10, 600] per SharedSpecs IRP 20260801);
+# left too high, the refusal stops arriving before the client gives up, which is
+# the failure this exists to prevent.
+_PARSE_BUDGET_SEC = float(os.environ.get("MANTISFETCH_MCP_PARSE_BUDGET_SEC", "45"))
+
 
 def _transport_security() -> TransportSecuritySettings:
     """Keep DNS-rebinding protection on, but allow the intended loopback host:port
@@ -587,11 +596,21 @@ async def doc_parse(
     id. A "passed its staging TTL" error means the attachment expired: ask the user
     to re-upload.
 
-    Large scanned or table-heavy documents can take minutes to parse, which is
-    longer than an MCP client's per-request timeout typically allows (the NodalOS
-    agentd client, for one, caps every upstream call at 60s). This call is
-    synchronous, so such a document surfaces as a client-side timeout rather than
-    a tool error.
+    Large scanned documents can take minutes to parse — longer than an MCP
+    client's per-request timeout typically allows. Rather than let that surface
+    as a timeout, this call estimates the cost first and refuses in about a
+    tenth of a second when it does not fit, with `parse_budget_exceeded` and the
+    page count, the estimate and the budget it was measured against. Nothing was
+    started, so nothing is half-done and no id was consumed.
+
+    A refusal is not a problem with the document. It means this route cannot
+    wait that long, and the document needs to reach the library through a path
+    that can — which may be something already under way elsewhere, or something
+    only the user can arrange. Report the estimate and let the user decide; do
+    not retry the call, and do not describe the document as unreadable or
+    corrupt. Documents whose cost cannot be estimated (anything but a PDF) are
+    never refused, so a slow parse of one still ends in a timeout — the
+    paragraphs below apply to that case.
 
     Once the upload has been received the parse is no longer abandoned when the
     client goes away: it keeps running, and then succeeds or fails on its own
@@ -636,6 +655,10 @@ async def doc_parse(
         "extract_tables": str(extract_tables).lower(),
         "force_ocr": str(force_ocr).lower(),
         "replace": str(replace).lower(),
+        # Declared on every call: a tool invocation is spending the agent's turn,
+        # so a document that cannot finish inside it should come back as a fast
+        # refusal rather than as the client's timeout.
+        "budget_seconds": str(_PARSE_BUDGET_SEC),
     }
     if doc_id:
         form["doc_id"] = doc_id

@@ -2198,6 +2198,190 @@ def _clear_parse_failure(doc_dir: Path) -> None:
     except OSError as exc:  # pragma: no cover - defensive
         logger.warning("Could not clear parse failure marker in %s: %s", doc_dir, exc)
 
+#: Seconds a page of local OCR costs. Measured 1.8s at 144dpi with
+#: PP-OCRv5_mobile under paddlepaddle 3.2.x with oneDNN on; a drifted paddle
+#: runs ~7.5x slower (Paddle#77340), which makes the estimate optimistic, so a
+#: deployment that cannot hold the pin should raise this.
+_SEC_PER_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_OCR_PAGE", "1.8"))
+
+#: Seconds an LLM-OCR'd page costs. Unlike the local figure above this one is
+#: NOT measured — it is a deliberately pessimistic placeholder, because the
+#: direction that hurts is under-estimating: a call that was told it fits and
+#: then does not is exactly the timeout this whole mechanism exists to prevent.
+#: Tune it per deployment once its provider's latency is known.
+_SEC_PER_LLM_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_LLM_OCR_PAGE", "6.0"))
+
+
+def _resolve_plan_inputs(
+    *,
+    parse_mode: str | None,
+    document_profile: str | None,
+    field_ocr_config: str | None,
+    metadata: dict[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """The three request values that decide the OCR plan, resolved in one place.
+
+    Each of them can arrive as a form field, inside the metadata blob, or from
+    the environment, and the cost preflight has to see the same values the parse
+    will. Keeping the precedence here rather than writing it out twice is the
+    point: three review rounds on this mechanism each found one more input the
+    preflight had not accounted for, because it was resolving them by hand.
+    """
+    resolved_mode = (
+        str(parse_mode or metadata.get("parse_mode") or "").strip()
+        or os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip()
+        or None
+    )
+    resolved_profile = (
+        str(document_profile or metadata.get("document_profile") or "").strip()
+        or str(metadata.get("field_ocr_profile") or "").strip()
+        or os.environ.get("MANTISFETCH_FIELD_OCR_PROFILE", "").strip()
+        or None
+    )
+    resolved_config = (
+        str(field_ocr_config or metadata.get("field_ocr_config") or "").strip()
+        or os.environ.get("MANTISFETCH_FIELD_OCR_CONFIG", "").strip()
+        or None
+    )
+    return resolved_mode, resolved_profile, resolved_config
+
+
+def _effective_parse_plan(
+    parse_mode: str | None,
+    metadata_raw: str | None,
+    document_profile: str | None = None,
+    field_ocr_config: str | None = None,
+) -> tuple[str | None, Any | None]:
+    """The mode and profile this request will really run under, before the lock.
+
+    Asking the request alone is not enough: with no explicit mode, the *profile*
+    supplies one (``upgrade_policy.default_mode``), and a profile defaulting to
+    "full" sends every page to LLM OCR. So this loads the profile and defers to
+    the same resolver the parse uses.
+
+    Returns ``(None, None)`` when the plan cannot be worked out — an unreadable
+    profile or an invalid mode. The caller must then skip the estimate entirely
+    rather than pass the None along: a mode of None reads as "not full" and would
+    still produce a confident local-OCR estimate for a request whose real plan is
+    unknown. Both failures surface later with a better message than a cost
+    estimate could give.
+    """
+    try:
+        meta = json.loads(metadata_raw) if metadata_raw else {}
+        if not isinstance(meta, dict):
+            meta = {}
+    except (json.JSONDecodeError, TypeError):
+        meta = {}  # a malformed blob is rejected later, with a better message
+
+    requested, profile_name, config_path = _resolve_plan_inputs(
+        parse_mode=parse_mode,
+        document_profile=document_profile,
+        field_ocr_config=field_ocr_config,
+        metadata=meta,
+    )
+    try:
+        profile = _load_document_profile(profile_name, config_path)
+        return _resolve_pdf_parse_mode(profile, requested), profile
+    except Exception as exc:
+        logger.info("Parse plan not resolvable for the cost estimate: %s", exc)
+        return None, None
+
+
+def _estimate_parse_seconds(
+    path: Path,
+    suffix: str,
+    *,
+    force_ocr: bool = False,
+    ocr_pages_spec: str | None = None,
+    parse_mode: str | None = None,
+    concurrency: int = 3,
+    profile: Any | None = None,
+) -> dict[str, Any] | None:
+    """Estimate what a synchronous parse of this file will cost, without parsing.
+
+    OCR is what makes a parse take minutes, so the estimate counts the pages that
+    will be OCR'd and by which engine. The count has to follow the same decisions
+    the parse will make, or the estimate is about a different piece of work —
+    ``_plan_pdf_ocr`` sends a page to the *LLM* rather than to local OCR whenever
+    an explicit page range names it, ``force_ocr`` is set, or the mode is
+    ``full``; only the ordinary scan-detection path (``_should_ocr`` at
+    ``OCR_THRESHOLD``) stays local. Those two engines do not cost the same, so
+    counting pages without knowing the engine would be counting the wrong thing.
+
+    LLM pages run ``concurrency`` at a time, so their wall clock is the number of
+    batches rather than the number of pages.
+
+    Deliberately conservative where it cannot be exact: the blank-page exclusions
+    the real planner applies are not reproduced here, so a forced or full parse is
+    estimated as the whole document. Over-estimating refuses a call that might
+    have fit; under-estimating lets through the timeout this exists to prevent.
+
+    Returns None when no estimate is possible — non-PDF input, or a file that
+    cannot be opened. Callers must treat that as "unknown", never as "cheap".
+
+    Covers OCR only. It is the caller's budget that keeps the rest honest: a
+    declared budget also pushes summarization off this call (see the handler), so
+    what is left to measure is extraction plus OCR. A table-heavy native document
+    is still not free, so an estimate of 0 means "no OCR cost", not "instant".
+    """
+    if suffix != ".pdf":
+        return None
+    mode = (parse_mode or "").strip().lower()
+    try:
+        import fitz  # noqa: PLC0415
+
+        with fitz.open(str(path)) as doc:
+            total_pages = len(doc)
+            local_pages = 0
+            if ocr_pages_spec:
+                llm_pages = len(_parse_page_range(ocr_pages_spec, total_pages))
+            elif force_ocr or mode == "full":
+                llm_pages = total_pages
+            else:
+                llm_pages = 0
+                local_pages = sum(
+                    1 for page in doc if _should_ocr(page, page.get_text(), OCR_THRESHOLD)
+                )
+    except Exception as exc:
+        logger.info("Parse cost estimate skipped for %s: %s", path.name, exc)
+        return None
+    # A profile can add region OCR on top of the page work: when its mode enables
+    # region_llm and the document needs OCR at all, _apply_field_focused_ocr runs
+    # serially, one LLM call per (group, page) it matches.
+    #
+    # An alias gate only ever *reduces* how many pages a group matches, so the
+    # page scope — or the whole document, when there is none — is a true upper
+    # bound. Counting the bound rather than what can be proven is the point: this
+    # number decides whether the call is affordable, so work that might happen has
+    # to be inside it. Reporting the shortfall in the response instead would put
+    # the caveat somewhere the comparison never looks.
+    region_calls = 0
+    if profile is not None and (local_pages or llm_pages):
+        try:
+            if mode in getattr(profile.upgrade_policy, "region_llm_modes", ()) or ():
+                for group in getattr(profile, "groups", ()) or ():
+                    if not getattr(group, "crop", None):
+                        continue
+                    scope = getattr(group, "page_scope", None)
+                    region_calls += min(len(scope), total_pages) if scope else total_pages
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info("Region OCR estimate skipped: %s", exc)
+
+    batches = -(-llm_pages // max(1, concurrency))  # ceil
+    seconds = (
+        local_pages * _SEC_PER_OCR_PAGE
+        + batches * _SEC_PER_LLM_OCR_PAGE
+        + region_calls * _SEC_PER_LLM_OCR_PAGE
+    )
+    return {
+        "pages": total_pages,
+        "ocr_pages": local_pages + llm_pages,
+        "local_ocr_pages": local_pages,
+        "llm_ocr_pages": llm_pages,
+        "region_ocr_calls": region_calls,
+        "estimated_seconds": round(seconds, 1),
+    }
+
 
 def _persist_source_file(doc_dir: Path, filename: str, source_path: Path) -> dict[str, Any]:
     source_dir = doc_dir / "source"
@@ -2827,6 +3011,13 @@ async def api_parse_doc(
     tags: str | None = Form(None),  # JSON array string: '["Q3","financial"]'
     metadata: str | None = Form(None),  # JSON object string
     replace: bool = Form(False),
+    # How long the caller can wait. The single source of truth is the caller —
+    # it is the only side that knows its own timeout, so nothing here has to be
+    # kept in sync with it. Omit it to accept however long the parse takes.
+    # Declaring one also moves summarization off this call (it is an LLM
+    # round-trip that cannot be estimated), so the digest arrives shortly after
+    # the response rather than inside it.
+    budget_seconds: float | None = Form(None, gt=0),
 ):
     """Parse uploaded document (PDF/DOCX), return structured result."""
     if _parse_sem.locked():
@@ -2918,6 +3109,58 @@ async def api_parse_doc(
     _allow_running_detached()
 
     try:
+        # Refuse a document this call cannot afford, before it costs anything.
+        # The estimate is cheap and runs before the doc_id is minted, so a
+        # refusal burns no id and leaves no directory. It has to sit inside this
+        # try: its finally is what removes the staged upload, and raising above
+        # it would strand a file of up to MAX_UPLOAD_BYTES in .upload-tmp on
+        # every refusal.
+        #
+        # No budget means no refusal. A caller that did not ask for one is either
+        # a background ingest with time to spare (the REST leg exists to absorb
+        # exactly the documents this would reject) or predates the field; giving
+        # them a default would refuse the very work the background path is for.
+        # The MCP tool, which has a client timeout it cannot see, sends its own.
+        if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
+            # The mode decides whether pages go to the LLM at all, and the profile
+            # can add region OCR on top; both can arrive through the metadata blob
+            # or the environment rather than the form. Resolve them the way the
+            # handler will — and if they cannot be resolved, skip the estimate
+            # rather than estimating a plan we do not know. A mode of None reads
+            # as "not full" downstream and would produce a confident number for
+            # the wrong plan.
+            effective_mode, effective_profile = _effective_parse_plan(
+                parse_mode, metadata, document_profile, field_ocr_config
+            )
+            estimate = (
+                _estimate_parse_seconds(
+                    scratch_path,
+                    suffix,
+                    force_ocr=force_ocr,
+                    ocr_pages_spec=ocr_pages,
+                    parse_mode=effective_mode,
+                    concurrency=concurrency,
+                    profile=effective_profile,
+                )
+                if effective_mode is not None
+                else None
+            )
+            if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
+                raise HTTPException(
+                    422,
+                    {
+                        "error": "parse_budget_exceeded",
+                        "message": (
+                            f"parsing this document is estimated at "
+                            f"{estimate['estimated_seconds']}s, over the "
+                            f"{budget_seconds}s budget this call declared. It was not "
+                            f"started. Ingest it through a path that can wait for it."
+                        ),
+                        **estimate,
+                        "budget_seconds": budget_seconds,
+                    },
+                )
+
         # The early-reject above was a snapshot before the upload started.
         # Re-check now so a burst that crowded in past the snapshot fails fast
         # instead of queueing scratch files against `_parse_sem`.
@@ -3003,16 +3246,14 @@ async def api_parse_doc(
             # Effective parse mode (incl. env fallback) — also drives summary-mode
             # selection, so it must reflect env. A bad *client* parse_mode is
             # already rejected with 422 in the early form validation above.
-            requested_parse_mode = (
-                str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
-                or os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip()
-                or None
-            )
-            field_ocr_profile = (
-                str(document_profile or parsed_metadata.get("document_profile") or "").strip()
-                or str(parsed_metadata.get("field_ocr_profile") or "").strip()
-                or os.environ.get("MANTISFETCH_FIELD_OCR_PROFILE", "").strip()
-                or None
+            # Shared with the cost preflight above — see _resolve_plan_inputs.
+            requested_parse_mode, field_ocr_profile, requested_field_ocr_config = (
+                _resolve_plan_inputs(
+                    parse_mode=parse_mode,
+                    document_profile=document_profile,
+                    field_ocr_config=field_ocr_config,
+                    metadata=parsed_metadata,
+                )
             )
             if field_ocr_profile:
                 canonical_profile = _DOCUMENT_PROFILE_ALIASES.get(field_ocr_profile, field_ocr_profile)
@@ -3020,11 +3261,6 @@ async def api_parse_doc(
                     field_ocr_profile = canonical_profile
                     if parsed_metadata.get("document_profile"):
                         parsed_metadata["document_profile"] = canonical_profile
-            requested_field_ocr_config = (
-                str(field_ocr_config or parsed_metadata.get("field_ocr_config") or "").strip()
-                or os.environ.get("MANTISFETCH_FIELD_OCR_CONFIG", "").strip()
-                or None
-            )
             requested_summary_mode = (
                 str(summary_mode or parsed_metadata.get("summary_mode") or "").strip()
                 or None
@@ -3061,6 +3297,21 @@ async def api_parse_doc(
                 generate_summary=generate_summary,
                 requested_mode=requested_summary_mode,
             )
+            if budget_seconds is not None and summary_mode == "sync":
+                # A declared budget has to mean something. Summarization is an
+                # LLM round-trip whose duration cannot be estimated at all, so
+                # leaving it inside the call would make "estimate <= budget" a
+                # statement about a fraction of the work — the timeout it exists
+                # to prevent would still happen. Hand it to the background writer
+                # instead: extraction returns inside the budget, the digest lands
+                # shortly after (doc_digest reports it as pending until then).
+                logger.info(
+                    "Deferring summary for %s: the call declared a %.0fs budget",
+                    d_id,
+                    budget_seconds,
+                )
+                summary_mode = "defer"
+                parsed_metadata.setdefault("summary_deferred_reason", "budget_declared")
 
             # Parse tags
             parsed_tags: list[str] = []
