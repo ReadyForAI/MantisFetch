@@ -315,13 +315,13 @@ def test_full_mode_is_honoured_from_every_source(
     assert resp.json()["detail"]["llm_ocr_pages"] == 40
 
 
-def test_effective_parse_mode_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_effective_parse_plan_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MANTISFETCH_PDF_PARSE_MODE", "fast")
-    assert dr._effective_parse_mode("full", None) == "full"
-    assert dr._effective_parse_mode(None, '{"parse_mode": "full"}') == "full"
-    assert dr._effective_parse_mode(None, None) == "fast"
+    assert dr._effective_parse_plan("full", None)[0] == "full"
+    assert dr._effective_parse_plan(None, '{"parse_mode": "full"}')[0] == "full"
+    assert dr._effective_parse_plan(None, None)[0] == "fast"
     # a malformed blob must not break the preflight; it is rejected later
-    assert dr._effective_parse_mode(None, "{not json") == "fast"
+    assert dr._effective_parse_plan(None, "{not json")[0] == "fast"
 
 
 def _profile_defaulting_to_full():
@@ -404,7 +404,57 @@ def test_an_unresolvable_profile_does_not_refuse(
         raise RuntimeError("field OCR config not found: 'nope'")
 
     monkeypatch.setattr(dr, "_load_document_profile", broken_loader)
-    assert dr._effective_parse_mode(None, None, "nope", None) is None
+    assert dr._effective_parse_plan(None, None, "nope", None) == (None, None)
+
+    # and through the endpoint: a document that WOULD be refused on a resolvable
+    # plan must not be refused when the plan itself is unknown
+    content = _scanned_pdf(tmp_path / "s.pdf", 120)
+    resp = _post(doc_client, content, "DOC-5140", budget_seconds="30", document_profile="nope")
+    assert resp.status_code != 422 or resp.json()["detail"].get("error") != "parse_budget_exceeded"
+
+
+def test_profile_region_ocr_counts_against_the_budget(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path
+) -> None:
+    """The shipped contract_cn profile adds serial region LLM calls in accurate
+    mode, which the page counts alone do not see.
+
+    Its cover group is pinned to pages 1-2 with no alias gate, so a scanned
+    document under this profile pays two region calls on top of page OCR. A
+    20-page scan sits just under the MCP budget on pages alone and over it once
+    the region work is counted — which is exactly the case that would otherwise
+    slip through and time out.
+    """
+    content = _scanned_pdf(tmp_path / "s.pdf", 20)
+
+    pages_only = dr._estimate_parse_seconds(tmp_path / "s.pdf", ".pdf")
+    assert pages_only["estimated_seconds"] < 45, "premise: pages alone fit the budget"
+
+    resp = _post(
+        doc_client, content, "DOC-5150", budget_seconds="45", document_profile="contract_cn"
+    )
+    assert resp.status_code == 422, "region OCR was not counted against the budget"
+    detail = resp.json()["detail"]
+    assert detail["region_ocr_calls"] == 2
+    assert detail["estimated_seconds"] > 45
+
+
+def test_content_gated_regions_are_reported_not_silently_dropped(tmp_path: Path) -> None:
+    """contract_cn also has an alias-gated group, which fires on pages whose text
+    contains a keyword — unknowable without reading the document.
+
+    Those calls are not counted, so the figure is a floor for such profiles. Say
+    so in the payload rather than presenting a total that quietly excludes them.
+    """
+    from mantisfetch_docreader.profiles import _load_document_profile
+
+    profile = _load_document_profile("contract_cn", None)
+    path = tmp_path / "s.pdf"
+    _scanned_pdf(path, 10)
+
+    estimate = dr._estimate_parse_seconds(path, ".pdf", parse_mode="accurate", profile=profile)
+    assert estimate["region_ocr_calls"] == 2
+    assert estimate["excludes_content_gated_regions"] is True
 
 
 def test_mcp_doc_parse_declares_a_budget() -> None:

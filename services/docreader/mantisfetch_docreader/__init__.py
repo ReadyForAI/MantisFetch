@@ -2159,23 +2159,25 @@ def _resolve_plan_inputs(
     return resolved_mode, resolved_profile, resolved_config
 
 
-def _effective_parse_mode(
+def _effective_parse_plan(
     parse_mode: str | None,
     metadata_raw: str | None,
     document_profile: str | None = None,
     field_ocr_config: str | None = None,
-) -> str | None:
-    """The parse mode this request will really run under, resolvable before the lock.
+) -> tuple[str | None, Any | None]:
+    """The mode and profile this request will really run under, before the lock.
 
     Asking the request alone is not enough: with no explicit mode, the *profile*
     supplies one (``upgrade_policy.default_mode``), and a profile defaulting to
     "full" sends every page to LLM OCR. So this loads the profile and defers to
     the same resolver the parse uses.
 
-    Returns None when the mode cannot be worked out — an unreadable profile or an
-    invalid mode. Both fail the request later with a better message than a cost
-    estimate could give; here they simply mean "no estimate", and no estimate
-    never refuses.
+    Returns ``(None, None)`` when the plan cannot be worked out — an unreadable
+    profile or an invalid mode. The caller must then skip the estimate entirely
+    rather than pass the None along: a mode of None reads as "not full" and would
+    still produce a confident local-OCR estimate for a request whose real plan is
+    unknown. Both failures surface later with a better message than a cost
+    estimate could give.
     """
     try:
         meta = json.loads(metadata_raw) if metadata_raw else {}
@@ -2192,10 +2194,10 @@ def _effective_parse_mode(
     )
     try:
         profile = _load_document_profile(profile_name, config_path)
-        return _resolve_pdf_parse_mode(profile, requested)
+        return _resolve_pdf_parse_mode(profile, requested), profile
     except Exception as exc:
-        logger.info("Parse mode not resolvable for the cost estimate: %s", exc)
-        return None
+        logger.info("Parse plan not resolvable for the cost estimate: %s", exc)
+        return None, None
 
 
 def _estimate_parse_seconds(
@@ -2206,6 +2208,7 @@ def _estimate_parse_seconds(
     ocr_pages_spec: str | None = None,
     parse_mode: str | None = None,
     concurrency: int = 3,
+    profile: Any | None = None,
 ) -> dict[str, Any] | None:
     """Estimate what a synchronous parse of this file will cost, without parsing.
 
@@ -2255,13 +2258,44 @@ def _estimate_parse_seconds(
     except Exception as exc:
         logger.info("Parse cost estimate skipped for %s: %s", path.name, exc)
         return None
+    # A profile can add region OCR on top of the page work: when its mode enables
+    # region_llm and the document needs OCR at all, _apply_field_focused_ocr runs
+    # serially, one LLM call per (group, page) it matches. Groups pinned to a page
+    # scope are countable here; groups gated on an alias appearing in the page
+    # text are not — that depends on content this preflight has not read.
+    region_calls = 0
+    region_unbounded = False
+    if profile is not None and (local_pages or llm_pages):
+        try:
+            if mode in getattr(profile.upgrade_policy, "region_llm_modes", ()) or ():
+                for group in getattr(profile, "groups", ()) or ():
+                    if not getattr(group, "crop", None):
+                        continue
+                    if getattr(group, "page_scope", None):
+                        region_calls += min(len(group.page_scope), total_pages)
+                    elif getattr(group, "aliases", None):
+                        region_unbounded = True
+                    else:
+                        region_calls += total_pages
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info("Region OCR estimate skipped: %s", exc)
+
     batches = -(-llm_pages // max(1, concurrency))  # ceil
-    seconds = local_pages * _SEC_PER_OCR_PAGE + batches * _SEC_PER_LLM_OCR_PAGE
+    seconds = (
+        local_pages * _SEC_PER_OCR_PAGE
+        + batches * _SEC_PER_LLM_OCR_PAGE
+        + region_calls * _SEC_PER_LLM_OCR_PAGE
+    )
     return {
         "pages": total_pages,
         "ocr_pages": local_pages + llm_pages,
         "local_ocr_pages": local_pages,
         "llm_ocr_pages": llm_pages,
+        "region_ocr_calls": region_calls,
+        # Named rather than silently omitted: an alias-gated region group fires
+        # on pages whose text contains a keyword, which cannot be known without
+        # reading the document, so this figure is a floor for such profiles.
+        "excludes_content_gated_regions": region_unbounded,
         "estimated_seconds": round(seconds, 1),
     }
 
@@ -3005,18 +3039,28 @@ async def api_parse_doc(
         # them a default would refuse the very work the background path is for.
         # The MCP tool, which has a client timeout it cannot see, sends its own.
         if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
-            estimate = _estimate_parse_seconds(
-                scratch_path,
-                suffix,
-                force_ocr=force_ocr,
-                ocr_pages_spec=ocr_pages,
-                # The mode decides whether pages go to the LLM at all, and it can
-                # come from the metadata blob or the environment rather than the
-                # form field — resolve it the same way the handler will.
-                parse_mode=_effective_parse_mode(
-                    parse_mode, metadata, document_profile, field_ocr_config
-                ),
-                concurrency=concurrency,
+            # The mode decides whether pages go to the LLM at all, and the profile
+            # can add region OCR on top; both can arrive through the metadata blob
+            # or the environment rather than the form. Resolve them the way the
+            # handler will — and if they cannot be resolved, skip the estimate
+            # rather than estimating a plan we do not know. A mode of None reads
+            # as "not full" downstream and would produce a confident number for
+            # the wrong plan.
+            effective_mode, effective_profile = _effective_parse_plan(
+                parse_mode, metadata, document_profile, field_ocr_config
+            )
+            estimate = (
+                _estimate_parse_seconds(
+                    scratch_path,
+                    suffix,
+                    force_ocr=force_ocr,
+                    ocr_pages_spec=ocr_pages,
+                    parse_mode=effective_mode,
+                    concurrency=concurrency,
+                    profile=effective_profile,
+                )
+                if effective_mode is not None
+                else None
             )
             if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
                 raise HTTPException(
