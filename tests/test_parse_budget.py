@@ -324,6 +324,89 @@ def test_effective_parse_mode_precedence(monkeypatch: pytest.MonkeyPatch) -> Non
     assert dr._effective_parse_mode(None, "{not json") == "fast"
 
 
+def _profile_defaulting_to_full():
+    """A real profile, rebuilt with an upgrade policy that chooses full mode.
+
+    No shipped profile defaults to full, and the dataclasses are frozen, so the
+    only honest way to exercise this path is to rebuild a genuine one.
+    """
+    import dataclasses
+
+    from mantisfetch_docreader.profiles import _load_document_profile
+
+    real = _load_document_profile("contract_cn", None)
+    return dataclasses.replace(
+        real, upgrade_policy=dataclasses.replace(real.upgrade_policy, default_mode="full")
+    )
+
+
+@pytest.mark.parametrize("source", ["form", "metadata", "env"])
+def test_profile_default_mode_full_is_estimated(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, source: str,
+) -> None:
+    """With no explicit mode, the profile supplies one — and it can be full.
+
+    The profile name itself reaches the request three ways, so a preflight that
+    resolved the mode by hand would miss whichever one it forgot. It now loads
+    the profile and asks _resolve_pdf_parse_mode, the same resolver the parse uses.
+    """
+    asked: list[tuple] = []
+
+    def fake_loader(name, config):
+        asked.append((name, config))
+        return _profile_defaulting_to_full()
+
+    monkeypatch.setattr(dr, "_load_document_profile", fake_loader)
+
+    extra: dict[str, str] = {}
+    if source == "form":
+        extra["document_profile"] = "contract_cn"
+    elif source == "metadata":
+        extra["metadata"] = '{"document_profile": "contract_cn"}'
+    else:
+        monkeypatch.setenv("MANTISFETCH_FIELD_OCR_PROFILE", "contract_cn")
+
+    content = _native_pdf(tmp_path / "n.pdf", 40)
+    resp = _post(doc_client, content, f"DOC-512{source[0]}", budget_seconds="10", **extra)
+
+    assert resp.status_code == 422, f"{source}-sourced profile default_mode=full was not estimated"
+    assert resp.json()["detail"]["llm_ocr_pages"] == 40
+    assert ("contract_cn", None) in asked, f"the profile was not consulted: {asked}"
+
+
+def test_field_ocr_config_also_selects_the_profile(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """field_ocr_config picks a profile too, and carries its default mode."""
+    asked: list[tuple] = []
+
+    def fake_loader(name, config):
+        asked.append((name, config))
+        return _profile_defaulting_to_full()
+
+    monkeypatch.setattr(dr, "_load_document_profile", fake_loader)
+    content = _native_pdf(tmp_path / "n.pdf", 40)
+    resp = _post(
+        doc_client, content, "DOC-5130", budget_seconds="10", field_ocr_config="contract_cn"
+    )
+    assert resp.status_code == 422
+    assert (None, "contract_cn") in asked
+
+
+def test_an_unresolvable_profile_does_not_refuse(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No estimate means unknown, and unknown never refuses — the request fails
+    later with a better message than a cost estimate could produce."""
+
+    def broken_loader(name, config):
+        raise RuntimeError("field OCR config not found: 'nope'")
+
+    monkeypatch.setattr(dr, "_load_document_profile", broken_loader)
+    assert dr._effective_parse_mode(None, None, "nope", None) is None
+
+
 def test_mcp_doc_parse_declares_a_budget() -> None:
     """The MCP leg cannot see its client's timeout, so it sends its own."""
     import mantisfetch_mcp as mm

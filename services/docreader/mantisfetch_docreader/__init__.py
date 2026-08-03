@@ -2125,23 +2125,77 @@ _SEC_PER_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_OCR_PAGE", "
 _SEC_PER_LLM_OCR_PAGE = float(os.environ.get("MANTISFETCH_PARSE_SEC_PER_LLM_OCR_PAGE", "6.0"))
 
 
-def _effective_parse_mode(requested: str | None, metadata_raw: str | None) -> str | None:
-    """Resolve the parse mode the way the handler will, before the lock.
+def _resolve_plan_inputs(
+    *,
+    parse_mode: str | None,
+    document_profile: str | None,
+    field_ocr_config: str | None,
+    metadata: dict[str, Any],
+) -> tuple[str | None, str | None, str | None]:
+    """The three request values that decide the OCR plan, resolved in one place.
 
-    The mode is not just the form field: it falls back to the metadata blob and
-    then to the environment, and "full" routes every page to LLM OCR. Reading
-    only the field would estimate a different plan than the one that runs.
+    Each of them can arrive as a form field, inside the metadata blob, or from
+    the environment, and the cost preflight has to see the same values the parse
+    will. Keeping the precedence here rather than writing it out twice is the
+    point: three review rounds on this mechanism each found one more input the
+    preflight had not accounted for, because it was resolving them by hand.
     """
-    if requested and requested.strip():
-        return requested.strip()
-    if metadata_raw:
-        try:
-            meta = json.loads(metadata_raw)
-            if isinstance(meta, dict) and str(meta.get("parse_mode") or "").strip():
-                return str(meta["parse_mode"]).strip()
-        except (json.JSONDecodeError, TypeError):
-            pass  # a malformed blob is rejected later, with a better message
-    return os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip() or None
+    resolved_mode = (
+        str(parse_mode or metadata.get("parse_mode") or "").strip()
+        or os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip()
+        or None
+    )
+    resolved_profile = (
+        str(document_profile or metadata.get("document_profile") or "").strip()
+        or str(metadata.get("field_ocr_profile") or "").strip()
+        or os.environ.get("MANTISFETCH_FIELD_OCR_PROFILE", "").strip()
+        or None
+    )
+    resolved_config = (
+        str(field_ocr_config or metadata.get("field_ocr_config") or "").strip()
+        or os.environ.get("MANTISFETCH_FIELD_OCR_CONFIG", "").strip()
+        or None
+    )
+    return resolved_mode, resolved_profile, resolved_config
+
+
+def _effective_parse_mode(
+    parse_mode: str | None,
+    metadata_raw: str | None,
+    document_profile: str | None = None,
+    field_ocr_config: str | None = None,
+) -> str | None:
+    """The parse mode this request will really run under, resolvable before the lock.
+
+    Asking the request alone is not enough: with no explicit mode, the *profile*
+    supplies one (``upgrade_policy.default_mode``), and a profile defaulting to
+    "full" sends every page to LLM OCR. So this loads the profile and defers to
+    the same resolver the parse uses.
+
+    Returns None when the mode cannot be worked out — an unreadable profile or an
+    invalid mode. Both fail the request later with a better message than a cost
+    estimate could give; here they simply mean "no estimate", and no estimate
+    never refuses.
+    """
+    try:
+        meta = json.loads(metadata_raw) if metadata_raw else {}
+        if not isinstance(meta, dict):
+            meta = {}
+    except (json.JSONDecodeError, TypeError):
+        meta = {}  # a malformed blob is rejected later, with a better message
+
+    requested, profile_name, config_path = _resolve_plan_inputs(
+        parse_mode=parse_mode,
+        document_profile=document_profile,
+        field_ocr_config=field_ocr_config,
+        metadata=meta,
+    )
+    try:
+        profile = _load_document_profile(profile_name, config_path)
+        return _resolve_pdf_parse_mode(profile, requested)
+    except Exception as exc:
+        logger.info("Parse mode not resolvable for the cost estimate: %s", exc)
+        return None
 
 
 def _estimate_parse_seconds(
@@ -2959,7 +3013,9 @@ async def api_parse_doc(
                 # The mode decides whether pages go to the LLM at all, and it can
                 # come from the metadata blob or the environment rather than the
                 # form field — resolve it the same way the handler will.
-                parse_mode=_effective_parse_mode(parse_mode, metadata),
+                parse_mode=_effective_parse_mode(
+                    parse_mode, metadata, document_profile, field_ocr_config
+                ),
                 concurrency=concurrency,
             )
             if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
@@ -3063,16 +3119,14 @@ async def api_parse_doc(
             # Effective parse mode (incl. env fallback) — also drives summary-mode
             # selection, so it must reflect env. A bad *client* parse_mode is
             # already rejected with 422 in the early form validation above.
-            requested_parse_mode = (
-                str(parse_mode or parsed_metadata.get("parse_mode") or "").strip()
-                or os.environ.get("MANTISFETCH_PDF_PARSE_MODE", "").strip()
-                or None
-            )
-            field_ocr_profile = (
-                str(document_profile or parsed_metadata.get("document_profile") or "").strip()
-                or str(parsed_metadata.get("field_ocr_profile") or "").strip()
-                or os.environ.get("MANTISFETCH_FIELD_OCR_PROFILE", "").strip()
-                or None
+            # Shared with the cost preflight above — see _resolve_plan_inputs.
+            requested_parse_mode, field_ocr_profile, requested_field_ocr_config = (
+                _resolve_plan_inputs(
+                    parse_mode=parse_mode,
+                    document_profile=document_profile,
+                    field_ocr_config=field_ocr_config,
+                    metadata=parsed_metadata,
+                )
             )
             if field_ocr_profile:
                 canonical_profile = _DOCUMENT_PROFILE_ALIASES.get(field_ocr_profile, field_ocr_profile)
@@ -3080,11 +3134,6 @@ async def api_parse_doc(
                     field_ocr_profile = canonical_profile
                     if parsed_metadata.get("document_profile"):
                         parsed_metadata["document_profile"] = canonical_profile
-            requested_field_ocr_config = (
-                str(field_ocr_config or parsed_metadata.get("field_ocr_config") or "").strip()
-                or os.environ.get("MANTISFETCH_FIELD_OCR_CONFIG", "").strip()
-                or None
-            )
             requested_summary_mode = (
                 str(summary_mode or parsed_metadata.get("summary_mode") or "").strip()
                 or None
