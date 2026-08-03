@@ -76,8 +76,7 @@ def test_a_later_success_clears_the_marker(doc_client: TestClient, docs_dir: Pat
 def test_failed_replacement_does_not_flag_the_existing_document(
     doc_client: TestClient, docs_dir: Path
 ) -> None:
-    """replace=true keeps the old manifest in place throughout — a failed
-    replacement must leave that document exactly as it was, not marked broken."""
+    """A failed replacement must not report a readable document as broken."""
     assert _post(doc_client, GOOD_HTML, "ok.html", "DOC-4004").status_code == 200
     doc = docs_dir / "General" / "DOC-4004"
     before = (doc / "manifest.json").read_text(encoding="utf-8")
@@ -85,7 +84,57 @@ def test_failed_replacement_does_not_flag_the_existing_document(
     assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4004", replace="true").status_code == 500
 
     assert not (doc / MARKER).exists(), "a live document was flagged as failed"
+    # This particular failure happens before the write, so the document is also
+    # untouched. That is not guaranteed for a failure *during* the write — see
+    # test_replacement_that_fails_mid_write_is_not_flagged.
     assert (doc / "manifest.json").read_text(encoding="utf-8") == before
+
+
+def test_new_document_that_fails_mid_write_is_recorded_not_left_looking_successful(
+    doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write path emits manifest.json before it updates the index.
+
+    A failure in between used to leave a manifest with no index entry and no
+    marker — on disk a success that nothing can find. Deciding by "is there a
+    manifest now?" gets this exactly backwards, so the decision is made from
+    whether the document existed *before* the request.
+    """
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("index write failed")
+
+    monkeypatch.setattr(dr, "_update_doc_index", boom)
+    assert _post(doc_client, GOOD_HTML, "ok.html", "DOC-4007").status_code == 500
+
+    doc = docs_dir / "General" / "DOC-4007"
+    assert (doc / MARKER).exists(), "a mid-write failure left no record"
+    assert json.loads((doc / MARKER).read_text(encoding="utf-8"))["phase"] == "write"
+    assert not (doc / "manifest.json").exists(), "still claims success but is unindexed"
+
+
+def test_replacement_that_fails_mid_write_is_not_flagged(
+    doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same fault: an existing document must not be marked.
+
+    It may still have been partially overwritten — the write path replaces in
+    place and has no rollback. That is a pre-existing property of the write path
+    rather than something this record introduces or can repair, so this test
+    pins only what is in scope: the document is not reported as failed, and no
+    marker is left for a doc_id that has a readable manifest.
+    """
+    assert _post(doc_client, GOOD_HTML, "ok.html", "DOC-4008").status_code == 200
+    doc = docs_dir / "General" / "DOC-4008"
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("index write failed")
+
+    monkeypatch.setattr(dr, "_update_doc_index", boom)
+    assert _post(doc_client, GOOD_HTML, "ok2.html", "DOC-4008", replace="true").status_code == 500
+
+    assert not (doc / MARKER).exists()
+    assert (doc / "manifest.json").exists()
 
 
 def test_the_four_states_stay_distinguishable(doc_client: TestClient, docs_dir: Path) -> None:

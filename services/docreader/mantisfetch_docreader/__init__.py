@@ -2115,7 +2115,9 @@ def _safe_source_filename(filename: str) -> str:
 PARSE_FAILURE_MARKER = ".parse-failed.json"
 
 
-def _record_parse_failure(doc_dir: Path, doc_id: str, phase: str, error: str) -> None:
+def _record_parse_failure(
+    doc_dir: Path, doc_id: str, phase: str, error: str, *, replacing: bool
+) -> None:
     """Leave an explicit record that this doc_id's parse failed.
 
     A failure already left the reserved directory behind, empty — which is
@@ -2126,15 +2128,30 @@ def _record_parse_failure(doc_dir: Path, doc_id: str, phase: str, error: str) ->
     failed" from "still running" and from "never happened", and deleting the
     directory would collapse the first into the last.
 
-    Never written over a document that already exists: with replace=true the
-    previous manifest stays in place for the whole parse, and a failed
-    replacement must leave the old document exactly as it was rather than
-    flagging it as broken.
+    ``replacing`` is the fact as it stood *before* this request wrote anything,
+    taken from the existence check the caller already did under the per-doc lock.
+    Asking "is there a manifest now?" would be a different question with the same
+    shape and the wrong answer: the write path emits manifest.json before it
+    updates the index, so a failure in between leaves a manifest for a document
+    that was never there before — read post-hoc, a brand new document looks like
+    a pre-existing one and gets no record, while on disk it looks like a success
+    that nothing can find.
+
+    A failed replacement is not flagged: it is not that document's fault, and
+    marking it would report a document that is still readable as broken. It is,
+    however, not necessarily intact — see the caller-side note; that is a
+    separate defect in the write path, not something this record can repair.
+
+    For a document that did not exist before, a half-written manifest is removed
+    along with recording the failure. Nothing is lost (there was nothing there),
+    and leaving it would keep claiming success.
     """
     try:
-        if (doc_dir / "manifest.json").exists():
+        if replacing:
             return
         doc_dir.mkdir(parents=True, exist_ok=True)
+        # Not a success: it never reached the index, so nothing can find it.
+        (doc_dir / "manifest.json").unlink(missing_ok=True)
         _write_json(
             doc_dir / PARSE_FAILURE_MARKER,
             {
@@ -3040,10 +3057,10 @@ async def api_parse_doc(
                 shutil.move(str(scratch_path), str(tmp_path))
                 scratch_path = None
             except HTTPException as e:
-                _record_parse_failure(doc_storage_dir, d_id, "save", str(e.detail))
+                _record_parse_failure(doc_storage_dir, d_id, "save", str(e.detail), replacing=will_replace)
                 raise
             except Exception as e:
-                _record_parse_failure(doc_storage_dir, d_id, "save", str(e))
+                _record_parse_failure(doc_storage_dir, d_id, "save", str(e), replacing=will_replace)
                 raise HTTPException(500, t("file_save_failed", err=str(e)))
 
             # Parse
@@ -3153,10 +3170,10 @@ async def api_parse_doc(
                     if STORE_SOURCE_FILES else {}
                 )
             except HTTPException as e:
-                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e.detail))
+                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e.detail), replacing=will_replace)
                 raise
             except Exception as e:
-                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e))
+                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e), replacing=will_replace)
                 raise HTTPException(500, t("parse_failed", err=str(e)))
             finally:
                 # Cleanup temp file
@@ -3231,7 +3248,7 @@ async def api_parse_doc(
                         worker.start()
                         logger.info("Deferred summary scheduled: %s", d_id)
             except Exception as e:
-                _record_parse_failure(doc_storage_dir, d_id, "write", str(e))
+                _record_parse_failure(doc_storage_dir, d_id, "write", str(e), replacing=will_replace)
                 raise HTTPException(500, t("write_failed", err=str(e)))
 
             # This doc_id parsed successfully now, so any marker a previous
