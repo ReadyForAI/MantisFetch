@@ -2111,6 +2111,51 @@ def _safe_source_filename(filename: str) -> str:
     return f"{safe_stem}{suffix}" if suffix else safe_stem
 
 
+#: Marker a failed parse leaves in the directory it had already reserved.
+PARSE_FAILURE_MARKER = ".parse-failed.json"
+
+
+def _record_parse_failure(doc_dir: Path, doc_id: str, phase: str, error: str) -> None:
+    """Leave an explicit record that this doc_id's parse failed.
+
+    A failure already left the reserved directory behind, empty — which is
+    indistinguishable from a directory that is mid-parse, and only
+    distinguishable from "never submitted" by looking for the directory at all.
+    SharedSpecs IRP 20260801 §3.6 rules that the fix is to *record* rather than
+    delete: a caller that timed out and later probes must be able to tell "it
+    failed" from "still running" and from "never happened", and deleting the
+    directory would collapse the first into the last.
+
+    Never written over a document that already exists: with replace=true the
+    previous manifest stays in place for the whole parse, and a failed
+    replacement must leave the old document exactly as it was rather than
+    flagging it as broken.
+    """
+    try:
+        if (doc_dir / "manifest.json").exists():
+            return
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            doc_dir / PARSE_FAILURE_MARKER,
+            {
+                "doc_id": doc_id,
+                "failed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                "phase": phase,
+                "error": error[:2000],
+            },
+        )
+    except Exception as exc:  # pragma: no cover - never mask the original failure
+        logger.warning("Could not record parse failure for %s: %s", doc_id, exc)
+
+
+def _clear_parse_failure(doc_dir: Path) -> None:
+    """Drop a stale failure marker once a parse of the same doc_id succeeds."""
+    try:
+        (doc_dir / PARSE_FAILURE_MARKER).unlink(missing_ok=True)
+    except OSError as exc:  # pragma: no cover - defensive
+        logger.warning("Could not clear parse failure marker in %s: %s", doc_dir, exc)
+
+
 def _persist_source_file(doc_dir: Path, filename: str, source_path: Path) -> dict[str, Any]:
     source_dir = doc_dir / "source"
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -2982,8 +3027,10 @@ async def api_parse_doc(
                 except json.JSONDecodeError:
                     parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
 
+            # Resolved outside the try so the failure recorders below always have
+            # a directory to write into — it is a pure path computation.
+            doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
             try:
-                doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
                 tmp_dir = doc_storage_dir / ".tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 # Sanitize to a basename: the raw multipart filename is
@@ -2992,9 +3039,11 @@ async def api_parse_doc(
                 tmp_path = tmp_dir / _safe_source_filename(filename)
                 shutil.move(str(scratch_path), str(tmp_path))
                 scratch_path = None
-            except HTTPException:
+            except HTTPException as e:
+                _record_parse_failure(doc_storage_dir, d_id, "save", str(e.detail))
                 raise
             except Exception as e:
+                _record_parse_failure(doc_storage_dir, d_id, "save", str(e))
                 raise HTTPException(500, t("file_save_failed", err=str(e)))
 
             # Parse
@@ -3103,9 +3152,11 @@ async def api_parse_doc(
                     )
                     if STORE_SOURCE_FILES else {}
                 )
-            except HTTPException:
+            except HTTPException as e:
+                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e.detail))
                 raise
             except Exception as e:
+                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e))
                 raise HTTPException(500, t("parse_failed", err=str(e)))
             finally:
                 # Cleanup temp file
@@ -3180,7 +3231,12 @@ async def api_parse_doc(
                         worker.start()
                         logger.info("Deferred summary scheduled: %s", d_id)
             except Exception as e:
+                _record_parse_failure(doc_storage_dir, d_id, "write", str(e))
                 raise HTTPException(500, t("write_failed", err=str(e)))
+
+            # This doc_id parsed successfully now, so any marker a previous
+            # attempt left behind is stale and would keep reporting "failed".
+            _clear_parse_failure(doc_storage_dir)
 
             elapsed = round(time.time() - t0, 2)
             return ParseResponse(
