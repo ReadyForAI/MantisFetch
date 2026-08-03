@@ -105,7 +105,8 @@ def test_new_document_that_fails_mid_write_is_recorded_not_left_looking_successf
         raise RuntimeError("index write failed")
 
     monkeypatch.setattr(dr, "_update_doc_index", boom)
-    assert _post(doc_client, GOOD_HTML, "ok.html", "DOC-4007").status_code == 500
+    needle = b"<h1>T</h1><p>Zarquonium bearings, part XQ-4007.</p>"
+    assert _post(doc_client, needle, "ok.html", "DOC-4007").status_code == 500
 
     doc = docs_dir / "General" / "DOC-4007"
     assert (doc / MARKER).exists(), "a mid-write failure left no record"
@@ -115,6 +116,12 @@ def test_new_document_that_fails_mid_write_is_recorded_not_left_looking_successf
     assert [p.name for p in doc.iterdir()] == [MARKER], (
         f"half-built artifacts survived: {sorted(p.name for p in doc.iterdir())}"
     )
+    # Not everything lives in the directory: the writer pushes full text into the
+    # library-wide FTS table before the manifest, so a directory-only cleanup
+    # leaves a searchable document with no entry to delete it through.
+    from mantisfetch_common.doc_index_store import search_fts
+
+    assert search_fts(docs_dir, "Zarquonium") == [], "failed document is still searchable"
 
 
 def test_replacement_that_fails_mid_write_is_not_flagged(

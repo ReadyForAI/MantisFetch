@@ -2116,7 +2116,7 @@ PARSE_FAILURE_MARKER = ".parse-failed.json"
 
 
 def _record_parse_failure(
-    doc_dir: Path, doc_id: str, phase: str, error: str, *, replacing: bool
+    doc_dir: Path, doc_id: str, phase: str, error: str, *, docs_dir: Path, replacing: bool
 ) -> None:
     """Leave an explicit record that this doc_id's parse failed.
 
@@ -2153,6 +2153,12 @@ def _record_parse_failure(
     The page OCR cache is content-addressed (``ocr_p0001.<sha1>.txt``), so a
     later attempt on different bytes would miss rather than read stale text —
     dropping it costs a re-OCR on retry and risks nothing.
+
+    Not everything an attempt produces lives in its directory: the writer pushes
+    full text into the library-wide FTS table before it writes the manifest or
+    the index, so a failure in between leaves a document that is searchable but
+    has no entry anyone could delete it through. Clearing the directory alone
+    would leave that behind, so the row goes too.
     """
     try:
         if replacing:
@@ -2163,6 +2169,15 @@ def _record_parse_failure(
                 shutil.rmtree(child, ignore_errors=True)
             else:
                 child.unlink(missing_ok=True)
+        try:
+            # Removes both the index row and the FTS body. A new document that
+            # failed has no index row — the delete is a no-op there, and the
+            # search text is what actually needs removing.
+            from mantisfetch_common.doc_index_store import delete_document  # noqa: PLC0415
+
+            delete_document(docs_dir, doc_id)
+        except Exception as exc:
+            logger.warning("Could not clear index/FTS rows for failed %s: %s", doc_id, exc)
         _write_json(
             doc_dir / PARSE_FAILURE_MARKER,
             {
@@ -3068,10 +3083,16 @@ async def api_parse_doc(
                 shutil.move(str(scratch_path), str(tmp_path))
                 scratch_path = None
             except HTTPException as e:
-                _record_parse_failure(doc_storage_dir, d_id, "save", str(e.detail), replacing=will_replace)
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "save", str(e.detail),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise
             except Exception as e:
-                _record_parse_failure(doc_storage_dir, d_id, "save", str(e), replacing=will_replace)
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "save", str(e),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise HTTPException(500, t("file_save_failed", err=str(e)))
 
             # Parse
@@ -3181,10 +3202,16 @@ async def api_parse_doc(
                     if STORE_SOURCE_FILES else {}
                 )
             except HTTPException as e:
-                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e.detail), replacing=will_replace)
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "parse", str(e.detail),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise
             except Exception as e:
-                _record_parse_failure(doc_storage_dir, d_id, "parse", str(e), replacing=will_replace)
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "parse", str(e),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise HTTPException(500, t("parse_failed", err=str(e)))
             finally:
                 # Cleanup temp file
@@ -3259,7 +3286,10 @@ async def api_parse_doc(
                         worker.start()
                         logger.info("Deferred summary scheduled: %s", d_id)
             except Exception as e:
-                _record_parse_failure(doc_storage_dir, d_id, "write", str(e), replacing=will_replace)
+                _record_parse_failure(
+                    doc_storage_dir, d_id, "write", str(e),
+                    docs_dir=docs_dir, replacing=will_replace,
+                )
                 raise HTTPException(500, t("write_failed", err=str(e)))
 
             # This doc_id parsed successfully now, so any marker a previous
