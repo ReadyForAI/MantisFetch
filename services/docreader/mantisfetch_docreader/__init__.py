@@ -2260,23 +2260,23 @@ def _estimate_parse_seconds(
         return None
     # A profile can add region OCR on top of the page work: when its mode enables
     # region_llm and the document needs OCR at all, _apply_field_focused_ocr runs
-    # serially, one LLM call per (group, page) it matches. Groups pinned to a page
-    # scope are countable here; groups gated on an alias appearing in the page
-    # text are not — that depends on content this preflight has not read.
+    # serially, one LLM call per (group, page) it matches.
+    #
+    # An alias gate only ever *reduces* how many pages a group matches, so the
+    # page scope — or the whole document, when there is none — is a true upper
+    # bound. Counting the bound rather than what can be proven is the point: this
+    # number decides whether the call is affordable, so work that might happen has
+    # to be inside it. Reporting the shortfall in the response instead would put
+    # the caveat somewhere the comparison never looks.
     region_calls = 0
-    region_unbounded = False
     if profile is not None and (local_pages or llm_pages):
         try:
             if mode in getattr(profile.upgrade_policy, "region_llm_modes", ()) or ():
                 for group in getattr(profile, "groups", ()) or ():
                     if not getattr(group, "crop", None):
                         continue
-                    if getattr(group, "page_scope", None):
-                        region_calls += min(len(group.page_scope), total_pages)
-                    elif getattr(group, "aliases", None):
-                        region_unbounded = True
-                    else:
-                        region_calls += total_pages
+                    scope = getattr(group, "page_scope", None)
+                    region_calls += min(len(scope), total_pages) if scope else total_pages
         except Exception as exc:  # pragma: no cover - defensive
             logger.info("Region OCR estimate skipped: %s", exc)
 
@@ -2292,10 +2292,6 @@ def _estimate_parse_seconds(
         "local_ocr_pages": local_pages,
         "llm_ocr_pages": llm_pages,
         "region_ocr_calls": region_calls,
-        # Named rather than silently omitted: an alias-gated region group fires
-        # on pages whose text contains a keyword, which cannot be known without
-        # reading the document, so this figure is a floor for such profiles.
-        "excludes_content_gated_regions": region_unbounded,
         "estimated_seconds": round(seconds, 1),
     }
 

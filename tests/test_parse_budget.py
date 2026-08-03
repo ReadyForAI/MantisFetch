@@ -435,26 +435,49 @@ def test_profile_region_ocr_counts_against_the_budget(
     )
     assert resp.status_code == 422, "region OCR was not counted against the budget"
     detail = resp.json()["detail"]
-    assert detail["region_ocr_calls"] == 2
+    # 2 from the group pinned to pages 1-2, plus the upper bound for the
+    # alias-gated group, which has no page scope and so could match any page.
+    assert detail["region_ocr_calls"] == 2 + 20
     assert detail["estimated_seconds"] > 45
 
 
-def test_content_gated_regions_are_reported_not_silently_dropped(tmp_path: Path) -> None:
-    """contract_cn also has an alias-gated group, which fires on pages whose text
-    contains a keyword — unknowable without reading the document.
+def test_alias_gated_regions_are_counted_at_their_upper_bound(
+    doc_client: TestClient, docs_dir: Path, tmp_path: Path
+) -> None:
+    """contract_cn also has a group with no page scope, gated on an alias.
 
-    Those calls are not counted, so the figure is a floor for such profiles. Say
-    so in the payload rather than presenting a total that quietly excludes them.
+    Which pages it matches depends on their text, which the preflight has not
+    read — but the gate can only *reduce* the match, so every page is a true
+    upper bound. Counting the bound is what makes the comparison sound: a number
+    that excludes work which might happen would let exactly this document
+    through and time out. Reporting the shortfall in the response instead would
+    put the caveat somewhere the budget check never looks.
     """
+    import fitz
     from mantisfetch_docreader.profiles import _load_document_profile
 
     profile = _load_document_profile("contract_cn", None)
-    path = tmp_path / "s.pdf"
-    _scanned_pdf(path, 10)
+    alias_group = next(g for g in profile.groups if g.crop and not g.page_scope and g.aliases)
+    alias = alias_group.aliases[0]
+
+    # Sparse pages that each carry the alias: OCR'd (under OCR_THRESHOLD) *and*
+    # eligible for the alias-gated region group.
+    path = tmp_path / "alias.pdf"
+    doc = fitz.open()
+    for _ in range(10):
+        doc.new_page().insert_text((72, 72), alias)
+    doc.save(str(path))
+    doc.close()
 
     estimate = dr._estimate_parse_seconds(path, ".pdf", parse_mode="accurate", profile=profile)
-    assert estimate["region_ocr_calls"] == 2
-    assert estimate["excludes_content_gated_regions"] is True
+    assert estimate["region_ocr_calls"] == 12, "2 pinned to pages 1-2 + 10 alias-eligible"
+
+    resp = _post(
+        doc_client, path.read_bytes(), "DOC-5160", budget_seconds="45",
+        document_profile="contract_cn",
+    )
+    assert resp.status_code == 422, "a document whose region work blows the budget was let through"
+    assert resp.json()["detail"]["region_ocr_calls"] == 12
 
 
 def test_mcp_doc_parse_declares_a_budget() -> None:
