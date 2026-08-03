@@ -43,8 +43,20 @@ from .ocr.engines import _ocr_cache_key, _ocr_cache_variant_path, gemini_ocr
 
 logger = logging.getLogger("mantisfetch_docreader")
 
-DOCUMENT_PROFILE_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "document_profiles"
-FIELD_OCR_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "field_profiles"
+# The profiles ship inside the package so they are present however MantisFetch
+# was installed — a repo-root path would resolve to nothing once the package is
+# no longer sitting in the repo.
+_PACKAGED_PROFILE_DIR = Path(__file__).resolve().parent / "config_profiles"
+DOCUMENT_PROFILE_CONFIG_DIR = _PACKAGED_PROFILE_DIR / "document"
+FIELD_OCR_CONFIG_DIR = _PACKAGED_PROFILE_DIR / "field"
+
+# Kept as a search location so a deployment that drops a custom profile into the
+# repo's configs/ — the only place there was before — keeps working, and wins
+# over a packaged profile of the same name.
+_REPO_PROFILE_DIRS = (
+    Path(__file__).resolve().parents[3] / "configs" / "document_profiles",
+    Path(__file__).resolve().parents[3] / "configs" / "field_profiles",
+)
 FIELD_OCR_RENDER_SCALE = float(os.environ.get("MANTISFETCH_FIELD_OCR_RENDER_SCALE", "4.0"))
 _DOCUMENT_PROFILE_ALIASES = {"tender_cn": "bid_cn"}
 
@@ -62,7 +74,7 @@ def _resolve_profile_config_path(requested: str) -> Path | None:
         return None
     if not name.endswith(".json"):
         name = f"{name}.json"
-    for base in (DOCUMENT_PROFILE_CONFIG_DIR, FIELD_OCR_CONFIG_DIR):
+    for base in (*_REPO_PROFILE_DIRS, DOCUMENT_PROFILE_CONFIG_DIR, FIELD_OCR_CONFIG_DIR):
         candidate = (base / name).resolve()
         try:
             candidate.relative_to(base.resolve())

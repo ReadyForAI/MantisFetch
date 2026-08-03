@@ -83,7 +83,7 @@ Key source files:
   (`__init__.py`, `session.py`, `models.py`, `ranking.py`, `vision.py`)
 - `services/docreader/mantisfetch_docreader/` — Document reader package
   (`__init__.py`, `storage.py`, `summaries.py`, `pdf.py`, `word.py`, `ocr/`)
-- `services/mcp/mantisfetch_mcp.py` — MCP server (streamable-HTTP at `/mcp`)
+- `services/mcp/mantisfetch_mcp/` — MCP server (streamable-HTTP at `/mcp`)
 - `mantisfetch_common/` — shared storage/atomic-write/path helpers
 - `providers/` — LLM (Gemini / OpenAI-compatible) and search providers
 - `i18n.py` — Internationalization (zh/en, default en, LANG env switch)
@@ -113,7 +113,7 @@ mantisfetch/
 ├── services/
 │   ├── browser/mantisfetch_browser/            # Browser service package
 │   ├── docreader/mantisfetch_docreader/        # Document reader package (incl. ocr/)
-│   └── mcp/mantisfetch_mcp.py                   # MCP server
+│   └── mcp/mantisfetch_mcp/                     # MCP server
 ├── mantisfetch_common/                         # Shared storage/atomic/path helpers
 ├── providers/                                  # LLM + search providers
 ├── i18n.py                                     # Internationalization

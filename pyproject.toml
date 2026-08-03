@@ -33,9 +33,27 @@ Repository = "https://github.com/ReadyForAI/MantisFetch"
 [tool.setuptools.dynamic]
 version = { attr = "mantisfetch_common.__version__" }
 
+[tool.setuptools]
+# Top-level modules the service packages import by name. Without these an
+# installed wheel raises ModuleNotFoundError on the first import — both service
+# packages do `import i18n`.
+py-modules = ["i18n", "mantisfetch_deliverables", "mantisfetch_server"]
+
+[tool.setuptools.package-data]
+# Files the code opens at runtime, which a wheel would otherwise drop: the
+# Readability bundle the browser injects, the shipped document profiles, and the
+# PaddleOCR worker (launched as a subprocess by path, so it has to be on disk).
+mantisfetch_browser = ["readability.js"]
+mantisfetch_docreader = ["config_profiles/*/*.json", "paddle_ocr_worker.py"]
+
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["mantisfetch*", "services*", "providers*"]
+# The service packages live under services/<name>/, but they are imported as
+# top-level names (`import mantisfetch_docreader`), which is what running from
+# the repo works out via sys.path. Listing each parent as a search root makes an
+# installed wheel expose the same names, instead of burying them under
+# `services.docreader.…` where nothing looks for them.
+where = [".", "services/browser", "services/docreader", "services/mcp"]
+include = ["mantisfetch*", "providers*"]
 
 [tool.ruff]
 target-version = "py311"

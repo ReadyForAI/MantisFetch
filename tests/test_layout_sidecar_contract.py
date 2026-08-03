@@ -120,7 +120,7 @@ def test_ocr_block_rejects_malformed_bbox():
 
 
 def test_paddle_worker_extracts_v2_geometry():
-    worker_path = Path(__file__).parents[1] / "services" / "docreader" / "paddle_ocr_worker.py"
+    worker_path = Path(__file__).parents[1] / "services" / "docreader" / "mantisfetch_docreader" / "paddle_ocr_worker.py"
     spec = importlib.util.spec_from_file_location("paddle_ocr_worker_layout_test", worker_path)
     assert spec is not None and spec.loader is not None
     worker = importlib.util.module_from_spec(spec)
@@ -150,7 +150,7 @@ def test_paddle_worker_extracts_v2_geometry():
 
 
 def test_paddle_worker_extracts_v3_geometry():
-    worker_path = Path(__file__).parents[1] / "services" / "docreader" / "paddle_ocr_worker.py"
+    worker_path = Path(__file__).parents[1] / "services" / "docreader" / "mantisfetch_docreader" / "paddle_ocr_worker.py"
     spec = importlib.util.spec_from_file_location("paddle_ocr_worker_layout_test_v3", worker_path)
     assert spec is not None and spec.loader is not None
     worker = importlib.util.module_from_spec(spec)
@@ -174,7 +174,7 @@ def test_paddle_worker_extracts_v3_geometry():
 
 
 def test_paddle_worker_handles_array_like_v3_geometry_without_truthiness():
-    worker_path = Path(__file__).parents[1] / "services" / "docreader" / "paddle_ocr_worker.py"
+    worker_path = Path(__file__).parents[1] / "services" / "docreader" / "mantisfetch_docreader" / "paddle_ocr_worker.py"
     spec = importlib.util.spec_from_file_location("paddle_ocr_worker_layout_array_test", worker_path)
     assert spec is not None and spec.loader is not None
     worker = importlib.util.module_from_spec(spec)
