@@ -1308,14 +1308,20 @@ _document_writer_locks_guard = threading.Lock()
 
 
 @contextlib.contextmanager
-def _document_writer_lock(doc_dir: Path):
-    """Serialize every rewrite of one document, across threads.
+def _document_writer_lock(docs_dir: Path, doc_id: str):
+    """Serialize everything that rewrites or removes one document, across threads.
 
-    Weak values so a document that is not being written holds nothing; a writer
-    keeps the entry alive for as long as it needs it, which is exactly as long as
-    another writer could collide with it.
+    Keyed by doc_id rather than by product directory: a document is one document
+    whichever content-type directory it currently sits in, and a delete clears
+    every candidate layout at once, so a per-directory key would let a writer and
+    a delete hold different locks for the same document. Scoped to the library so
+    two of them never contend over a shared id.
+
+    Weak values so a document nothing is touching holds nothing; a caller keeps
+    the entry alive for as long as it needs it, which is exactly as long as
+    anything else could collide with it.
     """
-    key = str(doc_dir)
+    key = f"{docs_dir}\\0{doc_id}"
     with _document_writer_locks_guard:
         holder = _document_writer_locks.get(key)
         if holder is None:
@@ -1323,6 +1329,12 @@ def _document_writer_lock(doc_dir: Path):
             _document_writer_locks[key] = holder
     with holder.lock:
         yield
+
+
+def _delete_doc_serialized(docs_dir: Path, doc_id: str) -> bool:
+    """_delete_doc, held against any writer working on the same document."""
+    with _document_writer_lock(docs_dir, doc_id):
+        return _delete_doc(docs_dir, doc_id)
 
 
 def _reversible_rewrite(impl):
@@ -1361,7 +1373,7 @@ def _reversible_rewrite(impl):
         doc_dir = output_dir / _doc_storage_rel_path(
             doc_id, _normalize_content_type(content_type) if content_type else None
         )
-        with _document_writer_lock(doc_dir):
+        with _document_writer_lock(output_dir, doc_id):
             if a["guard_stale_generation"] and _skip_stale_generation(
                 doc_id,
                 doc_dir,
@@ -4452,7 +4464,17 @@ async def delete_document(doc_id: str):
     # only at the end, so a delete holding only _doc_index_lock could rmtree the
     # just-written dir and leave the index pointing at missing artifacts.
     async with _optional_doc_id_lock(doc_id):
-        removed = _delete_doc(_get_docs_dir(), doc_id)
+        docs_dir = _get_docs_dir()
+        # And the writer lock, which that one cannot stand in for: a
+        # deferred-summary write runs in a plain thread that can never take an
+        # asyncio lock. It decides whether to write by looking for the manifest,
+        # so a delete landing between that look and the write is undone — the
+        # document comes back after the caller was told it was gone (#168).
+        # In an executor because the wait is for a summary write to finish, which
+        # is not something to hold the event loop for.
+        removed = await asyncio.get_running_loop().run_in_executor(
+            None, _delete_doc_serialized, docs_dir, doc_id
+        )
     return {"doc_id": doc_id, "deleted": removed}
 
 
