@@ -8,6 +8,7 @@ caller was told the replace had failed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import mantisfetch_common.storage as cs
+from mantisfetch_common.doc_index_store import search_fts
 
 FIRST = b"<h1>Original</h1><p>Zarquonium bearings, part XQ-1.</p>"
 SECOND = b"<h1>Replacement</h1><p>Different content entirely.</p>"
@@ -42,18 +44,12 @@ def _post(client: TestClient, content: bytes, doc_id: str, **extra):
     )
 
 
-def _snapshot(doc_dir: Path, *, skip: tuple[str, ...] = ()) -> dict[str, bytes]:
+def _snapshot(doc_dir: Path) -> dict[str, bytes]:
     return {
-        rel: p.read_bytes()
+        str(p.relative_to(doc_dir)): p.read_bytes()
         for p in sorted(doc_dir.rglob("*"))
-        if p.is_file() and not (rel := str(p.relative_to(doc_dir))).startswith(skip or ("\0",))
+        if p.is_file()
     }
-
-
-#: The uploaded file is stored during the parse, before the writer runs, so it is
-#: already the replacement's by the time a rewrite can be rolled back. Restoring
-#: it belongs to the handler, not here — see the note on #212.
-_NOT_YET_ROLLED_BACK = ("source/",)
 
 
 def test_a_failed_replacement_leaves_the_document_byte_identical(
@@ -61,7 +57,7 @@ def test_a_failed_replacement_leaves_the_document_byte_identical(
 ) -> None:
     assert _post(doc_client, FIRST, "DOC-6001").status_code == 200
     doc = docs_dir / "General" / "DOC-6001"
-    before = _snapshot(doc, skip=_NOT_YET_ROLLED_BACK)
+    before = _snapshot(doc)
     assert "manifest.json" in before and "full.md" in before
 
     def boom(*args, **kwargs):
@@ -70,9 +66,7 @@ def test_a_failed_replacement_leaves_the_document_byte_identical(
     monkeypatch.setattr(dr, "_update_doc_index", boom)
     assert _post(doc_client, SECOND, "DOC-6001", replace="true").status_code == 500
 
-    assert _snapshot(doc, skip=_NOT_YET_ROLLED_BACK) == before, (
-        "the document was left part old and part new"
-    )
+    assert _snapshot(doc) == before, "the document was left part old and part new"
 
 
 def test_a_failed_replacement_does_not_leave_rollback_scaffolding(
@@ -126,13 +120,12 @@ def test_the_index_still_points_at_the_old_document_after_a_failed_replace(
 def test_untouched_artifacts_survive_a_rollback(
     doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """source/ and .cache/ are not regenerated, so a rollback must not disturb them."""
+    """.cache/ holds OCR pages nothing regenerates, so a rollback must leave it."""
     assert _post(doc_client, FIRST, "DOC-6005").status_code == 200
     doc = docs_dir / "General" / "DOC-6005"
     cache = doc / ".cache"
     cache.mkdir(exist_ok=True)
     (cache / "ocr_p0001.abc.txt").write_text("cached page", encoding="utf-8")
-    source_before = _snapshot(doc / "source") if (doc / "source").exists() else {}
 
     monkeypatch.setattr(
         dr, "_update_doc_index", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))
@@ -142,17 +135,14 @@ def test_untouched_artifacts_survive_a_rollback(
     assert (cache / "ocr_p0001.abc.txt").read_text(encoding="utf-8") == "cached page"
 
 
-
-def test_the_stored_source_is_a_known_gap_not_a_silent_one(
+def test_the_stored_source_goes_back_and_still_matches_the_manifest(
     doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The uploaded file is stored during the parse, before any writer runs.
+    """The upload is stored before the writer runs, so it needs restoring too.
 
-    By the time a rewrite can be rolled back it is already the replacement's, so
-    a failed replace leaves the old parsed content beside the new source — and
-    the restored manifest's source sha256 describes the file that is no longer
-    there. Restoring it belongs to the parse handler, which owns that step; this
-    pins the current boundary so it is visible rather than assumed away.
+    Without that the caller is told the replace failed while downloading the
+    source hands back the replacement's file, and the restored manifest's
+    source_sha256 describes bytes that are no longer on disk.
     """
     assert _post(doc_client, FIRST, "DOC-6006").status_code == 200
     doc = docs_dir / "General" / "DOC-6006"
@@ -162,9 +152,78 @@ def test_the_stored_source_is_a_known_gap_not_a_silent_one(
     )
     assert _post(doc_client, SECOND, "DOC-6006", replace="true").status_code == 500
 
-    assert b"Zarquonium" in (doc / "full.md").read_bytes(), "parsed content rolled back"
-    stored = next((doc / "source").iterdir()).read_bytes()
-    assert stored == SECOND, "if this now equals FIRST the gap is closed — widen the guard"
+    stored = next((doc / "source").iterdir())
+    assert stored.read_bytes() == FIRST, "the replacement's source outlived the failed replace"
+    manifest = json.loads((doc / "manifest.json").read_text(encoding="utf-8"))
+    assert (
+        manifest["provenance"]["source_sha256"]
+        == hashlib.sha256(stored.read_bytes()).hexdigest()
+    ), "the restored manifest describes a file that is not there"
+    assert not (doc / dr._SOURCE_ROLLBACK_DIR).exists()
+
+
+def test_a_successful_replacement_keeps_the_new_source_and_drops_the_stash(
+    doc_client: TestClient, docs_dir: Path
+) -> None:
+    """Control for the stash: it must not survive or shadow a working replace."""
+    assert _post(doc_client, FIRST, "DOC-6008").status_code == 200
+    doc = docs_dir / "General" / "DOC-6008"
+
+    assert _post(doc_client, SECOND, "DOC-6008", replace="true").status_code == 200
+
+    assert next((doc / "source").iterdir()).read_bytes() == SECOND
+    assert not (doc / dr._SOURCE_ROLLBACK_DIR).exists()
+
+
+def test_a_failed_replacement_leaves_the_old_text_searchable(
+    doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full-text search lives in a library-wide table, not this directory.
+
+    The writer pushes the replacement's text into it before the manifest lands,
+    so a rollback that stopped at the filesystem would leave the old words on
+    disk and the new ones matching this doc_id.
+    """
+    assert _post(doc_client, FIRST, "DOC-6009").status_code == 200
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-6009"]
+
+    monkeypatch.setattr(
+        dr, "_update_doc_index", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope"))
+    )
+    assert _post(doc_client, SECOND, "DOC-6009", replace="true").status_code == 500
+
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-6009"], "the old text stopped matching"
+    assert search_fts(docs_dir, "Different content entirely") == [], (
+        "the failed replacement's text is still searchable"
+    )
+
+
+def test_a_backup_that_fails_halfway_still_restores_what_it_moved(
+    doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging the rollback can fail too — after it has already moved something.
+
+    A directory moves aside, then the copy after it hits a full disk. Without
+    recovery around the staging itself the guard gives up before the rewrite even
+    starts, having already taken the document apart.
+    """
+    assert _post(doc_client, FIRST, "DOC-6010").status_code == 200
+    doc = docs_dir / "General" / "DOC-6010"
+    before = _snapshot(doc)
+
+    real_copy2 = dr.shutil.copy2
+
+    def fail_on_manifest(src, dst, *a, **k):
+        if Path(src).name == "manifest.json":
+            raise OSError(28, "No space left on device")
+        return real_copy2(src, dst, *a, **k)
+
+    monkeypatch.setattr(dr.shutil, "copy2", fail_on_manifest)
+    assert _post(doc_client, SECOND, "DOC-6010", replace="true").status_code == 500
+
+    assert (doc / "sections").is_dir(), "a moved-aside directory was never put back"
+    assert _snapshot(doc) == before
+    assert not (doc / dr._ROLLBACK_DIR).exists(), "rollback holdings were left behind"
 
 
 def test_the_sync_summary_writer_rolls_back_too(
@@ -179,7 +238,7 @@ def test_the_sync_summary_writer_rolls_back_too(
 
     assert _post(doc_client, FIRST, "DOC-6007", summary_mode="sync").status_code == 200
     doc = docs_dir / "General" / "DOC-6007"
-    before = _snapshot(doc, skip=_NOT_YET_ROLLED_BACK)
+    before = _snapshot(doc)
     assert b"digest" in (doc / "digest.md").read_bytes()
 
     monkeypatch.setattr(
@@ -189,4 +248,4 @@ def test_the_sync_summary_writer_rolls_back_too(
         doc_client, SECOND, "DOC-6007", summary_mode="sync", replace="true"
     ).status_code == 500
 
-    assert _snapshot(doc, skip=_NOT_YET_ROLLED_BACK) == before
+    assert _snapshot(doc) == before

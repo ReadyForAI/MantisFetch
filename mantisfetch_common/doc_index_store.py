@@ -175,6 +175,18 @@ def upsert_fts(docs_dir: Path, doc_id: str, body: str) -> None:
     conn.commit()
 
 
+def read_fts(docs_dir: Path, doc_id: str) -> str | None:
+    """Return the indexed body for a document, or None when it has no row.
+
+    Lets a writer that is about to replace a document's searchable text keep the
+    text it is replacing, so a failed rewrite can put back exactly what was
+    indexed instead of re-deriving it.
+    """
+    conn = _connect(docs_dir)
+    row = conn.execute("SELECT body FROM docs_fts WHERE doc_id = ?", (doc_id,)).fetchone()
+    return None if row is None else str(row["body"])
+
+
 def search_fts(docs_dir: Path, query: str, *, limit: int = 50) -> list[str]:
     """Return doc_ids matching the FTS query (empty if FTS unavailable / no hits)."""
     ensure_migrated_from_json(docs_dir)
