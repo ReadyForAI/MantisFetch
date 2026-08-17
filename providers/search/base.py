@@ -107,6 +107,9 @@ class SearchProvider(ABC):
     """Unified async interface for web-search backends."""
 
     name: str
+    # One line on what this backend indexes and whether it honours ``lang``, shown
+    # next to the provider name when describing the addressable set to an agent.
+    trait: str = ""
 
     @property
     def throttle_keys(self) -> tuple[str, ...]:
