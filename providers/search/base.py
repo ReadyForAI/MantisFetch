@@ -107,6 +107,10 @@ class SearchProvider(ABC):
     """Unified async interface for web-search backends."""
 
     name: str
+    # One-line, agent-facing note on what this backend indexes and whether it
+    # honours ``lang``. Surfaced verbatim in the MCP search tool descriptions so an
+    # agent can route a query to the right backend without an out-of-band file.
+    trait: str = ""
 
     @property
     def throttle_keys(self) -> tuple[str, ...]:

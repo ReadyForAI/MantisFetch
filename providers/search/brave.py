@@ -26,6 +26,7 @@ class BraveProvider(SearchProvider):
     """Query the Brave Web Search API (``GET /web/search``, X-Subscription-Token)."""
 
     name = "brave"
+    trait = "global — honours lang"
 
     def __init__(self) -> None:
         self._api_key = (

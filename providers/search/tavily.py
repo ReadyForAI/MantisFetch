@@ -32,6 +32,7 @@ class TavilyProvider(SearchProvider):
     """Query the Tavily search API (``POST /search``, Bearer auth)."""
 
     name = "tavily"
+    trait = "global — English-oriented; ignores lang"
 
     def __init__(self) -> None:
         self._api_key = (

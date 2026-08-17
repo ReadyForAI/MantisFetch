@@ -53,6 +53,7 @@ __all__ = [
     "UnknownSearchProviderError",
     "create_search_provider",
     "available_providers",
+    "provider_trait",
     "search_enabled",
     "default_max_results",
     "clamp_max_results",
@@ -156,6 +157,14 @@ def available_providers() -> list[str]:
         if name and name in reg and name not in names:
             names.append(name)
     return names
+
+
+def provider_trait(name: str) -> str:
+    """The one-line, agent-facing trait of a registry provider (``""`` when the name
+    is unknown). Lets a caller describe the addressable set without hard-coding a
+    second copy of what each backend is — the fact lives on the provider class."""
+    cls = _registry().get(name.strip().lower())
+    return cls.trait if cls is not None else ""
 
 
 def create_search_provider(name: str | None = None) -> SearchProvider | None:

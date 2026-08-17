@@ -109,3 +109,44 @@ def test_search_tools_conditional_registration(monkeypatch) -> None:
         # leave the shared module in its default (disabled) state for other tests
         monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDER", raising=False)
         importlib.reload(mm)
+
+
+# ── provider routing hint (self-contained in the MCP surface) ───────────────────
+def _description(tool_name: str) -> str:
+    return next(t for t in asyncio.run(mm.mcp.list_tools()) if t.name == tool_name).description
+
+
+def test_routing_hint_names_addressable_providers(monkeypatch) -> None:
+    """Both search tools name THIS deployment's addressable backends and what each
+    one indexes, so an agent can split CN/EN queries from the MCP surface alone —
+    no out-of-band skill file."""
+    try:
+        monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "bocha")
+        monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDERS", "bocha,tavily")
+        importlib.reload(mm)
+        for tool_name in ("web_search", "web_search_capture"):
+            desc = _description(tool_name)
+            assert "bocha" in desc and "tavily" in desc
+            # the trait, not just the bare name — that is what says which is CN
+            assert "博查" in desc
+            # the routing rule itself: two calls, result sets kept apart
+            assert "TWICE" in desc and "does not merge" in desc
+    finally:
+        monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDERS", raising=False)
+        importlib.reload(mm)
+
+
+def test_routing_hint_single_provider_drops_the_split_rule(monkeypatch) -> None:
+    """One addressable backend = no routing decision to make: still named (so a
+    `provider` arg can be filled in), but without the call-twice rule."""
+    try:
+        monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "searxng")
+        monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDERS", raising=False)
+        importlib.reload(mm)
+        desc = _description("web_search")
+        assert "searxng" in desc
+        assert "TWICE" not in desc
+    finally:
+        monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDER", raising=False)
+        importlib.reload(mm)

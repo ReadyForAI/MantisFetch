@@ -33,6 +33,7 @@ class BochaProvider(SearchProvider):
     """Query the Bocha web-search API (``POST /v1/web-search``, Bearer auth)."""
 
     name = "bocha"
+    trait = "China (博查) — Chinese-language index; ignores lang, always CN"
 
     def __init__(self) -> None:
         self._api_key = (

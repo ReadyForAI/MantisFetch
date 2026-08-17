@@ -31,6 +31,7 @@ class SearxngProvider(SearchProvider):
     """Query a SearXNG instance via its JSON API (``/search?format=json``)."""
 
     name = "searxng"
+    trait = "self-hosted metasearch — honours lang; engine mix is operator-configured"
 
     def __init__(self) -> None:
         url = os.environ.get("MANTISFETCH_SEARXNG_URL", "").strip()
