@@ -129,8 +129,25 @@ def test_routing_hint_names_addressable_providers(monkeypatch) -> None:
             assert "bocha" in desc and "tavily" in desc
             # the trait, not just the bare name — that is what says which is CN
             assert "博查" in desc
-            # the routing rule itself: two calls, result sets kept apart
-            assert "TWICE" in desc and "does not merge" in desc
+            # the routing rule itself: one call each, result sets kept apart
+            assert "one call each" in desc and "does not merge" in desc
+    finally:
+        monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDERS", raising=False)
+        importlib.reload(mm)
+
+
+def test_routing_hint_does_not_presume_a_regional_split(monkeypatch) -> None:
+    """An addressable set of two global backends is a failover pair, not a CN/EN
+    deployment: the rule must stay language-neutral and leave the routing to the
+    traits, or the agent goes looking for a CN backend that is not there."""
+    try:
+        monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "tavily")
+        monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDERS", "tavily,brave")
+        importlib.reload(mm)
+        desc = _description("web_search")
+        assert "tavily" in desc and "brave" in desc
+        assert "Chinese" not in desc and "CN" not in desc
     finally:
         monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDER", raising=False)
         monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDERS", raising=False)
@@ -139,14 +156,14 @@ def test_routing_hint_names_addressable_providers(monkeypatch) -> None:
 
 def test_routing_hint_single_provider_drops_the_split_rule(monkeypatch) -> None:
     """One addressable backend = no routing decision to make: still named (so a
-    `provider` arg can be filled in), but without the call-twice rule."""
+    `provider` arg can be filled in), but without the pick-one-per-call rule."""
     try:
         monkeypatch.setenv("MANTISFETCH_SEARCH_PROVIDER", "searxng")
         monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDERS", raising=False)
         importlib.reload(mm)
         desc = _description("web_search")
         assert "searxng" in desc
-        assert "TWICE" not in desc
+        assert "does not merge" not in desc
     finally:
         monkeypatch.delenv("MANTISFETCH_SEARCH_PROVIDER", raising=False)
         importlib.reload(mm)

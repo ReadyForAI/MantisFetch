@@ -390,12 +390,12 @@ def _search_tools_enabled() -> bool:
 
 
 def _provider_routing_hint() -> str:
-    """`provider` guidance built from THIS deployment's addressable set.
+    """The `provider` paragraph for the search tool descriptions, naming this
+    deployment's addressable backends and their traits.
 
-    Read at import — the same moment ``_search_tools_enabled()`` gates registration,
-    and an env change needs a process restart either way, so it cannot go stale.
-    Naming the backends and their traits inline is what lets an agent route a query
-    per call from the MCP surface alone, with no out-of-band skill file.
+    Built at import because tool registration already is (``_search_tools_enabled()``).
+    The routing advice stays language-neutral: the addressable set may be a dual-region
+    split, a failover pair, or two global indexes — only the traits say which is which.
     """
     names = available_providers()
     if not names:
@@ -407,10 +407,9 @@ def _provider_routing_hint() -> str:
     )
     if len(names) > 1:
         hint += (
-            " Route by query language: send a Chinese query to a CN backend and an "
-            'English one to a global backend, with `lang` set to match ("zh"/"en") on '
-            "the backends that honour it. That means calling this tool TWICE and keeping "
-            "the two result sets apart — MantisFetch does not merge them."
+            " With several listed, pick the one whose index fits the query and set `lang` "
+            "to the query's language on the backends that honour it. Covering more than one "
+            "means one call each, keeping the result sets apart — MantisFetch does not merge them."
         )
     return hint
 
