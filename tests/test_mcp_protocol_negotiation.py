@@ -1,13 +1,10 @@
 """Pin the two MCP protocol eras the /mcp surface serves.
 
-SharedSpecs notice `mcp-20260728-adaptation` (SS #502): agentd now negotiates
-2026-07-28 on both faces, and the repos that talk to it re-verify their own SDK
-once. MantisFetch is on `mcp>=2,<3` (2.0.0), whose streamable-HTTP transport
-routes by the `MCP-Protocol-Version` header: a request without one (or with a
-handshake-era value) takes the legacy `initialize` path, anything newer takes the
-single-exchange 2026-07-28 path. Both eras are load-bearing here — NodalOS keeps
-serving old clients, and a bump inside the `<3` range must not silently drop
-either one — so pin them.
+The SDK routes by the `MCP-Protocol-Version` header, not by the `initialize`
+body: absent or handshake-era → the legacy path; anything newer → the
+single-exchange 2026-07-28 handler. Both are load-bearing (old clients keep
+using the handshake), and nothing else in the suite covers either, so a bump
+inside `mcp>=2,<3` could drop one silently.
 """
 
 import importlib
@@ -157,14 +154,16 @@ def test_modern_era_dispatches_a_tool_call(client):
             "params": {"name": "doc_search", "arguments": {"q": "pin-test"}, "_meta": _META},
         },
     )
-    assert resp.status_code == 200
-    assert "result" in _body(resp)
+    result = _body(resp)["result"]
+    # `result` alone is not success — a tool that raised also returns one, with
+    # isError set. The dispatch only counts if the tool body ran clean.
+    assert result.get("isError") is not True
 
 
-def test_installed_sdk_offers_the_2026_07_28_protocol():
-    """The SDK generation itself — `mcp>=2,<3` must keep providing 2026-07-28, which
-    is the version agentd negotiates. A bump inside the range that dropped it would
-    silently strand the modern face."""
-    from mcp.types import LATEST_PROTOCOL_VERSION
+def test_installed_sdk_still_offers_the_2026_07_28_protocol():
+    """`mcp>=2,<3` must keep providing 2026-07-28 — the version agentd negotiates.
+    Membership, not latest-ness: a later revision may be added on top, and that is
+    fine; dropping this one is what would strand the modern face."""
+    from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
-    assert LATEST_PROTOCOL_VERSION == _MODERN
+    assert _MODERN in MODERN_PROTOCOL_VERSIONS
