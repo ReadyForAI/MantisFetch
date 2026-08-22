@@ -19,7 +19,11 @@ openai>=1.0.0
 
 # Image processing
 Pillow>=10.4.0
-numpy>=1.26.0,<2.0.0
+# No upper bound: markitdown's dependency closure needs numpy>=2.1.0 on Python
+# 3.13, so a <2 cap makes the requirements unsatisfiable there. paddlepaddle
+# 3.2.2 (the x86_64 OCR baseline) is fine on numpy 2.x; the ARM OCR baseline
+# keeps its own <2 cap for the PaddleOCR 2.x stack it is pinned to.
+numpy>=1.26.0
 
 # HTTP client
 httpx>=0.27.0
