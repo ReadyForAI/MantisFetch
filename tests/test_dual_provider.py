@@ -115,6 +115,26 @@ def test_gemini_prefix_routes_to_gemini_provider(monkeypatch):
     assert p._api_key_override == "gk"
 
 
+def test_gemini_slot_model_beats_the_by_kind_ocr_model(monkeypatch):
+    """By-role config wins over by-kind: a stray MANTISFETCH_OCR_MODEL must not
+    displace the model a gemini OCR slot was built with (the openai-compat branch
+    has always passed ocr_model=model for the same reason)."""
+    monkeypatch.setenv("MANTISFETCH_OCR_MODEL", "gemini-2.5-flash-lite")
+    _dual(
+        monkeypatch,
+        MANTISFETCH_LLM_DEFAULT="gemini",
+        MANTISFETCH_LLM_DEFAULT_API_KEY="gk",
+        MANTISFETCH_SUM_MODEL_DEFAULT="gemini/gemini-2.5-flash",
+        MANTISFETCH_OCR_MODEL_DEFAULT="gemini/gemini-2.5-pro",
+    )
+    from providers.gemini import GeminiProvider
+
+    p = unwrap_provider(get_provider("ocr"))
+    assert isinstance(p, GeminiProvider)
+    assert p._model == "gemini-2.5-pro"
+    assert p._ocr_model == "gemini-2.5-pro"
+
+
 def test_gemini_slot_base_url_warns_and_is_ignored(monkeypatch, caplog):
     """A6: gemini slots ignore base_url; warn so a proxy config is not silent."""
     import logging
