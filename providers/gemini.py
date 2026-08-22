@@ -3,6 +3,8 @@
 Reads credentials from the environment:
   GEMINI_API_KEY  or  GOOGLE_API_KEY  — required
   MANTISFETCH_LLM_MODEL                 — optional; defaults to gemini-2.5-flash
+  MANTISFETCH_OCR_MODEL                 — optional; OCR-only override, defaults to
+                                          MANTISFETCH_LLM_MODEL
 """
 
 import io
@@ -58,15 +60,21 @@ def _gemini_empty_text_error(response: object, what: str) -> ProviderError:
 class GeminiProvider(LLMProvider):
     """LLM provider backed by the Google Gemini API (google-genai SDK).
 
-    With no arguments it reads the legacy env vars (``MANTISFETCH_LLM_MODEL`` +
-    ``GEMINI_API_KEY``/``GOOGLE_API_KEY``). The dual-slot factory passes
-    ``model``/``api_key`` explicitly for a ``gemini/<model>`` slot.
+    With no arguments it reads the legacy env vars (``MANTISFETCH_LLM_MODEL``,
+    ``MANTISFETCH_OCR_MODEL`` + ``GEMINI_API_KEY``/``GOOGLE_API_KEY``). The
+    dual-slot factory passes ``model``/``ocr_model``/``api_key`` explicitly for a
+    ``gemini/<model>`` slot, which is what keeps a per-role model ahead of the
+    by-kind env vars.
     """
 
-    def __init__(self, *, api_key=_UNSET, model=_UNSET) -> None:
+    def __init__(self, *, api_key=_UNSET, model=_UNSET, ocr_model=_UNSET) -> None:
         self._client = None
         model_in = os.environ.get("MANTISFETCH_LLM_MODEL") if model is _UNSET else model
         self._model = model_in or _DEFAULT_MODEL
+        ocr_model_in = (
+            os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
+        )
+        self._ocr_model = ocr_model_in or self._model
         self._api_key_override = None if api_key is _UNSET else (api_key or None)
         self._ocr_proofread = os.environ.get("MANTISFETCH_OCR_PROOFREAD", "true").strip().lower() not in {
             "0",
@@ -143,7 +151,7 @@ class GeminiProvider(LLMProvider):
         for attempt in range(max_retries + 1):
             try:
                 response = self._client.models.generate_content(
-                    model=self._model,
+                    model=self._ocr_model,
                     contents=[_OCR_TRANSCRIBE_PROMPT, img],
                     config={"http_options": {"timeout": 60_000}},
                 )
@@ -160,7 +168,7 @@ class GeminiProvider(LLMProvider):
                 ):
                     try:
                         review = self._client.models.generate_content(
-                            model=self._model,
+                            model=self._ocr_model,
                             contents=[_OCR_PROOFREAD_PROMPT.format(draft=result), img],
                             config={"http_options": {"timeout": 60_000}},
                         )

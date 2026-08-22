@@ -187,7 +187,9 @@ def _build_slot_provider(spec: str, slots: dict[str, _Slot]) -> LLMProvider:
                 slot.label,
                 slot.base_url,
             )
-        return GeminiProvider(api_key=slot.api_key, model=model)
+        # ocr_model=model mirrors the openai-compat branch below: a per-role slot
+        # must not have its model displaced by a stray by-kind MANTISFETCH_OCR_MODEL.
+        return GeminiProvider(api_key=slot.api_key, model=model, ocr_model=model)
 
     from providers.openai_compat import OpenAICompatProvider
 

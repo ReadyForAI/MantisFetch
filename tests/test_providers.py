@@ -146,6 +146,61 @@ class TestGeminiProvider:
         assert result == "extracted text"
         assert mock_client.models.generate_content.call_count == 2
 
+    def test_gemini_ocr_model_defaults_to_the_text_model(self, monkeypatch):
+        """With no MANTISFETCH_OCR_MODEL, OCR runs on the by-kind text model."""
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
+        monkeypatch.delenv("MANTISFETCH_OCR_MODEL", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "gemini-2.5-pro")
+
+        p = unwrap_provider(get_provider())
+        assert p._model == "gemini-2.5-pro"
+        assert p._ocr_model == "gemini-2.5-pro"
+
+    def test_gemini_ocr_uses_the_by_kind_ocr_model(self, monkeypatch):
+        """MANTISFETCH_OCR_MODEL is by-KIND config: it applies to every provider,
+        Gemini included. Summaries stay on MANTISFETCH_LLM_MODEL; OCR moves."""
+        monkeypatch.delenv("MANTISFETCH_LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+        monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "gemini-2.5-flash")
+        monkeypatch.setenv("MANTISFETCH_OCR_MODEL", "gemini-2.5-pro")
+
+        mock_response = MagicMock()
+        mock_response.text = "extracted text"
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = mock_response
+        mock_genai = MagicMock()
+        mock_genai.Client.return_value = mock_client
+
+        import base64
+
+        image_bytes = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+            "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+        )
+        mock_pil_module = MagicMock()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "google": MagicMock(genai=mock_genai),
+                "google.genai": mock_genai,
+                "PIL": mock_pil_module,
+                "PIL.Image": mock_pil_module.Image,
+            },
+        ):
+            p = get_provider()
+            p.summarize("some text", "summarise this")
+            summary_model = mock_client.models.generate_content.call_args.kwargs["model"]
+            p.ocr(image_bytes, page_num=1)
+            ocr_models = {
+                c.kwargs["model"] for c in mock_client.models.generate_content.call_args_list[1:]
+            }
+
+        assert summary_model == "gemini-2.5-flash"
+        # transcribe + proofread both go to the OCR model
+        assert ocr_models == {"gemini-2.5-pro"}
+
 
 # ── AC-3: OpenAI-compat provider ──────────────────────────────────────────────
 
