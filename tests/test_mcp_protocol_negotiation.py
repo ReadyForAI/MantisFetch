@@ -167,3 +167,63 @@ def test_installed_sdk_still_offers_the_2026_07_28_protocol():
     from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
     assert _MODERN in MODERN_PROTOCOL_VERSIONS
+
+
+def test_modern_era_declares_its_tool_list_immediately_stale(client):
+    """SEP-2549 freshness hints on the 2026-07-28 face. `CacheableResult` defaults
+    to `ttl_ms=0` / `cache_scope="private"` and MantisFetch passes no
+    `cache_hints`, so the wire says "immediately stale, do not share across
+    authorization contexts" — a default speaking for the server. Pinned because
+    that declaration is what conformant clients act on, and a bump inside
+    `mcp>=2,<3` could change it without touching a line here. Whether the value
+    should stay 0 is docked to the 20260723 distribution IRP; this only pins what
+    is currently declared."""
+    resp = client.post(
+        "/mcp",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _MODERN,
+            "mcp-method": "tools/list",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": _META}},
+    )
+    result = _body(resp)["result"]
+    assert result["ttlMs"] == 0
+    assert result["cacheScope"] == "private"
+
+
+def test_legacy_era_omits_the_cache_hints_entirely(client):
+    """The other half of the same fact: emission is version-gated, not
+    unconditional. The per-version surface sieves `ttlMs`/`cacheScope` off a
+    handshake-era result, so one endpoint answers the same `tools/list` with the
+    hints on one face and without them on the other. A client keying off these
+    must tell absent (upstream too old to say) apart from 0 (upstream saying
+    "stale now")."""
+    client.post(
+        "/mcp",
+        headers={"Accept": "application/json, text/event-stream"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _LATEST_HANDSHAKE,
+                "capabilities": {},
+                "clientInfo": {"name": "pin-test", "version": "0"},
+            },
+        },
+    )
+    resp = client.post(
+        "/mcp",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _LATEST_HANDSHAKE,
+        },
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+    result = _body(resp)["result"]
+    # A listing that actually happened — otherwise "key absent" would pass on an
+    # error result too.
+    assert result["tools"]
+    assert "ttlMs" not in result
+    assert "cacheScope" not in result
