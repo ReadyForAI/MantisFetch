@@ -54,3 +54,34 @@ jobs:
 
       - name: Real-Chromium evaluate smoke
         run: pytest tests/test_browser_evaluate_smoke.py -v --tb=short
+
+  # ── 汇总门 ──────────────────────────────────────────────────────────
+  # ⚠️ job 名**就是** required check 名。ReadyForAI 组织级 ruleset 统一只认 `ci`
+  # 这一个名字（各仓真实 job 名互不相同，无法写进一张全局名单）。改名 = 本仓 PR 全卡住。
+  #
+  # ⚠️ `if: always()` **不能省**。没有它，任一上游 job 失败时本 job 会被 **skip**，
+  # 而 **skipped 的必需检查在 ruleset 里算「通过」** —— 门会静默失效、全绿放行。
+  # 这是这个模式最经典的坑，别删。
+  #
+  # 判据：上游只允许 success / skipped（被 `paths` 或 `if` 跳过属正常）；
+  # failure / cancelled 一律红。
+  ci:
+    needs: [lint-and-test, browser-smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 汇总上游 job 结果
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          r = {k: v["result"] for k, v in json.loads(os.environ["NEEDS"]).items()}
+          bad = [k for k, v in r.items() if v not in ("success", "skipped")]
+          for k, v in sorted(r.items()):
+              print(f"{k}: {v}")
+          if bad:
+              print(f"::error::上游未通过: {', '.join(bad)}")
+              sys.exit(1)
+          PY
