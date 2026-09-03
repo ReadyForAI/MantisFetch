@@ -33,11 +33,15 @@ def _persist(docs_dir: Path, summary_mode: str, doc_id: str = "WEB-001") -> Path
     return docs_dir / "General" / doc_id
 
 
-def test_off_mode_writes_no_summary(tmp_path: Path) -> None:
+def test_off_mode_writes_no_llm_summary_but_does_write_a_local_brief(tmp_path: Path) -> None:
+    """off mode spends no tokens, so there is no summary status to report — but
+    brief.md exists regardless, built locally at persist time. Without it the L2
+    tier was missing entirely on the default path and doc_brief 404'd."""
     doc_dir = _persist(tmp_path, "off")
     manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert "summary" not in manifest.get("parse_metadata", {})
-    assert not (doc_dir / "brief.md").exists()
+    assert (doc_dir / "brief.md").exists()
+    assert manifest["paths"]["brief"] == "brief.md"
 
 
 def test_defer_persist_marks_pending(tmp_path: Path) -> None:
@@ -167,7 +171,12 @@ def test_defer_summary_failure_marks_failed(tmp_path: Path, monkeypatch) -> None
 
     manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["parse_metadata"]["summary"]["status"] == "failed"
-    assert not (doc_dir / "brief.md").exists()  # keep the snippet digest, no half-written brief
+    # A failed LLM summary must not leave a half-written brief behind. brief.md
+    # is now always present (built locally at persist time), so the guard is
+    # that it still holds the local one rather than partial LLM output.
+    brief = (doc_dir / "brief.md").read_text(encoding="utf-8")
+    assert "Intro" in brief
+    assert "boom" not in brief
 
 
 def test_defer_summary_skips_when_doc_deleted(tmp_path: Path, monkeypatch) -> None:

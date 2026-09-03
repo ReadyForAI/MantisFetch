@@ -52,6 +52,7 @@ from providers.search.base import (
 # read the startup-mutated vision.YOLO_ENABLED / vision.READABILITY_* state live;
 # the functions are re-exported for bare calls.
 from . import extract
+from . import security as security
 from . import vision as vision
 from .models import (
     CAPTURE_PERSIST_BUDGET as CAPTURE_PERSIST_BUDGET,
@@ -1776,22 +1777,80 @@ def _next_web_doc_id(docs_dir: Path) -> str:
         return doc_id
 
 
+# Share of the digest the outline may take. The rest holds the title and the
+# opening snippet, so the outline can never crowd them out.
+_DIGEST_OUTLINE_BUDGET = 0.75
+_DIGEST_OUTLINE_TITLE_CHARS = 60
+
+
 def _build_web_digest(
-    title: str | None, sections: list[dict[str, Any]], max_chars: int = 600
+    title: str | None, sections: list[dict[str, Any]], max_chars: int = 1400
 ) -> str:
-    """Build a short digest from page title and section headings/snippets."""
+    """Build the digest: page title, a sid outline, then an opening snippet.
+
+    The outline is what makes the first hop answer "what is on this page and
+    what can I read next" on its own. Before it, the digest was section snippets
+    only and an agent had to spend a doc_sections round-trip to learn the sids —
+    which is a second call plus whatever preamble the connector adds.
+
+    It goes inside the digest rather than into a field of its own because the
+    digest is already wrapped at the injection boundary, already capped, and
+    already returned. Section titles are page text; a separate structured field
+    would need its own marker per entry, and at ~180 characters a marker that
+    costs more than the round-trip it saves.
+
+    Tables are listed too. They were skipped entirely, so a page whose substance
+    was a table looked empty from the digest alone.
+    """
     parts: list[str] = []
     if title:
         parts.append(f"# {title}")
+
+    # Entries are added while they fit, rather than to a fixed count: a fixed
+    # count and a character cap disagree on a deep heading tree, and the hard cut
+    # that follows would slice an entry in half.
+    outline: list[str] = []
+    used = 0
+    budget = int(max_chars * _DIGEST_OUTLINE_BUDGET)
+    for i, sec in enumerate(sections):
+        sid = sec.get("sid") or ""
+        h = _smart_truncate(sec.get("h") or "", _DIGEST_OUTLINE_TITLE_CHARS)
+        if sec.get("type") == "table":
+            rows = (sec.get("table_meta") or {}).get("rows")
+            detail = f"table, {rows} rows" if rows else "table"
+        else:
+            detail = f"text, {len(sec.get('t') or '')} chars"
+        line = f"- {sid} ({detail}) {h}".rstrip()
+        # Leave room for the "N more" line so the outline never ends mid-entry.
+        if used + len(line) + 24 > budget:
+            outline.append(f"- ... {len(sections) - i} more")
+            break
+        outline.append(line)
+        used += len(line) + 1
+    if outline:
+        parts.append("## Outline\n" + "\n".join(outline))
+
     for sec in sections:
         if sec.get("type") == "table":
             continue
-        h = sec.get("h") or ""
-        snippet = (sec.get("t") or "")[:120]
-        parts.append(f"## {h}\n{snippet}" if h else snippet)
-        if sum(len(p) for p in parts) >= max_chars:
+        snippet = (sec.get("t") or "")[:200].strip()
+        if snippet:
+            parts.append(snippet)
             break
-    return "\n\n".join(parts)[:max_chars]
+
+    digest = "\n\n".join(parts)
+    if len(digest) <= max_chars:
+        return digest
+    # Drop whole lines rather than slicing one in half: a truncated outline entry
+    # is a sid the caller cannot use, and it would hide the "... N more" marker.
+    kept: list[str] = []
+    used = 0
+    for line in digest.split("\n"):
+        if used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
 
 
 def _safe_heading(h: str | None, max_len: int = 40) -> str:
@@ -1936,6 +1995,45 @@ def _build_web_table_sidecar(
     return out
 
 
+def _build_web_brief(
+    title: str | None,
+    url: str,
+    text_sections: list[dict[str, Any]],
+    table_sections: list[dict[str, Any]],
+    max_chars: int = 6000,
+) -> str:
+    """Build the L2 brief locally, without spending a token.
+
+    doc_brief 404'd for every capture unless summary_mode="defer" had paid an
+    LLM to write one, so the middle tier of a three-tier protocol simply did not
+    exist on the default path: an agent went from a ~200 token digest straight
+    to reading sections.
+
+    This is the cheap version of the same thing — every heading, the first two
+    sentences under it, and each table's shape. An LLM brief still overwrites it
+    when one is requested; see _defer_web_summary.
+    """
+    parts = [f"# {title or url}"]
+    for sec in text_sections:
+        h = (sec.get("h") or "").strip()
+        body = (sec.get("t") or "").strip()
+        if not body:
+            continue
+        sentences = re.split(r"(?<=[.!?。！？])\s+", body)
+        opening = " ".join(sentences[:2]).strip() or body[:240]
+        parts.append(f"## {h}\n{_smart_truncate(opening, 300)}" if h else _smart_truncate(opening, 300))
+        if sum(len(x) for x in parts) >= max_chars:
+            break
+    for tbl in table_sections:
+        meta = tbl.get("table_meta") or {}
+        shape = f"{meta.get('rows', '?')} rows x {meta.get('cols', '?')} cols"
+        caption = meta.get("caption") or meta.get("heading") or (tbl.get("h") or "")
+        parts.append(f"## {_smart_truncate(str(caption), 80)}\n[{shape}]")
+        if sum(len(x) for x in parts) >= max_chars:
+            break
+    return "\n\n".join(parts)[:max_chars] + "\n"
+
+
 def _build_web_full_text(
     title: str | None,
     url: str,
@@ -2021,6 +2119,13 @@ def _persist_web_capture(
             _build_web_full_text(title, url, text_sections, table_sections),
         )
 
+        # brief.md — the L2 tier, built locally so it exists without spending a
+        # token. A deferred LLM summary overwrites it when one is requested.
+        _write_text_atomic(
+            staging_dir / "brief.md",
+            _build_web_brief(title, url, text_sections, table_sections),
+        )
+
         # tables/ (markdown + structured JSON) and the tables.json sidecar
         table_entries: list[dict[str, Any]] = []
         if table_sections:
@@ -2056,6 +2161,7 @@ def _persist_web_capture(
             "metadata": dict(metadata) if metadata else {},
             "paths": {
                 "digest": "digest.md",
+                "brief": "brief.md",
                 "full": "full.md",
                 "sections_dir": "sections/",
                 **(
@@ -2762,7 +2868,8 @@ async def goto(req: GotoRequest) -> GotoResponse:
                 req.url, wait_until=req.wait_until, timeout=req.timeout_ms
             )
         except Exception as e:
-            raise HTTPException(502, f"goto failed: {e}")
+            hint = await asyncio.to_thread(security.blocked_target_hint, req.url)
+            raise HTTPException(502, f"goto failed: {hint or e}")
         # WebMCP: new page needs tool re-discovery
         sess.webmcp_tools = None
         sess.webmcp_available = False
@@ -3113,7 +3220,10 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                         req.url, wait_until="domcontentloaded", timeout=req.timeout_ms
                     )
                 except Exception as e:
-                    raise HTTPException(502, f"capture goto failed: {e}")
+                    # The guard aborts with "addressunreachable", which reads as
+                    # the network being down. Say which it was.
+                    hint = await asyncio.to_thread(security.blocked_target_hint, req.url)
+                    raise HTTPException(502, f"capture goto failed: {hint or e}")
 
                 # An error page is a successful navigation as far as Playwright is
                 # concerned, so without this a 404 becomes a library document whose
