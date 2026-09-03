@@ -749,9 +749,16 @@ def _get_converter():
 # The formats MarkItDown reads as text rather than as a container. For these it
 # has to decide an encoding, and with no hint it asks charset-normalizer to
 # guess from the bytes.
-_TEXT_FAMILY_SUFFIXES = frozenset(
-    {".txt", ".text", ".json", ".jsonl", ".csv", ".html", ".htm", ".xml", ".md"}
+#
+# Derived by subtraction rather than listed, so a format added to
+# SUPPORTED_FORMATS is covered by default. Getting that wrong in this direction
+# is the cheaper mistake: a container that slipped in here wastes a read and
+# declares nothing (its bytes will not decode as UTF-8), while a text format
+# left out silently goes back to being guessed at.
+_CONTAINER_SUFFIXES = frozenset(
+    {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"}
 )
+_TEXT_FAMILY_SUFFIXES = SUPPORTED_EXTENSIONS - _CONTAINER_SUFFIXES
 
 
 def _utf8_charset_hint(filepath: Path) -> str | None:

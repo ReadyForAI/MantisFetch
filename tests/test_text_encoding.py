@@ -127,3 +127,14 @@ def test_a_file_larger_than_one_chunk_is_fully_validated(tmp_path: Path) -> None
 
     tail_broken = filler.encode() + b"\xff\xfe\xff"
     assert dr._utf8_charset_hint(_write(tmp_path, "broken.txt", tail_broken)) is None
+
+
+def test_every_supported_text_format_is_covered(tmp_path: Path) -> None:
+    """The list is derived from SUPPORTED_FORMATS by subtracting containers, so
+    a format added there is sniffed without anyone remembering to. Pin the two
+    sides against each other rather than the derivation itself."""
+    import mantisfetch_docreader as dr
+
+    assert dr._TEXT_FAMILY_SUFFIXES | dr._CONTAINER_SUFFIXES == dr.SUPPORTED_EXTENSIONS
+    assert not dr._TEXT_FAMILY_SUFFIXES & dr._CONTAINER_SUFFIXES
+    assert {".txt", ".json", ".csv", ".html", ".xml"} <= dr._TEXT_FAMILY_SUFFIXES
