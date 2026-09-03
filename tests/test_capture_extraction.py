@@ -457,7 +457,7 @@ def test_an_empty_state_container_is_dropped_without_a_density_check() -> None:
     assert "Real README prose" in body
 
 
-@pytest.mark.parametrize("name", ["blankslate", "empty-state", "emptystate", "skeleton"])
+@pytest.mark.parametrize("name", ["blankslate", "empty-state", "emptystate"])
 def test_every_empty_state_name_is_recognised(name: str) -> None:
     html = (
         f'<body><article><p>Real prose that is long enough to survive.</p>'
@@ -469,13 +469,16 @@ def test_every_empty_state_name_is_recognised(name: str) -> None:
     assert "Real prose" in body
 
 
-def test_placeholder_is_not_an_empty_state_name() -> None:
-    """It appears on real content containers too, so it needs corroboration it
-    cannot get here — left out rather than guessed at."""
+@pytest.mark.parametrize("name", ["placeholder", "skeleton", "skeleton-wrapper"])
+def test_ambiguous_names_are_not_empty_states(name: str) -> None:
+    """Removing without corroboration is only safe for words that mean one
+    thing. A loading skeleton carries almost no text and the block-length floor
+    already drops it; an anatomy article may legitimately name a container
+    either word, and there is no density check here to catch the mistake."""
     html = (
-        '<body><article><div class="placeholder">'
+        f'<body><article><div class="{name}">'
         "<p>Genuine article text that happens to live in a container someone "
-        "named placeholder, which is not the same as a declared empty state.</p>"
+        f"named {name}, which is not the same as a declared empty state.</p>"
         "</div></article></body>"
     )
     body = " ".join(b["text"] for b in html_to_blocks(html))

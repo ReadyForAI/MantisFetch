@@ -4124,6 +4124,7 @@ async def library_search_text(
             # 500 with no partial results and no indication of which document
             # caused it. The doc_id is logged so the next person has somewhere
             # to look.
+            hits_before = len(results)
             try:
 
                 if scope in {"all", "full"}:
@@ -4260,9 +4261,14 @@ async def library_search_text(
                                 )
                             )
             except Exception as exc:  # noqa: BLE001 - one document, not the query
-                skipped += 1
+                # Only a document that contributed nothing counts as skipped. A
+                # full.md hit already appended before the section scan threw is
+                # still in the results, and reporting it as skipped would tell
+                # the caller to distrust an answer they did get.
+                if len(results) == hits_before:
+                    skipped += 1
                 logger.warning(
-                    "search_text skipping %s: %s: %s",
+                    "search_text degraded on %s: %s: %s",
                     current_doc_id, type(exc).__name__, exc,
                 )
 

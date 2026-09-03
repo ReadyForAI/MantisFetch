@@ -131,8 +131,14 @@ _PRUNE_MIN_TEXT = 40
 # above these are removed without a density check, because the thing they hold
 # is prose — GitHub's blankslate reads "Uh oh! There was an error while loading",
 # which scores as content by every density measure and is not content by any
-# other. "placeholder" is deliberately absent: it appears on real containers too.
-_EMPTY_STATE_RE = re.compile(r"\b(?:blankslate|empty-?state|skeleton)\b", re.I)
+# other.
+#
+# Kept deliberately short, because removing without corroboration is only safe
+# for words that mean one thing. "placeholder" and "skeleton" are both out:
+# a loading skeleton carries almost no text and the 40-character floor below
+# already drops it, while an article about anatomy may legitimately name a
+# container either word.
+_EMPTY_STATE_RE = re.compile(r"\b(?:blankslate|empty-?state)\b", re.I)
 
 
 def _node_names(node: Any) -> str:

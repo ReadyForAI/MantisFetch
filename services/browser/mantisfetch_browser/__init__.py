@@ -401,7 +401,7 @@ DISTILL_SIMPLE_JS = r"""
     const tableEls = root.querySelectorAll("table");
     for (const tbl of tableEls) {
       if (!visible(tbl)) continue;
-      if (isNavigationTable(tbl)) continue;
+      if (isNonDataTable(tbl)) continue;
       const capEl = tbl.querySelector("caption");
       const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
       let heading = caption;
@@ -554,7 +554,7 @@ _DATA_TABLE_GATE_JS = r"""
   //                 Every real table measured is at 0.00, the taxobox 0.10.
   //                 This is what reaches the innermost slices, which nest
   //                 nothing themselves.
-  function isNavigationTable(tbl) {
+  function isNonDataTable(tbl) {
     // Scaffolding: emitting both an outer table and its inner ones duplicates
     // the content, and the outer already carries the inner cells' text.
     if (tbl.querySelector("table")) return true;
@@ -592,7 +592,7 @@ EXTRACT_TABLES_JS = r"""
   const tableEls = document.querySelectorAll("table");
   for (const tbl of tableEls) {
     if (!visible(tbl)) continue;
-    if (isNavigationTable(tbl)) continue;
+    if (isNonDataTable(tbl)) continue;
     const capEl = tbl.querySelector("caption");
     const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
     let heading = caption;
