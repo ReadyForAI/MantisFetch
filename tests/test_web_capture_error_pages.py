@@ -19,12 +19,16 @@ import pytest
 from starlette.testclient import TestClient
 
 
-def _distill_result(url: str = "https://example.com") -> dict:
+def _distill_result(url: str = "https://example.com", sections: list | None = None) -> dict:
     return {
         "url": url,
         "title": "Example",
         "content_hash": "sha256:abc",
-        "sections": [{"sid": "s1", "h": "H", "t": "body text", "type": "text"}],
+        "sections": (
+            [{"sid": "s1", "h": "H", "t": "body text", "type": "text"}]
+            if sections is None
+            else sections
+        ),
         "actions": [],
         "meta": {},
     }
@@ -39,13 +43,14 @@ def _goto_mock(status: int | None, url: str = "https://example.com") -> AsyncMoc
     return AsyncMock(return_value=response)
 
 
-def _capture(client: TestClient, docs_dir: Path, goto: AsyncMock):
+def _capture(client: TestClient, docs_dir: Path, goto: AsyncMock, sections: list | None = None):
     """Run POST /web/capture with the browser mocked and the given goto."""
     import mantisfetch_browser as lb
 
+    distilled = _distill_result(sections=sections)
     with (
         patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
-        patch("mantisfetch_browser._distill", new=AsyncMock(return_value=_distill_result())),
+        patch("mantisfetch_browser._distill", new=AsyncMock(return_value=distilled)),
         patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
     ):
         mock_page = AsyncMock()
@@ -314,3 +319,74 @@ def test_successful_injection_still_uses_readability() -> None:
 
     assert out["meta"]["mode"] == "readability"
     assert "fallback_reason" not in out["meta"]["readability"]
+
+
+# ── a 200 that yields nothing is also not a document ─────────────────────────────
+# A v1.7.2 retest force-refreshed https://news.ycombinator.com/ and got a doc_id
+# for a capture with 0 sections, 0 tables and an all-but-blank digest. The page
+# answered 200, so the 4xx branch above never saw it, and everything downstream
+# happily stored the nothing it was handed.
+#
+# Measured on the live front page (34,539 bytes): zero h1/h2/h3/p/li/blockquote/
+# pre, against 4 tables, 98 tr, 159 td. In-process extraction reads exactly the
+# first list, so a page laid out entirely in tables yields no text blocks at all
+# — true of every table-layout site, and true since the extraction rewrite, not
+# something this release changed. What is fixed here is storing the result.
+
+
+def _empty_sections(kind: str) -> list:
+    if kind == "none":
+        return []
+    if kind == "blank":
+        return [{"sid": "s1", "h": "Hacker News", "t": "", "type": "text"}]
+    return [{"sid": "s1", "h": "Hacker News", "t": "   \n\t ", "type": "text"}]
+
+
+@pytest.mark.parametrize("kind", ["none", "blank", "whitespace"])
+def test_a_page_that_yields_no_content_is_refused_and_not_stored(
+    client: TestClient, kind: str
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        resp = _capture(client, docs_dir, _goto_mock(200), sections=_empty_sections(kind))
+
+        assert resp.status_code == 422
+        assert not (docs_dir / "General").exists()
+        assert not (docs_dir / "doc-index.json").exists()
+
+
+def test_the_empty_capture_detail_is_not_the_dead_url_one(client: TestClient) -> None:
+    """Two different 422s reach the caller from this endpoint. One means the URL
+    is dead, the other that the page had nothing to read. Telling them apart must
+    not require the server log."""
+    with tempfile.TemporaryDirectory() as tmp:
+        empty = _capture(client, Path(tmp), _goto_mock(200), sections=[]).json()["detail"]
+    with tempfile.TemporaryDirectory() as tmp:
+        dead = _capture(client, Path(tmp), _goto_mock(404)).json()["detail"]
+
+    assert "no extractable content" in empty
+    assert "HTTP 200" in empty and "0 text sections" in empty and "0 tables" in empty
+    assert "no extractable content" not in dead
+
+
+def test_a_table_only_page_is_still_a_document(client: TestClient) -> None:
+    """The refusal reads section text, and a table's markdown lives in the same
+    `t` as prose does. A page whose entire content is one table must therefore
+    still capture — this is the half of the rule that has no page in the retests
+    to catch it going wrong."""
+    table = [
+        {
+            "sid": "t1",
+            "h": "GDP by country",
+            "t": "| Country | GDP |\n| --- | --- |\n| Tuvalu | 65 |",
+            "type": "table",
+        }
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        resp = _capture(client, docs_dir, _goto_mock(200), sections=table)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["table_count"] == 1
+        assert (docs_dir / "General" / body["doc_id"] / "manifest.json").exists()
