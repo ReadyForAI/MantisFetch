@@ -123,3 +123,52 @@ def _validate_url(url: str) -> None:
 def _url_allowed(url: str) -> bool:
     """Full anti-SSRF check incl. DNS resolution; returns True if allowed."""
     return _url_violation(url, resolve=True) is None
+
+
+# RFC 2544 benchmarking range. Fake-ip proxies hand it out for every domain they
+# resolve, so seeing it here means the host is behind one rather than that the
+# caller asked for a benchmark address.
+_FAKE_IP_RANGE = ipaddress.ip_network("198.18.0.0/15")
+
+
+def blocked_target_hint(url: str) -> str | None:
+    """Why a navigation to ``url`` was refused by the guard, if it was.
+
+    The route guard aborts with "addressunreachable", which Chromium surfaces as
+    ``net::ERR_ADDRESS_UNREACHABLE`` — indistinguishable from the network being
+    down. On a host behind a fake-ip proxy (Clash / Mihomo / sing-box in TUN
+    mode) every domain resolves into 198.18.0.0/15, which is reserved and
+    correctly refused, so /web appears to fail with a network error on every
+    single page. That cost a full debugging session to identify.
+
+    Returns None when the address looks fine and the failure was something else.
+    Resolves once, on the failure path only.
+    """
+    try:
+        hostname = urlparse(url).hostname
+    except ValueError:
+        return None
+    if not hostname:
+        return None
+    ips: list[ipaddress._BaseAddress] = []
+    try:
+        for info in socket.getaddrinfo(hostname, None):
+            try:
+                ips.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                continue
+    except OSError:
+        return None
+    bad = [ip for ip in ips if _ip_disallowed(ip)]
+    if not bad or len(bad) != len(ips):
+        return None
+    msg = f"blocked by SSRF policy: {hostname} resolves to {bad[0]}, not a public address"
+    # Only volunteer the proxy explanation when the address looks like a fake-ip
+    # mapping. For a host that genuinely names a private target, saying "a proxy
+    # did this" would send the reader down the wrong path.
+    if any(ip.version == 4 and ip in _FAKE_IP_RANGE for ip in bad):
+        msg += (
+            ". That range is what a fake-ip proxy (Clash/Mihomo/sing-box in TUN "
+            "mode) maps every domain into, which makes /web unusable host-wide"
+        )
+    return msg
