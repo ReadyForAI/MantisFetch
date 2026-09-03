@@ -149,7 +149,30 @@ def parse_csv(filepath: Path) -> ParsedDocument:
 
 #: MarkItDown marks each slide it emits. The count is the deck's, not an
 #: estimate from how much text the slides happened to contain.
-_SLIDE_MARKER_RE = re.compile(r"^<!--\s*Slide number:\s*\d+\s*-->", re.MULTILINE)
+_SLIDE_MARKER_RE = re.compile(r"^<!--\s*Slide number:\s*\d+\s*-->[ \t]*\n?", re.MULTILINE)
+
+
+def _slide_pages(markdown_text: str) -> list[PageContent]:
+    """One page per slide, or empty for a format that has no slides.
+
+    The markers are structure, not content: left in the text, the first one
+    became a 24-character opening section holding nothing but the comment. They
+    are consumed here instead — the boundary they mark is kept as the page
+    split, and the comment itself does not reach the document.
+
+    Anything before the first marker (MarkItDown's title heading) belongs to
+    slide 1; there is no slide 0 to put it on.
+    """
+    marks = list(_SLIDE_MARKER_RE.finditer(markdown_text))
+    if not marks:
+        return []
+    pages: list[PageContent] = []
+    for i, mark in enumerate(marks):
+        head = markdown_text[: mark.start()] if i == 0 else ""
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(markdown_text)
+        body = (head + markdown_text[mark.end() : end]).strip()
+        pages.append(PageContent(page_num=i + 1, text=body))
+    return pages
 
 
 def parse_generic(
@@ -165,31 +188,42 @@ def parse_generic(
     logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
 
     # A deck knows how many slides it has. Dividing the markdown by 3000 does
-    # not: a 2-slide deck reported total_pages 1, and page citations all read
-    # p.1-1 however long the deck ran.
-    slide_count = len(_SLIDE_MARKER_RE.findall(markdown_text))
-    est_pages = slide_count or max(1, len(markdown_text) // 3000)
+    # not: a 2-slide deck reported total_pages 1, and — because everything was
+    # one PageContent — every section cited p.1-1 however long the deck ran.
+    # Splitting on the markers fixes both halves; a format with no slides keeps
+    # the length estimate on a single page, as before.
+    pages = _slide_pages(markdown_text)
+    if not pages:
+        pages = [PageContent(page_num=1, text=markdown_text)]
+        total_pages = max(1, len(markdown_text) // 3000)
+    else:
+        total_pages = len(pages)
 
     # The tables were being counted and then dropped. `_count_markdown_tables`
     # found the one in an HTML page, the response reported table_count 0, and
     # no sidecar was written — because the count never became content and the
     # sidecar writer reads PageContent.tables, which stayed empty. DOCX, XLSX
-    # and CSV all populate it; this is the path that did not.
-    table_blocks = _extract_markdown_table_blocks(markdown_text) if extract_tables else []
-    pages = [PageContent(page_num=1, text=markdown_text, tables=table_blocks)]
+    # and CSV all populate it; this is the path that did not. Extracting per
+    # page also attributes each table to the slide it is on.
+    if extract_tables:
+        for page in pages:
+            page.tables = _extract_markdown_table_blocks(page.text)
+    table_count = sum(len(page.tables) for page in pages)
+
     sections = _split_sections(pages, section_policy=profile.section_policy if profile else None)
     for sec in sections:
         sec.sid = _section_sid(sec.title, sec.text)
 
-    table_count = len(table_blocks)
-
-    logger.info(f"Parse complete: {len(sections)} sections, ~{est_pages} pages")
+    logger.info(f"Parse complete: {len(sections)} sections, {total_pages} pages")
     return ParsedDocument(
         filename=filepath.name,
         file_type=file_type,
-        total_pages=est_pages,
+        total_pages=total_pages,
         pages=pages,
         sections=sections,
         table_count=table_count,
+        # Otherwise the writer walks the table pipeline for a caller who asked
+        # for none. Same result, but the document should record what was asked.
+        extract_tables=extract_tables,
         metadata={"document_profile": profile.name if profile else None},
     )

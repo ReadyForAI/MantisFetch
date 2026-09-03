@@ -127,3 +127,82 @@ def test_a_short_document_is_still_one_page(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(dr, "_convert_to_markdown", lambda _p: "short")
     assert _parse_generic(tmp_path, "page.html", b"x").total_pages == 1
+
+
+# ── the other half of the citation: one page per slide ───────────────────────────
+def test_each_slide_is_its_own_page(tmp_path: Path, monkeypatch) -> None:
+    """total_pages alone was half a fix. Sections take their page_range from the
+    pages they span, so with one PageContent every citation stayed p.1-1
+    whatever total_pages said."""
+    import mantisfetch_docreader as dr
+
+    monkeypatch.setattr(dr, "_convert_to_markdown", lambda _p: TWO_SLIDES)
+    parsed = _parse_generic(tmp_path, "deck.pptx", b"x")
+
+    assert [p.page_num for p in parsed.pages] == [1, 2]
+    assert "First slide body." in parsed.pages[0].text
+    assert "Second slide body." in parsed.pages[1].text
+    assert "First slide body." not in parsed.pages[1].text
+
+
+def test_a_section_on_the_last_slide_is_not_cited_as_page_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import mantisfetch_docreader as dr
+
+    text = "# Deck\n" + "".join(
+        f"\n<!-- Slide number: {i} -->\n## Slide {i}\nBody of slide {i}.\n"
+        for i in range(1, 5)
+    )
+    monkeypatch.setattr(dr, "_convert_to_markdown", lambda _p: text)
+    parsed = _parse_generic(tmp_path, "deck.pptx", b"x")
+
+    ranges = {s.title: s.page_range for s in parsed.sections}
+    assert ranges, "the deck produced no sections"
+    assert set(ranges.values()) != {"p.1-1"}, f"every section still cites page 1: {ranges}"
+
+
+def test_the_slide_marker_does_not_become_content(tmp_path: Path, monkeypatch) -> None:
+    """Left in the text, the first marker became an opening section 24
+    characters long holding nothing but the HTML comment."""
+    import mantisfetch_docreader as dr
+
+    monkeypatch.setattr(dr, "_convert_to_markdown", lambda _p: TWO_SLIDES)
+    parsed = _parse_generic(tmp_path, "deck.pptx", b"x")
+
+    assert "Slide number:" not in "".join(p.text for p in parsed.pages)
+    assert "Slide number:" not in "".join(s.text for s in parsed.sections)
+
+
+def test_the_title_above_the_first_marker_is_kept(tmp_path: Path, monkeypatch) -> None:
+    """MarkItDown emits the deck title before slide 1's marker. There is no
+    slide 0 to put it on, so it must not be dropped with the marker."""
+    import mantisfetch_docreader as dr
+
+    monkeypatch.setattr(dr, "_convert_to_markdown", lambda _p: TWO_SLIDES)
+    parsed = _parse_generic(tmp_path, "deck.pptx", b"x")
+
+    assert "Deck" in parsed.pages[0].text
+
+
+def test_a_table_is_attributed_to_its_own_slide(tmp_path: Path, monkeypatch) -> None:
+    import mantisfetch_docreader as dr
+
+    text = (
+        "# Deck\n\n<!-- Slide number: 1 -->\nNo table here.\n\n"
+        "<!-- Slide number: 2 -->\n| Metric | Value |\n| --- | --- |\n| throughput | 4.4 |\n"
+    )
+    monkeypatch.setattr(dr, "_convert_to_markdown", lambda _p: text)
+    parsed = _parse_generic(tmp_path, "deck.pptx", b"x")
+
+    assert [len(p.tables) for p in parsed.pages] == [0, 1]
+    assert parsed.table_count == 1
+
+
+def test_extract_tables_false_is_recorded_on_the_document(tmp_path: Path) -> None:
+    """The writer reads this to decide whether to walk the table pipeline at
+    all. Leaving it True while handing over no tables works by accident."""
+    parsed = _parse_generic(tmp_path, "probe.html", HTML_WITH_TABLE, extract_tables=False)
+    assert parsed.extract_tables is False
+
+    assert _parse_generic(tmp_path, "probe.html", HTML_WITH_TABLE).extract_tables is True
