@@ -788,6 +788,19 @@ a soft error page can be told apart from an article without reading the body.
 `http_status` is null when the navigation reported no response, e.g. a
 same-document navigation.
 
+**What gets stored is the page, not a preview of it.** Capture extracts in-process
+from the rendered DOM rather than running Readability inside the page, so the
+document's `h1`/`h2`/`h3` tree survives and becomes section titles you can read by
+`sid`. It also persists under a storage budget rather than the display budget used
+for distill responses: section text is not clipped, and a large table is stored
+whole. The first hop stays cheap — `/web/capture` still returns only the digest
+plus counts — but `doc_section` and `doc_table` now return real content instead of
+a 1,800-character excerpt.
+
+Consequence worth knowing: because the stored body changed, `content_hash` changed
+with it. The first capture of a previously-captured URL after upgrading mints a new
+`doc_id` instead of reusing the old one; it settles from the second capture on.
+
 Response example:
 
 ```json
