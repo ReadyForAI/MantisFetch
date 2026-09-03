@@ -450,3 +450,82 @@ def test_skipped_is_zero_on_a_healthy_library(
     body = client.get("/doc/library/search_text", params={"q": TABLE_ONLY_TOKEN}).json()
     assert body["skipped"] == 0
     assert body["total"] >= 1
+
+
+# ── null section titles ─────────────────────────────────────────────────────────
+# A v1.7.1 retest supplied the log line the per-document guard was added to
+# produce:
+#
+#   search_text degraded on WEB-003: AttributeError: 'NoneType' object has no
+#   attribute 'lower'
+#
+# The cause is dict.get(key, default) returning the *stored* None when the key is
+# present and null, rather than the default. Capture wrote "title": null for any
+# section without a heading, and search_text then called .lower() on it — one
+# such document turned a whole-library search into a 500 for every other.
+def _seed_manifest_with_null_title(docs_dir: Path, doc_id: str, body: str) -> None:
+    """A capture as written before the fix: a section whose title is null."""
+    doc = docs_dir / "General" / doc_id
+    (doc / "sections").mkdir(parents=True, exist_ok=True)
+    (doc / "sections" / "01-s_x-section.md").write_text(body, encoding="utf-8")
+    (doc / "manifest.json").write_text(json.dumps({
+        "doc_id": doc_id, "filename": doc_id, "file_type": "web_capture",
+        "source": "web_capture", "content_type": "General",
+        "storage_path": f"General/{doc_id}",
+        "paths": {"digest": "digest.md", "sections_dir": "sections/"},
+        "sections": [{"sid": "s_x", "index": 1, "title": None,
+                      "char_count": len(body), "type": "text",
+                      "file": "sections/01-s_x-section.md"}],
+        "provenance": {"source": "web_capture", "source_url": f"https://e.com/{doc_id}"},
+    }), encoding="utf-8")
+    # Through the index store, not doc-index.json: _load_doc_index prefers the
+    # store and only falls back to the JSON when the store is empty, so an entry
+    # written straight to the file is invisible to every reader.
+    from mantisfetch_common import doc_index_store as dis
+
+    dis.upsert_document(docs_dir, {
+        "id": doc_id, "filename": doc_id, "file_type": "web_capture",
+        "content_type": "General", "storage_path": f"General/{doc_id}",
+        "source": "web_capture", "source_url": f"https://e.com/{doc_id}",
+        "created_at": "2026-08-01T00:00:00Z",
+    })
+
+
+def test_a_null_section_title_is_searchable_not_skipped(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+    _seed_manifest_with_null_title(captured, "WEB-904", "body mentioning Zylobactor once")
+
+    resp = client.get("/doc/library/search_text", params={"q": "Zylobactor", "scope": "section"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # the guard would have caught the crash and reported it as skipped; the
+    # point of the fix is that the document is *searched*, not merely survived
+    assert body["skipped"] == 0
+    assert "WEB-904" in {r["doc_id"] for r in body["results"]}
+
+
+def test_capture_never_writes_a_null_section_title(tmp_path: Path) -> None:
+    """The other half: stop producing the data that needed defending against."""
+    import mantisfetch_browser as lb
+
+    lb._persist_web_capture(
+        doc_id="WEB-905", url="https://example.com/n", title="N",
+        sections=[
+            {"sid": "s_1", "h": None, "t": "prose with no heading at all", "type": "text"},
+            {"sid": "t_1", "h": None, "t": "| A |\n| --- |\n| 1 |", "type": "table",
+             "table_meta": {"rows": 1, "cols": 1}},
+        ],
+        digest="d", tags=[], content_hash="sha256:n", docs_dir=tmp_path,
+        content_type="General", extract_tables=True,
+        requested_url="https://example.com/n", lang="en-US",
+    )
+    manifest = json.loads(
+        (tmp_path / "General" / "WEB-905" / "manifest.json").read_text(encoding="utf-8")
+    )
+    for section in manifest["sections"]:
+        assert section["title"] is not None, section
+        assert isinstance(section["title"], str)

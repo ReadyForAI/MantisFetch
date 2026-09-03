@@ -4222,7 +4222,14 @@ async def library_search_text(
                             if not section_path.exists():
                                 continue
                             section_text = section_path.read_text(encoding="utf-8")
-                            title = sec.get("title", "")
+                            # `or ""`, not a get() default: the key is present
+                            # and holds null in manifests written before the
+                            # capture side stopped emitting it, and get() returns
+                            # the stored None rather than the default. That is
+                            # the AttributeError that took down whole-library
+                            # searches — one such document 500'd the query for
+                            # every other.
+                            title = sec.get("title") or ""
                             title_hit = q_lower in title.lower()
                             text_hit = q_lower in section_text.lower()
                             if not (title_hit or text_hit):

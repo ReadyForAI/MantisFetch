@@ -1910,7 +1910,10 @@ def _build_manifest_sections(
     result: list[dict[str, Any]] = []
     for i, s in enumerate(text_sections, 1):
         sid = s.get("sid", f"s_{i:03d}")
-        h = s.get("h", "")
+        # A section with no heading carries h=None, and get()'s default does not
+        # apply to a key that is present and null — so this wrote "title": null
+        # into the manifest, which every reader then had to defend against.
+        h = s.get("h") or ""
         safe_h = _safe_heading(h)
         result.append(
             {
@@ -1927,7 +1930,7 @@ def _build_manifest_sections(
             {
                 "sid": s.get("sid", f"t_{i:03d}"),
                 "index": len(text_sections) + i,
-                "title": s.get("h", f"Table {i}"),
+                "title": s.get("h") or f"Table {i}",
                 "char_count": len(s.get("t", "")),
                 "type": "table",
                 "file": f"tables/table-{i:02d}.md",
@@ -2774,7 +2777,7 @@ def _cached_capture_response(
     # The index only stores a 200-char digest preview; read digest.md so a reused
     # response carries the same full digest a fresh capture would return. digest.md
     # is "# {doc_id}: {title}\n\n{digest}\n" — take the body after the first blank line.
-    digest = entry.get("digest", "")
+    digest = entry.get("digest") or ""
     storage_path = entry.get("storage_path")
     if storage_path:
         try:
