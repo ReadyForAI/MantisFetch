@@ -776,6 +776,18 @@ Request body:
 | `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
 | `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
 
+**Error pages are refused, not stored.** Capture reads the HTTP status the final
+URL was served with. An upstream 4xx returns **422** (the URL is dead or
+forbidden — do not retry it) and an upstream 5xx returns **502** (a genuine
+gateway failure — retrying may work). Neither writes anything to the library, so
+a `doc_id` coming back always means real content was stored. Before this, a 404
+became a document whose digest read "Page not found".
+
+A successful response reports `final_url` (after redirects) and `http_status`, so
+a soft error page can be told apart from an article without reading the body.
+`http_status` is null when the navigation reported no response, e.g. a
+same-document navigation.
+
 Response example:
 
 ```json
@@ -788,7 +800,9 @@ Response example:
   "table_count": 2,
   "reused": false,
   "cache_age_hours": null,
-  "summary_status": null
+  "summary_status": null,
+  "final_url": "https://example.com/article",
+  "http_status": 200
 }
 ```
 
@@ -980,6 +994,9 @@ Use `content_type` (`General`, `Contract`, `Bid`, `Knowledge`) to put captured p
 | `429 too many concurrent requests`          | Rate limit exceeded                            | Wait and retry — server limits concurrent captures/sessions                                        |
 | `404 session not found`                     | Session expired or closed                      | Create a new session with `new`                                                                    |
 | `502 goto failed`                           | Page load timeout or network issue             | Switch to `wait_until=domcontentloaded` or increase `timeout_ms`                                   |
+| `422 capture failed: HTTP 4xx`              | The page itself returned 404/403/410 — the URL is dead or forbidden | **Do not retry.** Nothing was stored. Fix the URL or report the link as dead |
+| `502 capture failed: HTTP 5xx`              | The site returned a server error                | Retry later; nothing was stored                                                                    |
+| `meta.readability.fallback_reason = script_injection_blocked` | The site's Content-Security-Policy forbids injected script, so Readability could not run | **Normal, not an error** — capture degraded to the simple distiller and still produced content. Common on GitHub / MDN / Stack Overflow |
 | `404 aid not found`                         | Actions expired (page changed)                 | Re-run `distill` to get latest actions                                                             |
 | `502 navigate back failed`                  | No browser history to go back                  | Use `goto` to navigate directly instead                                                            |
 | Consent page / CAPTCHA                      | Site blocking                                  | Inform user "site blocked"; suggest importing `storage_state` or manual intervention; **never provide bypass methods** |

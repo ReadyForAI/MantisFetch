@@ -1361,10 +1361,20 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
         else:
             # avoid re-injecting Readability.js
             already = await page.evaluate("typeof Readability !== 'undefined'")
+            injected = True
             if not already:
-                await page.add_script_tag(content=vision.READABILITY_JS)
-
-            data = await page.evaluate(READABILITY_EVAL, 40000)
+                try:
+                    await page.add_script_tag(content=vision.READABILITY_JS)
+                except Exception as e:
+                    # A strict Content-Security-Policy (script-src without
+                    # 'unsafe-inline') blocks the injection outright. That used to
+                    # abort the whole capture with a 500 — GitHub, MDN and Stack
+                    # Overflow were simply uncapturable. The DOM is still there, so
+                    # fall back to the simple distiller instead of failing.
+                    logger.info("readability injection blocked (%s); using simple distill", e)
+                    readability_meta = {"fallback_reason": "script_injection_blocked"}
+                    injected = False
+            data = None if not injected else await page.evaluate(READABILITY_EVAL, 40000)
             if not data or not (data.get("text") or "").strip():
                 mode = "simple"
             else:
@@ -1850,6 +1860,7 @@ def _persist_web_capture(
     lang: str = DEFAULT_LANG,
     metadata: dict[str, Any] | None = None,
     summary_mode: str = "off",
+    http_status: int | None = None,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json.
 
@@ -1952,6 +1963,11 @@ def _persist_web_capture(
                 "source_url": url,
                 "created_at": now_str,
                 "content_hash": content_hash,
+                # Status the final URL was served with. Always written, so null
+                # (the navigation reported no response, e.g. same-document) stays
+                # distinguishable from a capture made before this was recorded,
+                # which has no key at all.
+                "http_status": http_status,
             },
         }
         if summary_mode == "defer":
@@ -2458,6 +2474,25 @@ def _resolve_cached_summary(
     return "pending"
 
 
+def _stored_http_status(docs_dir: Path, storage_path: Any) -> int | None:
+    """The http_status a capture recorded, for a response that reuses it.
+
+    None both when the capture predates the field and when the navigation
+    reported no response — a cached response cannot tell those apart, and the
+    manifest is where the distinction lives.
+    """
+    if not isinstance(storage_path, str) or not storage_path:
+        return None
+    try:
+        manifest = json.loads(
+            (docs_dir / storage_path / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    status = (manifest.get("provenance") or {}).get("http_status")
+    return status if isinstance(status, int) else None
+
+
 def _cached_capture_response(
     entry: dict[str, Any], content_type: str, docs_dir: Path, summary_mode: str = "off"
 ) -> CaptureResponse:
@@ -2494,6 +2529,8 @@ def _cached_capture_response(
         table_count=int(entry.get("tables", 0) or 0),
         reused=True,
         cache_age_hours=age_hours,
+        final_url=entry.get("source_url"),
+        http_status=_stored_http_status(docs_dir, storage_path),
         summary_status=_resolve_cached_summary(entry, docs_dir, content_type, summary_mode),
     )
 
@@ -2609,7 +2646,9 @@ async def goto(req: GotoRequest) -> GotoResponse:
     sess = await _ensure_session(req.session_id)
     async with sess.lock:  # concurrency lock
         try:
-            await sess.page.goto(req.url, wait_until=req.wait_until, timeout=req.timeout_ms)
+            response = await sess.page.goto(
+                req.url, wait_until=req.wait_until, timeout=req.timeout_ms
+            )
         except Exception as e:
             raise HTTPException(502, f"goto failed: {e}")
         # WebMCP: new page needs tool re-discovery
@@ -2620,7 +2659,12 @@ async def goto(req: GotoRequest) -> GotoResponse:
             title = await sess.page.title()
         except Exception:
             pass
-        return GotoResponse(session_id=req.session_id, url=sess.page.url, title=title)
+        return GotoResponse(
+            session_id=req.session_id,
+            url=sess.page.url,
+            title=title,
+            http_status=response.status if response is not None else None,
+        )
 
 
 @app.post("/session/distill", response_model=DistillResponse)
@@ -2953,11 +2997,31 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             # or serialize other sessions behind fsync of a large capture.
             async with sess.lock:
                 try:
-                    await sess.page.goto(
+                    response = await sess.page.goto(
                         req.url, wait_until="domcontentloaded", timeout=req.timeout_ms
                     )
                 except Exception as e:
                     raise HTTPException(502, f"capture goto failed: {e}")
+
+                # An error page is a successful navigation as far as Playwright is
+                # concerned, so without this a 404 becomes a library document whose
+                # digest reads "Page not found" — and an agent that only reads the
+                # digest believes the article was captured. Reject rather than
+                # storing it under a quality flag: a 4xx body is not the content
+                # the caller asked for, and silently keeping it is the same class
+                # of bug as falling back on an empty result.
+                http_status = response.status if response is not None else None
+                if http_status is not None and http_status >= 400:
+                    # Split by who failed. An upstream 5xx really is a bad
+                    # gateway and is worth retrying, so 502. An upstream 4xx is
+                    # not: the URL is dead or forbidden, and answering 502 would
+                    # invite an agent to retry a dead link forever. The request
+                    # itself was well-formed, so 422 — the URL is what cannot be
+                    # processed. The upstream status is in the detail either way.
+                    status = 502 if http_status >= 500 else 422
+                    raise HTTPException(
+                        status, f"capture failed: HTTP {http_status} for {response.url}"
+                    )
 
                 sess.webmcp_tools = None
                 sess.webmcp_available = False
@@ -3038,6 +3102,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                             lang=req.lang,
                             metadata=req.metadata,
                             summary_mode=req.summary_mode,
+                            http_status=http_status,
                         )
                         return doc_id
 
@@ -3061,6 +3126,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                         lang=req.lang,
                         metadata=req.metadata,
                         summary_mode=req.summary_mode,
+                        http_status=http_status,
                     )
                     return doc_id
 
@@ -3084,6 +3150,8 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 section_count=len(sections),
                 table_count=len(table_sections),
                 summary_status=summary_status,
+                final_url=url,
+                http_status=http_status,
             )
         finally:
             await sessions.remove(sid)

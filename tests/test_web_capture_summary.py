@@ -234,7 +234,12 @@ def test_capture_endpoint_schedules_defer_summary(client: TestClient, monkeypatc
             patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
         ):
             mock_page = AsyncMock()
-            mock_page.goto = AsyncMock()
+            # page.goto returns a Response; capture reads .status to reject error
+            # pages, so the mock has to carry one.
+            _response = MagicMock()
+            _response.status = 200
+            _response.url = "https://example.com"
+            mock_page.goto = AsyncMock(return_value=_response)
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
             orig_browser = mb._browser

@@ -112,7 +112,7 @@ capture 正文，snippet 会原样带出页面文字。
 
 | 工具 | 用途 | 关键参数 |
 | ---- | ---- | -------- |
-| `web_capture` | 一次性把 URL 语义抓取入库（token 便宜；无需会话）。返回 `doc_id` + digest + section/table 数（命中近期缓存时 `reused=true`）。 | `url`、`content_type="General"`、`tags?`、`extract_tables=true`、`force_refresh=false`、`summary_mode="off"`（`"defer"` 后台 LLM digest+brief；轮询 `doc_summary`） |
+| `web_capture` | 一次性把 URL 语义抓取入库（token 便宜；无需会话）。返回 `doc_id` + digest + section/table 数，另带 `final_url` 和 `http_status`（命中近期缓存时 `reused=true`）。**错误页会被拒绝**：源站 4xx 返回 `422`（链接已死或被禁，别重试），源站 5xx 返回 `502`；两者都不入库，所以拿到 `doc_id` 就一定有真实内容。 | `url`、`content_type="General"`、`tags?`、`extract_tables=true`、`force_refresh=false`、`summary_mode="off"`（`"defer"` 后台 LLM digest+brief；轮询 `doc_summary`） |
 | `web_search` † | 纯搜索——返回排序后的 `{url, title, snippet, ...}`。title/snippet 按不可信内容包裹。先用 `doc_search` 查库复用。 | `query`、`max_results=8`、`lang="en"`、`freshness?` |
 | `web_search_capture` † | 搜索 + 采集前 N 条（`capture_top ≤ 3`）入库。返回 `[{doc_id, digest, rank, reused}]`——按三级加载深读，不要盲取全文。 | `query`、`capture_top=2`、`tags?`、`content_type="General"`、`lang="en"`、`freshness?` |
 | `web_session_open` | 打开有状态浏览器会话。返回 `session_id`。 | — |
