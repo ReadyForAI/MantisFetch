@@ -339,7 +339,7 @@ async def _setup_routing(context: BrowserContext, block_resources: bool):
 # ============================================================
 # Added text density detection for div/section/td (better SPA scraping)
 DISTILL_SIMPLE_JS = r"""
-({ extractTables, maxTableRows, navLinkDensity }) => {
+({ extractTables, maxTableRows, navLinkDensity, tableMaxEmptyCells }) => {
   /*DATA_TABLE_GATE*/
   function visible(el) {
     const style = window.getComputedStyle(el);
@@ -401,7 +401,7 @@ DISTILL_SIMPLE_JS = r"""
     const tableEls = root.querySelectorAll("table");
     for (const tbl of tableEls) {
       if (!visible(tbl)) continue;
-      if (isNavigationTable(tbl)) continue;
+      if (isNonDataTable(tbl)) continue;
       const capEl = tbl.querySelector("caption");
       const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
       let heading = caption;
@@ -536,13 +536,40 @@ READABILITY_EVAL = r"""
 # box the evaluation named as an advantage over a plain fetch. Structure does
 # not separate these two kinds of table on this markup; link density does.
 _DATA_TABLE_GATE_JS = r"""
-  // True when the table reads as navigation rather than data.
-  function isNavigationTable(tbl) {
-    let textLen = 0;
-    for (const cell of tbl.querySelectorAll("td, th")) {
-      textLen += (cell.innerText || "").trim().length;
+  // True when the table is navigation or layout rather than data.
+  //
+  // Three signals, because no one of them covers the shapes that turned up:
+  //
+  //   link density  a `vte` navbox is almost all link text (0.75-0.97) while a
+  //                 data table is not (GDP main table 0.32, taxobox 0.60)
+  //   nesting       a table containing tables is scaffolding. Wikipedia draws
+  //                 cladograms with {{clade}}, which nests <table> 8-23 deep,
+  //                 and the extractor was emitting the outer one *and* every
+  //                 inner slice — the same taxa over and over. On one article
+  //                 that was 352k characters of tables against 43k of prose,
+  //                 89% of a 2 MB document. Link density does not see it: a
+  //                 cladogram scores 0.08-0.15, *lower* than the GDP table.
+  //   empty cells   the same cladograms are 62-67% empty cells, because the
+  //                 grid is drawing tree branches rather than holding values.
+  //                 Every real table measured is at 0.00, the taxobox 0.10.
+  //                 This is what reaches the innermost slices, which nest
+  //                 nothing themselves.
+  function isNonDataTable(tbl) {
+    // Scaffolding: emitting both an outer table and its inner ones duplicates
+    // the content, and the outer already carries the inner cells' text.
+    if (tbl.querySelector("table")) return true;
+
+    const cells = tbl.querySelectorAll("td, th");
+    if (cells.length === 0) return false;  // nothing to judge; other filters decide
+    let textLen = 0, emptyCells = 0;
+    for (const cell of cells) {
+      const s = (cell.innerText || "").trim();
+      if (!s) emptyCells++;
+      textLen += s.length;
     }
-    if (textLen === 0) return false;  // empty: other filters decide
+    if (emptyCells / cells.length > tableMaxEmptyCells) return true;
+
+    if (textLen === 0) return false;
     let linkLen = 0;
     for (const a of tbl.querySelectorAll("a")) linkLen += (a.innerText || "").trim().length;
     return linkLen / textLen > navLinkDensity;
@@ -551,7 +578,7 @@ _DATA_TABLE_GATE_JS = r"""
 
 
 EXTRACT_TABLES_JS = r"""
-({ maxTableRows, maxTables, navLinkDensity }) => {
+({ maxTableRows, maxTables, navLinkDensity, tableMaxEmptyCells }) => {
   /*DATA_TABLE_GATE*/
   function visible(el) {
     const style = window.getComputedStyle(el);
@@ -565,7 +592,7 @@ EXTRACT_TABLES_JS = r"""
   const tableEls = document.querySelectorAll("table");
   for (const tbl of tableEls) {
     if (!visible(tbl)) continue;
-    if (isNavigationTable(tbl)) continue;
+    if (isNonDataTable(tbl)) continue;
     const capEl = tbl.querySelector("caption");
     const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
     let heading = caption;
@@ -1469,6 +1496,7 @@ async def _distill(
                                 "maxTableRows": budget.max_table_rows,
                                 "maxTables": budget.max_tables,
                                 "navLinkDensity": budget.nav_link_density,
+                                "tableMaxEmptyCells": budget.table_max_empty_cells,
                             },
                         )
                         or []
@@ -1520,6 +1548,7 @@ async def _distill(
                                     "maxTableRows": budget.max_table_rows,
                                     "maxTables": budget.max_tables,
                                     "navLinkDensity": budget.nav_link_density,
+                                    "tableMaxEmptyCells": budget.table_max_empty_cells,
                                 },
                             )
                             or []
@@ -1534,6 +1563,7 @@ async def _distill(
                 "extractTables": req.extract_tables,
                 "maxTableRows": budget.max_table_rows,
                 "navLinkDensity": budget.nav_link_density,
+                "tableMaxEmptyCells": budget.table_max_empty_cells,
             },
         )
         blocks = dist.get("blocks") or []

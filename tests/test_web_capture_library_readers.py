@@ -379,3 +379,74 @@ def test_mcp_doc_search_text_passes_tags_through(monkeypatch) -> None:
     asyncio.run(mm.doc_search_text(q="x"))
     assert "tags" not in seen  # omitted rather than sent empty
     assert "doc_id" not in seen
+
+
+# ── a library-wide scan degrades rather than failing ────────────────────────────
+def test_one_unreadable_document_does_not_fail_the_whole_search(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    """search_text walks every document in the library and reads files off disk.
+    An undecodable section, a permission error, or a manifest whose shape
+    surprises the response model turned the whole query into a 500 — no partial
+    results, and nothing saying which document caused it.
+
+    The point is that the healthy document still answers, so the failure has to
+    be aimed at one document: blowing up the read globally would prove only that
+    the endpoint returns 200, which an empty healthy library also does.
+
+    A v1.7.0 retest reported that 500. It could not be reproduced against a real
+    55-document library, a 2 MB capture, LANG=zh, or a library mixing pre- and
+    post-upgrade captures, so this hardens the class of failure rather than a
+    known instance.
+    """
+    import mantisfetch_docreader as dr
+
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+
+    # a second, healthy document carrying the same term
+    lb_persist_healthy(captured, "WEB-902", TABLE_ONLY_TOKEN)
+
+    real_snippet = dr._make_snippet
+
+    def snippet_that_breaks_on_one_doc(text: str, query: str, radius: int = 90) -> str:
+        if "poisoned" in text:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "simulated bad bytes")
+        return real_snippet(text, query, radius)
+
+    monkeypatch.setattr(dr, "_make_snippet", snippet_that_breaks_on_one_doc)
+    lb_persist_healthy(captured, "WEB-903", f"poisoned {TABLE_ONLY_TOKEN}")
+
+    resp = client.get("/doc/library/search_text", params={"q": TABLE_ONLY_TOKEN})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["skipped"] == 1, "the broken document should be counted once"
+    found = {r["doc_id"] for r in body["results"]}
+    assert "WEB-902" in found, "the healthy document must still answer"
+    assert "WEB-903" not in found, "the broken one contributed nothing"
+
+
+def lb_persist_healthy(docs_dir: Path, doc_id: str, body: str) -> None:
+    """A minimal capture carrying ``body`` in its only section."""
+    import mantisfetch_browser as lb
+
+    lb._persist_web_capture(
+        doc_id=doc_id, url=f"https://example.com/{doc_id}", title=doc_id,
+        sections=[{"sid": f"s_{doc_id}", "h": "H", "t": body, "type": "text"}],
+        digest="d", tags=[], content_hash=f"sha256:{doc_id}", docs_dir=docs_dir,
+        content_type="General", extract_tables=False,
+        requested_url=f"https://example.com/{doc_id}", lang="en-US",
+    )
+
+
+def test_skipped_is_zero_on_a_healthy_library(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+    body = client.get("/doc/library/search_text", params={"q": TABLE_ONLY_TOKEN}).json()
+    assert body["skipped"] == 0
+    assert body["total"] >= 1

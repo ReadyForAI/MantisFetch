@@ -126,13 +126,32 @@ _PRUNE_THRESHOLD = 0.35
 _PRUNE_MIN_TEXT = 40
 
 
-def _chrome_name_hit(node: Any) -> bool:
-    """True when the node's class or id names it as chrome."""
+# Containers whose name is the site *asserting there is no content here*: an
+# empty state, a failed load, a loading skeleton. Unlike the chrome vocabulary
+# above these are removed without a density check, because the thing they hold
+# is prose — GitHub's blankslate reads "Uh oh! There was an error while loading",
+# which scores as content by every density measure and is not content by any
+# other.
+#
+# Kept deliberately short, because removing without corroboration is only safe
+# for words that mean one thing. "placeholder" and "skeleton" are both out:
+# a loading skeleton carries almost no text and the 40-character floor below
+# already drops it, while an article about anatomy may legitimately name a
+# container either word.
+_EMPTY_STATE_RE = re.compile(r"\b(?:blankslate|empty-?state)\b", re.I)
+
+
+def _node_names(node: Any) -> str:
     attrs = node.attrs or {}
     names = attrs.get("class") or []
     if isinstance(names, str):
         names = [names]
-    haystack = " ".join([*names, str(attrs.get("id") or "")])
+    return " ".join([*names, str(attrs.get("id") or "")])
+
+
+def _chrome_name_hit(node: Any) -> bool:
+    """True when the node's class or id names it as chrome."""
+    haystack = _node_names(node)
     return bool(haystack.strip()) and bool(_CHROME_NAME_RE.search(haystack))
 
 
@@ -173,6 +192,11 @@ def _prune_boilerplate(body: Any) -> None:
 def _prune_node(node: Any) -> None:
     """Remove one container if it both names itself chrome and reads like it."""
     if node.parent is None:
+        return
+    # An empty state goes without corroboration: the density check would keep it,
+    # since the placeholder text reads exactly like prose.
+    if _EMPTY_STATE_RE.search(_node_names(node)):
+        node.decompose()
         return
     if not _chrome_name_hit(node):
         return
