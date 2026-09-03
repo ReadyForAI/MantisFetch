@@ -126,3 +126,24 @@ def test_the_probe_is_findable_through_the_library(client: TestClient, tmp_path:
     body = hits.json()
     assert body["total"] >= 1, f"searching for the document's own text found nothing: {body}"
     assert body.get("skipped", 0) == 0
+
+
+def test_xlsx_too(tmp_path: Path) -> None:
+    """Named in the evaluation alongside DOCX and HTML. Same markdownify path,
+    but a spreadsheet is where identifiers with underscores actually live, so
+    it gets its own case rather than an argument that it must be fine."""
+    openpyxl = pytest.importorskip("openpyxl")
+    import mantisfetch_docreader as dr
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.append(["mfparse_xlsx_metric", "value"])
+    sheet.append([PROBE, STAR_PROBE])
+    path = tmp_path / "probe.xlsx"
+    wb.save(path)
+
+    out = dr._convert_to_markdown(path)
+    assert PROBE in out
+    assert "mfparse_xlsx_metric" in out
+    assert STAR_PROBE in out
+    assert "\\_" not in out and "\\*" not in out
