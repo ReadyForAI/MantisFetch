@@ -659,7 +659,8 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | `404 section not found`                            | Invalid sid                    | Call `/doc/library/{doc_id}/sections` first to get valid sid list           |
 | `422 <file> is empty (0 bytes)`                    | The upload had no bytes        | **Do not retry.** Nothing was stored and no `doc_id` was taken             |
 | `422 <file> is not a valid docx/xlsx/pptx file`    | The OOXML formats are zips; this file is not one (wrong extension, or a truncated upload) | **Do not retry.** Nothing was stored. Check what was actually uploaded |
-| `422 parse failed`                                 | The file is not the format its extension claims — e.g. a PDF whose header is not a PDF | **Do not retry.** The `.parse-failed.json` record is kept; re-upload the real file |
+| `422 <file> is not a valid pdf file`               | No `%PDF-` marker anywhere in the file — it is not a PDF at all | **Do not retry.** Nothing was stored, and no `doc_id` was taken |
+| `422 parse failed`                                 | The file claims its format and fails once opened — a PDF with a header but a broken body | **Do not retry.** A parse was attempted, so the reserved id keeps a `.parse-failed.json` record of it; re-upload the real file |
 | `500 parse failed`                                 | The server could not read a document it should have been able to — a missing converter, a parser fault | Retry; if it persists it is a service problem, not the file |
 | `500 RuntimeError` about missing LLM credentials   | LLM provider credentials not configured | Check the active LLM provider settings and restart service        |
 | Parsing takes too long                             | Large file + OCR               | Use `generate_summary=false` for fast extraction first, generate summary later |
