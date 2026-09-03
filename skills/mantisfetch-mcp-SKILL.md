@@ -84,10 +84,19 @@ cost and picks the cheapest. Always start cheap and escalate only when needed.
 
 | Tier | Web tools | Doc tools | Cost |
 | ---- | --------- | --------- | ---- |
-| L1 digest | `web_capture` → digest | `doc_digest` | ~200 tokens |
+| L1 digest | `web_capture` → digest | `doc_digest` | ~250-350 tokens |
 | L2 brief | `web_distill` | `doc_brief` | ~1.5k tokens |
 | L3 section | `web_read_sections` | `doc_section` (after `doc_sections`) | on-demand |
 | L4 full | — | `doc_full` | **almost never** |
+
+A capture's digest **leads with an outline** — one line per section giving its
+`sid`, kind, size and heading — so L1 already tells you what to read next and
+there is usually no need to spend a `doc_sections` call before `doc_section`.
+Tables are listed there too, with their row count.
+
+A capture also gets a **locally built `brief.md`**, so `doc_brief` works on every
+captured page without `summary_mode="defer"` and without spending a token. Asking
+for `"defer"` replaces it with an LLM-written one.
 
 **Never pull full text into context.** For documents, use `doc_digest` → `doc_brief` →
 `doc_sections`/`doc_section`. For web, use `web_distill` then read only `changed_sids` /

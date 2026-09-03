@@ -62,7 +62,13 @@ def test_digest_is_bounded_on_a_deep_heading_tree() -> None:
     ]
     digest = lb._build_web_digest("Big", many)
     assert len(digest) <= 1400
-    assert "more" in digest.rsplit("\n", 1)[-1] or "..." in digest
+    # The marker must close the outline block — not merely appear somewhere, which
+    # a sliced tail would also satisfy while leaving a half-written sid behind.
+    outline = digest.split("## Outline\n", 1)[1].split("\n\n", 1)[0].split("\n")
+    assert outline[-1].startswith("- ... ") and "more" in outline[-1]
+    # and every entry before it is whole
+    for line in outline[:-1]:
+        assert line.startswith("- s_") and ") " in line, f"truncated entry: {line!r}"
 
 
 def test_digest_titles_are_truncated_not_dropped() -> None:
@@ -167,3 +173,75 @@ def test_hint_is_none_when_only_some_addresses_are_private(monkeypatch) -> None:
 @pytest.mark.parametrize("url", ["not a url", "https://", "http://[bad", ""])
 def test_hint_survives_junk_input(url: str) -> None:
     assert blocked_target_hint(url) is None
+
+
+# ── the hint reaches the caller, not just the unit test ─────────────────────────
+# The first version of this change added blocked_target_hint and its tests but
+# never called it: the edit that wired it into the goto failure path was lost in
+# a script that aborted before writing. The function was covered and the product
+# behaviour was unchanged, which is exactly the shape of bug a unit test alone
+# cannot catch.
+def _blocked_browser(monkeypatch, tmp_path: Path):
+    from unittest.mock import AsyncMock, MagicMock
+
+    import mantisfetch_browser.security as sec
+
+    monkeypatch.setattr(sec.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("198.18.0.114", 0))])
+    page = AsyncMock()
+    page.goto = AsyncMock(side_effect=Exception(
+        "Page.goto: net::ERR_ADDRESS_UNREACHABLE at https://example.com"))
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    monkeypatch.setattr(lb, "_browser", browser)
+    monkeypatch.setattr(lb, "_setup_routing", AsyncMock())
+    monkeypatch.setattr(lb, "_get_docs_dir", lambda: tmp_path)
+
+
+def test_capture_502_explains_a_policy_refusal(client, monkeypatch, tmp_path: Path) -> None:
+    _blocked_browser(monkeypatch, tmp_path)
+    resp = client.post("/web/capture", json={"url": "https://example.com"})
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "198.18.0.114" in detail
+    assert "fake-ip" in detail
+    assert "ERR_ADDRESS_UNREACHABLE" not in detail
+
+
+def test_session_goto_502_explains_a_policy_refusal(client, monkeypatch, tmp_path: Path) -> None:
+    _blocked_browser(monkeypatch, tmp_path)
+    sid = client.post("/web/session/new", json={}).json()["session_id"]
+    try:
+        resp = client.post(
+            "/web/session/goto", json={"session_id": sid, "url": "https://example.com"}
+        )
+        assert resp.status_code == 502
+        assert "198.18.0.114" in resp.json()["detail"]
+    finally:
+        client.post("/web/session/close", json={"session_id": sid})
+
+
+def test_a_real_network_failure_keeps_its_own_message(client, monkeypatch, tmp_path: Path) -> None:
+    """When the address is fine the hint must stay out of the way."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    import mantisfetch_browser.security as sec
+
+    monkeypatch.setattr(sec.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    page = AsyncMock()
+    page.goto = AsyncMock(side_effect=Exception("Page.goto: Timeout 25000ms exceeded"))
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    monkeypatch.setattr(lb, "_browser", browser)
+    monkeypatch.setattr(lb, "_setup_routing", AsyncMock())
+    monkeypatch.setattr(lb, "_get_docs_dir", lambda: tmp_path)
+
+    resp = client.post("/web/capture", json={"url": "https://example.com"})
+    assert resp.status_code == 502
+    assert "Timeout 25000ms" in resp.json()["detail"]
+    assert "SSRF" not in resp.json()["detail"]

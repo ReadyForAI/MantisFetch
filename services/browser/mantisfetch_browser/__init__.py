@@ -1838,7 +1838,19 @@ def _build_web_digest(
             parts.append(snippet)
             break
 
-    return "\n\n".join(parts)[:max_chars]
+    digest = "\n\n".join(parts)
+    if len(digest) <= max_chars:
+        return digest
+    # Drop whole lines rather than slicing one in half: a truncated outline entry
+    # is a sid the caller cannot use, and it would hide the "... N more" marker.
+    kept: list[str] = []
+    used = 0
+    for line in digest.split("\n"):
+        if used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
 
 
 def _safe_heading(h: str | None, max_len: int = 40) -> str:
@@ -2856,7 +2868,8 @@ async def goto(req: GotoRequest) -> GotoResponse:
                 req.url, wait_until=req.wait_until, timeout=req.timeout_ms
             )
         except Exception as e:
-            raise HTTPException(502, f"goto failed: {e}")
+            hint = await asyncio.to_thread(security.blocked_target_hint, req.url)
+            raise HTTPException(502, f"goto failed: {hint or e}")
         # WebMCP: new page needs tool re-discovery
         sess.webmcp_tools = None
         sess.webmcp_available = False
@@ -3207,7 +3220,10 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                         req.url, wait_until="domcontentloaded", timeout=req.timeout_ms
                     )
                 except Exception as e:
-                    raise HTTPException(502, f"capture goto failed: {e}")
+                    # The guard aborts with "addressunreachable", which reads as
+                    # the network being down. Say which it was.
+                    hint = await asyncio.to_thread(security.blocked_target_hint, req.url)
+                    raise HTTPException(502, f"capture goto failed: {hint or e}")
 
                 # An error page is a successful navigation as far as Playwright is
                 # concerned, so without this a 404 becomes a library document whose

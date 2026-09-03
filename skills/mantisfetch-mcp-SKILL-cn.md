@@ -74,10 +74,17 @@ MCP 工具会驱动真实浏览器并读取本地文件，因此该接入面**�
 
 | Tier | Web 工具 | Doc 工具 | 成本 |
 | ---- | -------- | -------- | ---- |
-| L1 digest | `web_capture` → digest | `doc_digest` | ~200 tokens |
+| L1 digest | `web_capture` → digest | `doc_digest` | ~250-350 tokens |
 | L2 brief | `web_distill` | `doc_brief` | ~1.5k tokens |
 | L3 section | `web_read_sections` | `doc_section`（先 `doc_sections`） | 按需 |
 | L4 full | — | `doc_full` | **几乎不用** |
+
+capture 的 digest **以大纲开头**——每个 section 一行，给出 `sid`、类型、体积和标题——
+所以 L1 就能告诉你接下来该读什么，通常不必再花一次 `doc_sections` 才能 `doc_section`。
+表格也在大纲里，带行数。
+
+capture 还会**在本地生成 `brief.md`**，所以 `doc_brief` 对每个抓取页都可用，不需要
+`summary_mode="defer"`、也不花 token。真要 `"defer"` 时会用 LLM 写的那份覆盖它。
 
 **不要把全文拉进上下文。** 文档用 `doc_digest` → `doc_brief` → `doc_sections`/`doc_section`；
 网页用 `web_distill`，再只通过 `web_read_sections` 读 `changed_sids` / `added_sids`。
