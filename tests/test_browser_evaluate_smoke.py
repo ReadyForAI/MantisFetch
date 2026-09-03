@@ -209,6 +209,55 @@ async def test_simple_mode_applies_the_same_gate(nav_page) -> None:
     assert "Alpha region" not in joined
 
 
+async def test_a_navbox_near_the_threshold_is_still_skipped(nav_page) -> None:
+    """The all-links fixture above sits near 1.0 and would pass any threshold.
+    The real cut runs between the taxobox at 0.60 and the lowest navigation box
+    above it at 0.75, so the fixture that matters is one close to 0.75."""
+    await nav_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        '<table class="navbox"><tr><th>Authority control databases</th>'
+        '<td><a href="/a">International alphabetical listing</a> '
+        '<a href="/b">National archive index reference</a> '
+        '<a href="/c">Scientific taxonomy register entry</a> (edit)</td>'
+        "</tr></table></article></body></html>"
+    )
+    density = await nav_page.evaluate("""() => {
+      const t = document.querySelector("table");
+      let txt = 0, link = 0;
+      for (const c of t.querySelectorAll("td, th")) txt += (c.innerText||"").trim().length;
+      for (const a of t.querySelectorAll("a")) link += (a.innerText||"").trim().length;
+      return link / txt;
+    }""")
+    assert 0.70 < density < 0.85, f"fixture drifted out of the contested band: {density}"
+
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.70},
+    )
+    assert not any("International alphabetical" in t["text"] for t in tables)
+
+
+async def test_the_taxobox_density_stays_under_the_threshold(nav_page) -> None:
+    """The other side of the cut. A taxonomy box is link-heavy — every rank is a
+    link — but carries enough plain text to stay content, and the evaluation
+    named it as an advantage worth keeping."""
+    await nav_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        '<table class="infobox biota">'
+        "<tr><th>Scientific classification</th></tr>"
+        '<tr><td>Kingdom:</td><td><a href="/a">Animalia</a></td></tr>'
+        '<tr><td>Phylum:</td><td><a href="/b">Arthropoda</a></td></tr>'
+        '<tr><td>Order:</td><td><a href="/c">Stomatopoda</a> Latreille, 1817</td></tr>'
+        "<tr><td>Temporal range:</td><td>Carboniferous to Recent</td></tr>"
+        "</table></article></body></html>"
+    )
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.70},
+    )
+    assert any("Stomatopoda" in t["text"] for t in tables)
+
+
 async def test_a_data_table_of_links_is_kept(nav_page) -> None:
     """Link density is a share, not a count: a table whose cells are links but
     which also carries real values stays under the threshold."""

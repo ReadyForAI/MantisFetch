@@ -516,9 +516,17 @@ READABILITY_EVAL = r"""
 # The signal is link density — the share of cell text sitting inside <a>.
 # Measured on the pages the evaluation used:
 #
-#   GDP main table (223 rows)   0.32     Wikipedia `vte` navboxes   0.75 - 0.97
-#   GDP regional groupings      0.25     navbox subgroups           0.82 - 0.94
-#   Mantis shrimp taxobox       0.60     Taxon identifiers box      0.84
+#   GDP main table (223 rows)   0.32     Wikipedia `vte` navboxes   0.51 - 0.97
+#   GDP regional groupings      0.25     navbox subgroups           0.59 - 0.94
+#   Mantis shrimp taxobox       0.60     Authority control box      0.75
+#
+# The two ranges overlap, so the threshold is a cut point rather than a clean
+# separator: a navbox at 0.51 survives it. It is set to keep the taxobox, which
+# is the content table this most needs to protect.
+#
+# Nested tables count toward their ancestor's density, because querySelectorAll
+# reaches into them. On Wikipedia that helps — a navbox nesting navboxes reads
+# as more navigational, which it is.
 #
 # A first attempt ported crawl4ai's ten-component is_data_table score instead.
 # On Wikipedia it ranked things backwards: navbox subgroups score 8 (many <th>
