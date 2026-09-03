@@ -2953,18 +2953,26 @@ def _filter_documents(
 
 
 def _resolve_manifest_section_path(doc_dir: Path, rel_path: str) -> Path | None:
+    """Resolve a manifest section entry's ``file`` to a path inside the doc dir.
+
+    Both ``sections/`` and ``tables/`` are allowed: web captures declare their
+    extracted tables as manifest ``sections`` entries pointing at
+    ``tables/table-NN.md``, and a sections-only whitelist silently dropped every
+    one of them from search_sections / chunks / search_text.
+    """
     if not isinstance(rel_path, str):
         return None
     raw_path = Path(rel_path)
     if raw_path.is_absolute() or raw_path.suffix != ".md":
         return None
-    sections_dir = (doc_dir / "sections").resolve()
-    section_path = (doc_dir / raw_path).resolve()
-    try:
-        section_path.relative_to(sections_dir)
-    except ValueError:
-        return None
-    return section_path
+    resolved = (doc_dir / raw_path).resolve()
+    for sub in ("sections", "tables"):
+        try:
+            resolved.relative_to((doc_dir / sub).resolve())
+        except ValueError:
+            continue
+        return resolved
+    return None
 
 
 def _load_section_records(docs_dir: Path, doc_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:

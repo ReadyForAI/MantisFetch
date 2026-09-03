@@ -146,7 +146,8 @@ MCP 工具会驱动真实浏览器并读取本地文件，因此该接入面**�
 | `doc_section` | Section 级：按 sid 读取单个 section 全文。 | `doc_id`、`sid` |
 | `doc_sections_batch` | 一次调用按 sid 读取多个 section（比反复 `doc_section` 少往返）；返回找到的 + 缺失的 sid。 | `doc_id`、`sids[]` |
 | `doc_full` | 全文 —— 昂贵；优先用上面的层级。 | `doc_id` |
-| `doc_search` | 跨文档库搜索；返回匹配 doc id + metadata。 | `q`、`tags?`、`limit=20` |
+| `doc_search` | 跨库搜 **metadata**——文件名、digest、tags、自定义 metadata。**不看正文**。 | `q`、`tags?`、`limit=20` |
+| `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
 | `doc_search_sections` | 在单个文档的 sections 内搜索；返回 sid/页码 provenance。 | `doc_id`、`q`、`include_content=false` |
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
 | `doc_chunks` | 面向下游 RAG 的检索友好分块。 | `doc_id`、`include_text=false` |
@@ -219,7 +220,8 @@ doc_parse(rel_path=... | content_b64=...) → doc_id + digest
 ### 8.4 跨文档 / 文档库搜索
 
 ```
-doc_search(q, tags?) → 候选 doc id   # 同时覆盖上传文档和网页抓取
+doc_search(q, tags?)      → 候选 doc id   # 只匹配 metadata：文件名/digest/tags
+doc_search_text(q, tags?) → doc_id + sid + snippet   # 正文本身
 ↓ 对每个候选用 doc_digest（~200 tokens）
 ↓ doc_search_sections(doc_id, q) → sid + 页码 provenance
 ↓ doc_section(doc_id, sid)

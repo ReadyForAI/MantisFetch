@@ -1734,6 +1734,97 @@ def _read_web_summary_status(doc_dir: Path) -> str | None:
     return summary.get("status") if isinstance(summary, dict) else None
 
 
+def _web_table_rows(body: str) -> tuple[list[str], list[list[str]]]:
+    """Split a markdown table body back into (header cells, data rows).
+
+    The extractor replaces every in-cell ``|`` with ``¦`` before building the
+    markdown, so splitting rows on ``|`` is lossless. The ``---`` separator row
+    is dropped; a table without one has no header.
+    """
+    header: list[str] = []
+    rows: list[list[str]] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or not line.endswith("|"):
+            continue
+        cells = [c.strip() for c in line[1:-1].split("|")]
+        if all(set(c) <= {"-", ":"} and c for c in cells):
+            if rows:  # the row before the separator was the header
+                header = rows.pop(0)
+            continue
+        rows.append(cells)
+    return header, rows
+
+
+def _build_web_table_sidecar(
+    table_sections: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Build (manifest entry, structured payload) pairs for a capture's tables.
+
+    Mirrors docreader's tables.json contract so /doc reads web captures the same
+    way, but carries web provenance (row/col counts + column stats from the DOM)
+    instead of the OCR-geometry fields, which a web capture has no equivalent of.
+    """
+    out: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for i, tbl in enumerate(table_sections, 1):
+        table_id = f"table-{i:02d}"
+        body = tbl.get("t", "")
+        meta = tbl.get("table_meta") or {}
+        header, rows = _web_table_rows(body)
+        payload = {
+            "table_id": table_id,
+            "source": "web_capture",
+            "caption": meta.get("caption"),
+            "heading": meta.get("heading"),
+            # rows/column_count come from the DOM (the full table), so they can
+            # exceed the rows actually stored when the extractor truncated.
+            "row_count": meta.get("rows", len(rows)),
+            "column_count": meta.get("cols", len(header or (rows[0] if rows else []))),
+            "has_header": bool(header),
+            "truncated": bool(meta.get("truncated")),
+            "stored_row_count": len(rows),
+            "stats": meta.get("stats"),
+            "header": header,
+            "rows": [{"row_index": n, "cells": cells} for n, cells in enumerate(rows, 1)],
+        }
+        entry = {
+            "table_id": table_id,
+            "index": i,
+            "row_count": payload["row_count"],
+            "column_count": payload["column_count"],
+            "has_header": payload["has_header"],
+            "truncated": payload["truncated"],
+            "source": "web_capture",
+            "char_count": len(body),
+            "type": "markdown",
+            "file": f"tables/{table_id}.md",
+            "json_file": f"tables/{table_id}.json",
+        }
+        out.append((entry, payload))
+    return out
+
+
+def _build_web_full_text(
+    title: str | None,
+    url: str,
+    text_sections: list[dict[str, Any]],
+    table_sections: list[dict[str, Any]],
+) -> str:
+    """Concatenate a capture's sections + tables into full.md.
+
+    Without it /doc/library/{id}/full 404s for every web capture and
+    /library/search_text?scope=full can never match one.
+    """
+    parts = [f"# {title or url}"]
+    for sec in list(text_sections) + list(table_sections):
+        h = sec.get("h") or ""
+        body = sec.get("t", "")
+        if not body.strip():
+            continue
+        parts.append(f"## {h}\n\n{body}" if h else body)
+    return "\n\n".join(parts) + "\n"
+
+
 def _persist_web_capture(
     doc_id: str,
     url: str,
@@ -1790,7 +1881,15 @@ def _persist_web_capture(
             header = f"## {h}\n\n" if h else ""
             _write_text_atomic(sections_dir / fname, f"{header}{body}\n")
 
-        # tables/
+        # full.md — every other doc kind has one, and without it doc_full and
+        # search_text?scope=full are dead for web captures.
+        _write_text_atomic(
+            staging_dir / "full.md",
+            _build_web_full_text(title, url, text_sections, table_sections),
+        )
+
+        # tables/ (markdown + structured JSON) and the tables.json sidecar
+        table_entries: list[dict[str, Any]] = []
         if table_sections:
             tables_dir.mkdir(exist_ok=True)
             for i, tbl in enumerate(table_sections, 1):
@@ -1801,6 +1900,16 @@ def _persist_web_capture(
                 _write_text_atomic(
                     tables_dir / f"table-{i:02d}.md", f"# {h}\n\n{body}\n{meta_comment}"
                 )
+            for entry, payload in _build_web_table_sidecar(table_sections):
+                _write_text_atomic(
+                    tables_dir / f"{entry['table_id']}.json",
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                )
+                table_entries.append(entry)
+            _write_text_atomic(
+                staging_dir / "tables.json",
+                json.dumps(table_entries, ensure_ascii=False, indent=2),
+            )
 
         # manifest.json
         manifest: dict[str, Any] = {
@@ -1814,10 +1923,20 @@ def _persist_web_capture(
             "metadata": dict(metadata) if metadata else {},
             "paths": {
                 "digest": "digest.md",
+                "full": "full.md",
                 "sections_dir": "sections/",
-                **({"tables_dir": "tables/"} if table_sections else {}),
+                **(
+                    {"tables_dir": "tables/", "tables": "tables.json"}
+                    if table_sections
+                    else {}
+                ),
             },
             "sections": _build_manifest_sections(text_sections, table_sections),
+            # Top-level tables[] mirrors docreader's manifest so /doc's table
+            # readers (incl. fmt=json) treat a web capture like any other doc.
+            # The same tables also stay in sections[] — that is what makes them
+            # reachable from search_sections / chunks / search_text.
+            "tables": table_entries,
             "provenance": {
                 "source": "web_capture",
                 "source_url": url,
