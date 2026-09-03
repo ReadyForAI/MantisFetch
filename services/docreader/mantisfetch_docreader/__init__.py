@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import contextvars
 import functools
@@ -745,10 +746,65 @@ def _get_converter():
     return _md_converter
 
 
+# The formats MarkItDown reads as text rather than as a container. For these it
+# has to decide an encoding, and with no hint it asks charset-normalizer to
+# guess from the bytes.
+_TEXT_FAMILY_SUFFIXES = frozenset(
+    {".txt", ".text", ".json", ".jsonl", ".csv", ".html", ".htm", ".xml", ".md"}
+)
+
+
+def _utf8_charset_hint(filepath: Path) -> str | None:
+    """The charset to declare when the file is valid UTF-8, else None.
+
+    Guessing is what breaks here. charset-normalizer is asked to name an
+    encoding from the bytes alone, and on a short file carrying a little CJK it
+    has very little to go on: a 117-byte JSON probe holding 口足目JSON探针 was
+    read as cp1251 and stored as еЏЈи¶із›®JSONжЋўй’€. Silent, and in the
+    document that reaches every reader afterwards.
+
+    Worse, the guess is not stable. The same bytes through the same MarkItDown
+    read correctly under charset-normalizer 3.4.9 and as Cyrillic under 3.5.1,
+    which is what the image ships — so a library upgrade can corrupt documents
+    that parsed fine the week before, with nothing in the request to say so.
+
+    There is no need to guess when the bytes answer the question. UTF-8 is
+    self-validating: a byte sequence that decodes cleanly under it is UTF-8 in
+    all but contrived cases, because a wrong multi-byte lead is a decode error
+    rather than a different character. So decode strictly first and declare it;
+    only a file that fails goes to the detector, which is where a genuine GBK or
+    Shift-JIS upload still gets read correctly.
+
+    Decoding runs incrementally so a large upload is not held in memory twice.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        with filepath.open("rb") as fh:
+            first = fh.read(1024 * 1024)
+            # A UTF-8 BOM decodes to a stray ﻿ that would otherwise lead
+            # the extracted text, so name the encoding that consumes it.
+            charset = "utf-8-sig" if first.startswith(codecs.BOM_UTF8) else "utf-8"
+            chunk = first
+            while chunk:
+                decoder.decode(chunk)
+                chunk = fh.read(1024 * 1024)
+            decoder.decode(b"", final=True)
+    except (UnicodeDecodeError, OSError):
+        return None
+    return charset
+
+
 def _convert_to_markdown(filepath: Path) -> str:
     """Convert a document to Markdown text via MarkItDown."""
+    stream_info = None
+    if filepath.suffix.lower() in _TEXT_FAMILY_SUFFIXES:
+        charset = _utf8_charset_hint(filepath)
+        if charset is not None:
+            from markitdown import StreamInfo
+
+            stream_info = StreamInfo(charset=charset)
     try:
-        result = _get_converter().convert(str(filepath))
+        result = _get_converter().convert(str(filepath), stream_info=stream_info)
         return result.text_content or ""
     except Exception as e:
         raise RuntimeError(t("file_open_failed", path=str(filepath))) from e
