@@ -52,9 +52,39 @@ class GotoResponse(BaseModel):
     http_status: int | None = None
 
 
+class SectionBudget(BaseModel):
+    """Section/table limits for one distill, separate from the request's own.
+
+    The request fields below are a *display* budget: they keep what comes back to
+    the model small. Capture needs a *storage* budget, which is the opposite
+    concern — what lands on disk is read later, section by section, under a
+    budget applied at read time. Binding both to one set of numbers is why the
+    library only ever held a clipped preview.
+
+    Zero means unlimited. Every limit has to be listed here: leaving one at its
+    display default silently becomes the new ceiling. In particular max_sections
+    caps text and tables together, so a heading-rich page with a small
+    max_sections fills the budget with prose and stores no tables at all.
+    """
+
+    max_sections: int = Field(default=0, ge=0)
+    max_section_chars: int = Field(default=0, ge=0)
+    total_text_budget_chars: int = Field(default=0, ge=0)
+    total_output_budget_chars: int = Field(default=0, ge=0)
+    max_table_rows: int = Field(default=2000, ge=1)
+    max_tables: int = Field(default=50, ge=1)
+
+
+# What /web/capture persists with: no clipping of body text, and enough table
+# rows that a 223-row table survives whole.
+CAPTURE_PERSIST_BUDGET = SectionBudget()
+
+
 class DistillRequest(BaseModel):
     session_id: str
-    distill_mode: Literal["simple", "readability", "auto"] = "auto"
+    # "html" parses page.content() in-process instead of running an extractor
+    # inside the page; see extract.py for why capture uses it.
+    distill_mode: Literal["simple", "readability", "auto", "html"] = "auto"
     max_sections: int = Field(default=30, ge=1, le=60)
     max_section_chars: int = Field(default=1800, ge=200, le=8000)
     total_text_budget_chars: int = Field(default=12000, ge=1000, le=60000)
@@ -247,9 +277,8 @@ class CaptureResponse(BaseModel):
     cache_age_hours: float | None = None
     # The URL the content actually came from (after redirects) and the status it
     # was served with, so a caller can tell a real article from a soft error page
-    # without reading the body. A reused response fills both from the cached
-    # capture; http_status is None there when that capture predates the field or
-    # its navigation reported no response.
+    # without reading the body. None on a reused response: the cached entry
+    # records the final URL but predates status capture.
     final_url: str | None = None
     http_status: int | None = None
     # "pending" when summary_mode="defer" scheduled an LLM digest/brief; poll

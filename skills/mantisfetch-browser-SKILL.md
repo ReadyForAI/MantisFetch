@@ -773,8 +773,6 @@ Request body:
 | `extract_tables` | bool     | `true`         | Whether to extract HTML tables                   |
 | `lang`           | string   | `"en-US"`      | Browser locale                                   |
 | `timeout_ms`     | int      | `25000`        | Page load timeout in milliseconds                |
-| `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
-| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
 
 **Error pages are refused, not stored.** Capture reads the HTTP status the final
 URL was served with. An upstream 4xx returns **422** (the URL is dead or
@@ -787,6 +785,8 @@ A successful response reports `final_url` (after redirects) and `http_status`, s
 a soft error page can be told apart from an article without reading the body.
 `http_status` is null when the navigation reported no response, e.g. a
 same-document navigation.
+| `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
+| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
 
 Response example:
 
@@ -800,9 +800,7 @@ Response example:
   "table_count": 2,
   "reused": false,
   "cache_age_hours": null,
-  "summary_status": null,
-  "final_url": "https://example.com/article",
-  "http_status": 200
+  "summary_status": null
 }
 ```
 

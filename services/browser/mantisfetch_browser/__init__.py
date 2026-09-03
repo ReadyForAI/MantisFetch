@@ -51,7 +51,11 @@ from providers.search.base import (
 # YOLO detection + Readability.js loading. Imported as `vision` so endpoints can
 # read the startup-mutated vision.YOLO_ENABLED / vision.READABILITY_* state live;
 # the functions are re-exported for bare calls.
+from . import extract
 from . import vision as vision
+from .models import (
+    CAPTURE_PERSIST_BUDGET as CAPTURE_PERSIST_BUDGET,
+)
 
 # Pydantic request/response models for the /web endpoints. Re-exported so the
 # endpoint handlers keep referencing them off the package namespace.
@@ -135,6 +139,9 @@ from .models import (
 )
 from .models import (
     Section as Section,
+)
+from .models import (
+    SectionBudget as SectionBudget,
 )
 from .models import (
     SkippedItem as SkippedItem,
@@ -1000,14 +1007,16 @@ def _blocks_to_sections_stable(
         if len(cur) > 40:
             flush()
             cur_h = None
-        if len(sections_raw) >= max_sections:
+        if max_sections > 0 and len(sections_raw) >= max_sections:
             break
     flush()
 
-    # Tables appended as separate sections after text sections
+    # Tables appended as separate sections after text sections. They share the
+    # section budget with the text above, so an unlimited max_sections is what
+    # keeps a heading-rich page from filling it with prose and storing no tables.
     if tables:
         for tbl in tables:
-            if len(sections_raw) >= max_sections:
+            if max_sections > 0 and len(sections_raw) >= max_sections:
                 break
             tbl_text = (tbl.get("text") or "").strip()
             if not tbl_text:
@@ -1029,12 +1038,14 @@ def _blocks_to_sections_stable(
     used = 0
     seen = set()
 
-    for h, body, sec_type, tbl_meta in sections_raw[:max_sections]:
-        if used >= total_budget:
-            break
-        remain = total_budget - used
-        if len(body) > remain:
-            body = _clip(body, max(220, remain))
+    ordered = sections_raw if max_sections <= 0 else sections_raw[:max_sections]
+    for h, body, sec_type, tbl_meta in ordered:
+        if total_budget > 0:
+            if used >= total_budget:
+                break
+            remain = total_budget - used
+            if len(body) > remain:
+                body = _clip(body, max(220, remain))
 
         sid = _make_stable_sid(h, body)
         if sid in seen:
@@ -1335,10 +1346,28 @@ async def _invoke_webmcp_tool(
 # ============================================================
 # Distill core
 # ============================================================
-async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
+async def _distill(
+    session: Session, req: DistillRequest, *, budget: SectionBudget | None = None
+) -> dict[str, Any]:
+    """Distill the session's current page.
+
+    ``budget`` overrides the request's section/table limits. The request carries a
+    *display* budget sized for what goes back to the model; capture passes
+    CAPTURE_PERSIST_BUDGET instead, because what it writes is read back later
+    under a budget of its own. Without the split, the library only ever held a
+    clipped preview of every page.
+    """
     page = session.page
     url = page.url
     title = None
+    budget = budget or SectionBudget(
+        max_sections=req.max_sections,
+        max_section_chars=req.max_section_chars,
+        total_text_budget_chars=req.total_text_budget_chars,
+        total_output_budget_chars=req.total_output_budget_chars,
+        max_table_rows=req.max_table_rows,
+        max_tables=req.max_tables,
+    )
 
     # optional wait_for_selector (SPA-friendly)
     if req.wait_for_selector:
@@ -1354,6 +1383,35 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
     blocks: list[dict[str, str]] = []
     readability_meta = {}
     extracted_tables: list[dict[str, Any]] = []
+
+    if mode == "html":
+        # Parse the rendered DOM in-process. No script injection, so a strict
+        # Content-Security-Policy is a non-event; no textContent, so headings
+        # survive and become sids; no 40k slice.
+        page_html = await page.content()
+        blocks = extract.html_to_blocks(page_html)
+        if not blocks:
+            mode = "simple"
+        else:
+            title = extract.html_title(page_html) or await page.title()
+            url = page.url
+            readability_meta = {"extractor": "in_process"}
+            if req.extract_tables:
+                # Tables stay in the page: HTML-to-text loses them, and the
+                # dedicated extractor reads cell structure and column stats.
+                try:
+                    extracted_tables = (
+                        await page.evaluate(
+                            EXTRACT_TABLES_JS,
+                            {
+                                "maxTableRows": budget.max_table_rows,
+                                "maxTables": budget.max_tables,
+                            },
+                        )
+                        or []
+                    )
+                except Exception:
+                    extracted_tables = []
 
     if mode == "readability":
         if not vision.READABILITY_AVAILABLE or not vision.READABILITY_JS:
@@ -1396,8 +1454,8 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
                             await page.evaluate(
                                 EXTRACT_TABLES_JS,
                                 {
-                                    "maxTableRows": req.max_table_rows,
-                                    "maxTables": req.max_tables,
+                                    "maxTableRows": budget.max_table_rows,
+                                    "maxTables": budget.max_tables,
                                 },
                             )
                             or []
@@ -1408,7 +1466,7 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
     if mode == "simple":
         dist = await page.evaluate(
             DISTILL_SIMPLE_JS,
-            {"extractTables": req.extract_tables, "maxTableRows": req.max_table_rows},
+            {"extractTables": req.extract_tables, "maxTableRows": budget.max_table_rows},
         )
         blocks = dist.get("blocks") or []
         extracted_tables = dist.get("tables") or []
@@ -1417,9 +1475,9 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
 
     sections = _blocks_to_sections_stable(
         blocks=blocks,
-        max_sections=req.max_sections,
-        max_section_chars=req.max_section_chars,
-        total_budget=req.total_text_budget_chars,
+        max_sections=budget.max_sections,
+        max_section_chars=budget.max_section_chars,
+        total_budget=budget.total_text_budget_chars,
         tables=extracted_tables if req.extract_tables else None,
     )
 
@@ -1514,7 +1572,7 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
         sections=sections,
         actions=actions,
         meta=meta,
-        total_budget=req.total_output_budget_chars,
+        total_budget=budget.total_output_budget_chars,
         min_actions_to_keep=req.min_actions_to_keep,
         name_max=req.max_action_name_chars,
         selector_max=req.max_selector_chars,
@@ -1523,8 +1581,8 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
     meta["actions_count"] = len(actions)
     meta["sections_count"] = len(sections)
     meta["budget"] = {
-        "total_output_budget_chars": req.total_output_budget_chars,
-        "total_text_budget_chars": req.total_text_budget_chars,
+        "total_output_budget_chars": budget.total_output_budget_chars,
+        "total_text_budget_chars": budget.total_text_budget_chars,
         "max_actions": req.max_actions,
         "min_actions_to_keep": req.min_actions_to_keep,
     }
@@ -3028,12 +3086,17 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
 
                 distill_req = DistillRequest(
                     session_id=sid,
+                    # In-process extraction: keeps the page's heading tree, and
+                    # a strict CSP cannot break it.
+                    distill_mode="html",
                     include_actions=False,
                     include_diff=False,
                     extract_tables=req.extract_tables,
                 )
                 try:
-                    out = await _distill(sess, distill_req)
+                    # Storage budget, not the display one: what lands here is
+                    # read back section by section later.
+                    out = await _distill(sess, distill_req, budget=CAPTURE_PERSIST_BUDGET)
                 except Exception as e:
                     raise HTTPException(500, f"capture distill failed: {e}")
 

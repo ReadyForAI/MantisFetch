@@ -32,7 +32,8 @@ def _hash_text(s: str) -> str:
 
 
 def _clip(s: str, max_chars: int) -> str:
-    if len(s) <= max_chars:
+    # max_chars <= 0 means "no limit" — the storage budget capture persists with.
+    if max_chars <= 0 or len(s) <= max_chars:
         return s
     cut = s[:max_chars]
     last = cut.rfind("\n\n")
@@ -269,6 +270,14 @@ def _apply_total_output_budget(
     actions = [
         _trim_action_fields(a, name_max=name_max, selector_max=selector_max) for a in actions
     ]
+
+    if total_budget <= 0:
+        # Unbudgeted (capture's storage profile): no second pass over the
+        # sections. This one trims section text from the tail, so leaving it at
+        # its display default would re-clip everything the storage budget just
+        # spared — it never bound before only because total_text_budget_chars
+        # (12000) was the smaller of the two.
+        return sections, actions, meta
 
     meta_chars = _estimate_meta_chars(meta)
     sec_chars = sum(len(s.get("t") or "") + len(s.get("h") or "") for s in sections)
