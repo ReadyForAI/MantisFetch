@@ -3891,10 +3891,20 @@ async def api_parse_doc(
                     parsed = await loop.run_in_executor(None, lambda: parse_csv(tmp_path))
                 elif suffix == ".ppt":
                     parsed = await loop.run_in_executor(
-                        None, lambda: parse_generic(_convert_legacy_office(tmp_path, "pptx"), profile=profile)
+                        None,
+                        lambda: parse_generic(
+                            _convert_legacy_office(tmp_path, "pptx"),
+                            profile=profile,
+                            extract_tables=extract_tables,
+                        ),
                     )
                 else:  # .pptx, .html, .htm, etc.
-                    parsed = await loop.run_in_executor(None, lambda: parse_generic(tmp_path, profile=profile))
+                    parsed = await loop.run_in_executor(
+                        None,
+                        lambda: parse_generic(
+                            tmp_path, profile=profile, extract_tables=extract_tables
+                        ),
+                    )
                 # Persist the source while tmp_path still exists; the finally
                 # below removes tmp_dir, and we no longer hold the bytes in
                 # memory after the streaming upload. A replacement moves the
