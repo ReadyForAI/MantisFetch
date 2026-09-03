@@ -426,3 +426,15 @@ def test_pruning_removes_the_container_whole() -> None:
            "<h2>Description</h2><p>Article body text long enough to keep.</p></body>"
     headings = [b["text"] for b in html_to_blocks(html) if b["tag"] in ("h1", "h2", "h3")]
     assert headings == ["Description"]
+
+
+def test_chrome_names_match_on_word_boundaries() -> None:
+    """Without boundaries "share" hits "shareholder" and "nav" hits anything
+    containing those three letters."""
+    from mantisfetch_browser.extract import _CHROME_NAME_RE as rx
+
+    for hit in ("catlinks", "related", "navigation-not-searchable", "mw-navigation",
+                "site-footer", "toc"):
+        assert rx.search(hit), hit
+    for miss in ("shareholder", "sharemarket-data", "navigator-info", "innavigable"):
+        assert not rx.search(miss), miss

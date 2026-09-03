@@ -105,9 +105,14 @@ _PRUNE_CONTAINERS = ("div", "section", "ul", "ol", "dl")
 # every item is a link, so it scores exactly like a navigation block — and it is
 # the article. Density decides *whether* a self-declared chrome container really
 # is one; it cannot nominate a container on its own.
+# Matched on word boundaries against the class/id text. Without them "share"
+# hits "shareholder" and "nav" hits anything containing those three letters, so
+# each form that should match is spelled out instead — "navigation" is listed
+# because \bnav\b does not reach it.
 _CHROME_NAME_RE = re.compile(
-    r"nav|footer|header|sidebar|menu|breadcrumb|crumb|toc|catlinks|advert|"
-    r"promo|social|share|related|banner|cookie|consent|subscribe|newsletter",
+    r"\b(?:nav|navigation|navbar|navbox|footer|header|sidebar|side-?bar|menu|"
+    r"breadcrumb|breadcrumbs|crumb|toc|catlinks|advert|advertisement|promo|"
+    r"social|share|related|banner|cookie|consent|subscribe|newsletter)\b",
     re.I,
 )
 
@@ -131,7 +136,7 @@ def _chrome_name_hit(node: Any) -> bool:
     return bool(haystack.strip()) and bool(_CHROME_NAME_RE.search(haystack))
 
 
-def _content_score(node: Any) -> float:
+def _content_score(node: Any, text_len: int) -> float:
     """How much this container looks like content rather than chrome, in [0, 1].
 
     Three signals, none of which is site-specific:
@@ -143,10 +148,11 @@ def _content_score(node: Any) -> float:
     - bulk — a long container is unlikely to be chrome whatever else it looks
       like, so length can rescue a link-heavy but substantial node.
     """
-    text_len = len(node.get_text(" ", strip=True))
     if not text_len:
         return 0.0
-    markup_len = len(str(node)) or 1
+    # decode_contents() skips the node's own tag and, unlike str(node), does not
+    # re-serialize it for every candidate on a div-heavy page.
+    markup_len = len(node.decode_contents()) or 1
     link_text_len = sum(len(a.get_text(" ", strip=True)) for a in node.find_all("a"))
 
     link_density = min(1.0, link_text_len / text_len)
@@ -170,9 +176,10 @@ def _prune_node(node: Any) -> None:
         return
     if not _chrome_name_hit(node):
         return
-    if len(node.get_text(" ", strip=True)) < _PRUNE_MIN_TEXT:
+    text_len = len(node.get_text(" ", strip=True))
+    if text_len < _PRUNE_MIN_TEXT:
         return
-    if _content_score(node) < _PRUNE_THRESHOLD:
+    if _content_score(node, text_len) < _PRUNE_THRESHOLD:
         node.decompose()
 
 
