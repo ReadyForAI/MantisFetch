@@ -21,6 +21,7 @@ So only the fence case is a real defect, and only that is fixed.
 """
 
 import mantisfetch_docreader as dr
+import pytest
 
 FENCED = """Intro paragraph before the sample.
 
@@ -84,6 +85,50 @@ def test_an_unclosed_fence_does_not_swallow_the_rest_silently() -> None:
     text = "Intro.\n\n```python\ncode\n\nmore code"
     chunks = _split(text, max_tokens=8)
     assert any("code" in c for c in chunks)
+
+
+# ── the two fixes have to hold together ─────────────────────────────────────────
+# Every fence case above ran with overlap_tokens=0 and every overlap case used
+# prose, so neither covered the combination — and the combination reintroduced
+# the exact defect this file exists to prevent, through the overlap instead of
+# through the split.
+LONG_FENCE = (
+    "Intro paragraph here.\n\n```python\n"
+    + "\n".join(f"line_{n} = compute_something({n})" for n in range(1, 40))
+    + "\n```\n\nAfter."
+)
+
+
+@pytest.mark.parametrize("overlap_tokens", [0, 8, 200, 1000])
+def test_overlap_never_starts_inside_a_fence(overlap_tokens: int) -> None:
+    """A trailing-line overlap over a chunk that ends with a fence carries the
+    closing ``` forward, so the next chunk opens unbalanced."""
+    for chunk in _split(LONG_FENCE, max_tokens=40, overlap_tokens=overlap_tokens):
+        assert chunk.count("```") % 2 == 0, f"unbalanced fence in {chunk!r}"
+
+
+def test_the_default_overlap_is_covered() -> None:
+    """ChunkRequest.overlap_tokens defaults to 200, which is what production
+    uses — the fence tests above would have passed at 0 forever."""
+    from mantisfetch_docreader import ChunkRequest
+
+    default = ChunkRequest().overlap_tokens
+    for chunk in _split(LONG_FENCE, max_tokens=40, overlap_tokens=default):
+        assert chunk.count("```") % 2 == 0
+
+
+def test_a_fence_that_fits_is_carried_whole() -> None:
+    """Balanced either way — trimming only applies when the tail starts inside."""
+    small = "```\ncode line\n```"
+    assert dr._tail_lines_within(small, 200).count("```") == 2
+
+
+def test_a_fence_too_large_to_carry_leaves_no_overlap() -> None:
+    """Only part of it fits, so the tail would begin inside the fence and carry
+    the closing ``` forward. Carrying nothing is right: the fence is already
+    whole in the previous chunk, so there is no context to lose."""
+    big = "```\n" + "\n".join(f"row {n} of the sample" for n in range(200)) + "\n```"
+    assert dr._tail_lines_within(big, 20) == ""
 
 
 # ── overlap carries whole lines ─────────────────────────────────────────────────

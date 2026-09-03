@@ -3107,6 +3107,15 @@ def _tail_lines_within(text: str, overlap_tokens: int) -> str:
     Slicing the last N characters instead cuts mid-word, mid-table-row, or into
     a code fence — the overlap exists to give the next chunk context, and half a
     row is not context.
+
+    Whole lines are not enough on their own. When the previous chunk ends with a
+    fenced block, a trailing-line overlap starts *inside* the fence and carries
+    its closing ``` into the next chunk, which then opens with unbalanced
+    markdown — the same broken output this splitter was changed to stop
+    producing, arriving through the overlap instead of through the split. So an
+    overlap that begins inside a fence is trimmed forward past the close, which
+    may leave nothing to carry. Nothing is the right answer there: the fence is
+    already whole in the previous chunk.
     """
     if overlap_tokens <= 0:
         return ""
@@ -3117,6 +3126,11 @@ def _tail_lines_within(text: str, overlap_tokens: int) -> str:
         if _estimate_tokens("\n".join(candidate)) > overlap_tokens and kept:
             break
         kept = candidate
+
+    # An odd number of fence markers means the tail starts inside a fence: the
+    # first marker going forward is its close. Drop through it.
+    while kept and sum(1 for line in kept if _FENCE_LINE_RE.match(line)) % 2:
+        kept.pop(0)
     return "\n".join(kept).strip()
 
 
