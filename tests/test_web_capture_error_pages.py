@@ -63,13 +63,25 @@ def _capture(client: TestClient, docs_dir: Path, goto: AsyncMock):
 
 
 # ── error pages never enter the library ─────────────────────────────────────────
-@pytest.mark.parametrize("status", [400, 403, 404, 410, 500, 503])
-def test_error_page_is_rejected_and_not_stored(client: TestClient, status: int) -> None:
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        # An upstream 4xx is the caller's URL being dead or forbidden. Answering
+        # 502 would read as a retryable gateway failure and invite an agent to
+        # hammer a dead link, so these are 422.
+        (400, 422), (403, 422), (404, 422), (410, 422), (451, 422),
+        # An upstream 5xx really is a bad gateway, and retrying may work.
+        (500, 502), (502, 502), (503, 502),
+    ],
+)
+def test_error_page_is_rejected_and_not_stored(
+    client: TestClient, status: int, expected: int
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         docs_dir = Path(tmp)
         resp = _capture(client, docs_dir, _goto_mock(status))
 
-        assert resp.status_code == 502
+        assert resp.status_code == expected
         assert str(status) in resp.json()["detail"]
         # nothing was written: no doc dir, no index
         assert not (docs_dir / "General").exists()
@@ -119,6 +131,68 @@ def test_manifest_records_http_status(client: TestClient) -> None:
             (docs_dir / "General" / doc_id / "manifest.json").read_text(encoding="utf-8")
         )
         assert manifest["provenance"]["http_status"] == 200
+
+
+def test_manifest_records_null_status_distinctly(client: TestClient) -> None:
+    """A navigation with no response writes http_status: null. That has to stay
+    distinguishable from a capture made before the field existed, which has no
+    key at all — so the key is always written."""
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        resp = _capture(client, docs_dir, _goto_mock(None))
+        doc_id = resp.json()["doc_id"]
+        provenance = json.loads(
+            (docs_dir / "General" / doc_id / "manifest.json").read_text(encoding="utf-8")
+        )["provenance"]
+        assert "http_status" in provenance
+        assert provenance["http_status"] is None
+
+
+def test_reused_response_carries_the_recorded_status(client: TestClient) -> None:
+    """A cache hit must not drop http_status: the capture recorded it, so the
+    reused response reads it back rather than reporting null."""
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        first = _capture(client, docs_dir, _goto_mock(200))
+        assert first.json()["reused"] is False
+
+        second = _capture(client, docs_dir, _goto_mock(200))
+        body = second.json()
+        assert body["reused"] is True
+        assert body["doc_id"] == first.json()["doc_id"]
+        assert body["http_status"] == 200
+
+
+def test_session_goto_reports_status_without_refusing(client: TestClient) -> None:
+    """A session may legitimately want to land on a 404 and act from there, so
+    goto reports the status instead of rejecting it — the opposite of capture,
+    which is about to persist what it fetched."""
+    import mantisfetch_browser as lb
+
+    mock_page = AsyncMock()
+    mock_page.goto = _goto_mock(404)
+    mock_page.title = AsyncMock(return_value="Not Found")
+    mock_page.url = "https://example.com/missing"
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+
+    orig = lb._browser
+    lb._browser = MagicMock()
+    lb._browser.new_context = AsyncMock(return_value=mock_context)
+    try:
+        with patch("mantisfetch_browser._setup_routing", new=AsyncMock()):
+            sid = client.post("/web/session/new", json={}).json()["session_id"]
+            resp = client.post(
+                "/web/session/goto",
+                json={"session_id": sid, "url": "https://example.com/missing"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["http_status"] == 404
+            client.post("/web/session/close", json={"session_id": sid})
+    finally:
+        lb._browser = orig
 
 
 # ── CSP: a blocked injection degrades to simple, it does not abort ──────────────

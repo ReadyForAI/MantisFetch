@@ -45,6 +45,11 @@ class GotoResponse(BaseModel):
     session_id: str
     url: str
     title: str | None = None
+    # Reported, not enforced. /capture rejects an error page because it is about
+    # to store it; a session may legitimately want to land on a 404 and act from
+    # there, so the caller decides. None when the navigation reported no response
+    # (e.g. same-document).
+    http_status: int | None = None
 
 
 class DistillRequest(BaseModel):

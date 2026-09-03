@@ -1963,10 +1963,11 @@ def _persist_web_capture(
                 "source_url": url,
                 "created_at": now_str,
                 "content_hash": content_hash,
-                # Status the final URL was served with. Captures written before
-                # this was recorded have no key at all, which is distinct from a
-                # navigation that reported no response (null).
-                **({"http_status": http_status} if http_status is not None else {}),
+                # Status the final URL was served with. Always written, so null
+                # (the navigation reported no response, e.g. same-document) stays
+                # distinguishable from a capture made before this was recorded,
+                # which has no key at all.
+                "http_status": http_status,
             },
         }
         if summary_mode == "defer":
@@ -2473,6 +2474,25 @@ def _resolve_cached_summary(
     return "pending"
 
 
+def _stored_http_status(docs_dir: Path, storage_path: Any) -> int | None:
+    """The http_status a capture recorded, for a response that reuses it.
+
+    None both when the capture predates the field and when the navigation
+    reported no response — a cached response cannot tell those apart, and the
+    manifest is where the distinction lives.
+    """
+    if not isinstance(storage_path, str) or not storage_path:
+        return None
+    try:
+        manifest = json.loads(
+            (docs_dir / storage_path / "manifest.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    status = (manifest.get("provenance") or {}).get("http_status")
+    return status if isinstance(status, int) else None
+
+
 def _cached_capture_response(
     entry: dict[str, Any], content_type: str, docs_dir: Path, summary_mode: str = "off"
 ) -> CaptureResponse:
@@ -2510,6 +2530,7 @@ def _cached_capture_response(
         reused=True,
         cache_age_hours=age_hours,
         final_url=entry.get("source_url"),
+        http_status=_stored_http_status(docs_dir, storage_path),
         summary_status=_resolve_cached_summary(entry, docs_dir, content_type, summary_mode),
     )
 
@@ -2625,7 +2646,9 @@ async def goto(req: GotoRequest) -> GotoResponse:
     sess = await _ensure_session(req.session_id)
     async with sess.lock:  # concurrency lock
         try:
-            await sess.page.goto(req.url, wait_until=req.wait_until, timeout=req.timeout_ms)
+            response = await sess.page.goto(
+                req.url, wait_until=req.wait_until, timeout=req.timeout_ms
+            )
         except Exception as e:
             raise HTTPException(502, f"goto failed: {e}")
         # WebMCP: new page needs tool re-discovery
@@ -2636,7 +2659,12 @@ async def goto(req: GotoRequest) -> GotoResponse:
             title = await sess.page.title()
         except Exception:
             pass
-        return GotoResponse(session_id=req.session_id, url=sess.page.url, title=title)
+        return GotoResponse(
+            session_id=req.session_id,
+            url=sess.page.url,
+            title=title,
+            http_status=response.status if response is not None else None,
+        )
 
 
 @app.post("/session/distill", response_model=DistillResponse)
@@ -2984,8 +3012,15 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 # of bug as falling back on an empty result.
                 http_status = response.status if response is not None else None
                 if http_status is not None and http_status >= 400:
+                    # Split by who failed. An upstream 5xx really is a bad
+                    # gateway and is worth retrying, so 502. An upstream 4xx is
+                    # not: the URL is dead or forbidden, and answering 502 would
+                    # invite an agent to retry a dead link forever. The request
+                    # itself was well-formed, so 422 — the URL is what cannot be
+                    # processed. The upstream status is in the detail either way.
+                    status = 502 if http_status >= 500 else 422
                     raise HTTPException(
-                        502, f"capture failed: HTTP {http_status} for {response.url}"
+                        status, f"capture failed: HTTP {http_status} for {response.url}"
                     )
 
                 sess.webmcp_tools = None

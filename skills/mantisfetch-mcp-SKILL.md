@@ -128,7 +128,7 @@ bodies, so its snippets can carry page text verbatim.
 
 | Tool | Purpose | Key args |
 | ---- | ------- | -------- |
-| `web_capture` | One-shot semantic capture of a URL into the library (token-cheap; no session). Returns `doc_id` + digest + section/table counts (`reused=true` when a recent cached capture is returned). | `url`, `content_type="General"`, `tags?`, `extract_tables=true`, `force_refresh=false`, `summary_mode="off"` (`"defer"` schedules LLM digest+brief; poll `doc_summary`) |
+| `web_capture` | One-shot semantic capture of a URL into the library (token-cheap; no session). Returns `doc_id` + digest + section/table counts, plus `final_url` and `http_status` (`reused=true` when a recent cached capture is returned). **Refuses error pages**: an upstream 4xx is `422` (dead/forbidden URL — do not retry) and an upstream 5xx is `502`; neither stores anything, so a `doc_id` always means real content. | `url`, `content_type="General"`, `tags?`, `extract_tables=true`, `force_refresh=false`, `summary_mode="off"` (`"defer"` schedules LLM digest+brief; poll `doc_summary`) |
 | `web_search` † | Web search — a ranked list of `{url, title, snippet, ...}`. Title/snippet are wrapped as untrusted content. Prefer `doc_search` first to reuse the library. | `query`, `max_results=8`, `lang="en"`, `freshness?` |
 | `web_search_capture` † | Search + capture the top N hits (`capture_top ≤ 3`) into the library. Returns `[{doc_id, digest, rank, reused}]` — deep-read via the tiers, don't pull full text blindly. | `query`, `capture_top=2`, `tags?`, `content_type="General"`, `lang="en"`, `freshness?` |
 | `web_session_open` | Open a stateful browser session. Returns `session_id`. | — |
