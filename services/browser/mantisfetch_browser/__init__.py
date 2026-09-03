@@ -3322,17 +3322,40 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             table_sections = [s for s in sections if s.get("type") == "table"]
             digest = _build_web_digest(title, sections)
 
-            # B5 content-level dedup: after distill, reuse an existing library doc
-            # with the same body hash (different URL / tracking params / AMP).
-            # force_refresh always forces a new doc_id. Skip empty bodies — every
-            # blank page shares the same empty-body hash and must not collide.
-            # Require non-empty section/table text — title alone is not enough
-            # (challenge/error pages often share "Just a moment..." titles).
+            # Title alone is not content: challenge and error pages routinely
+            # share a "Just a moment..." title over an empty body.
             meaningful_body = any(
                 (s.get("t") or "").strip() for s in sections if isinstance(s, dict)
             )
+
+            # The same judgement the 4xx branch above makes, for a page that
+            # answered 200 and still yielded nothing: prose and tables both land
+            # in `t`, so an empty one means neither survived extraction. Storing
+            # it would mint a doc_id for a document with no sections, no tables
+            # and a blank digest — an artifact whose only content is the fact
+            # that it is empty, and one the caller cannot distinguish from a
+            # real capture without fetching it back. That is the empty-result
+            # fallback the 4xx comment refuses; refuse it here too.
+            #
+            # 422, not 502: the origin did its job. Retrying changes nothing,
+            # because what the page is made of is what the extractor could not
+            # read. The counts go in the detail so this is not mistaken for the
+            # dead-URL 422 next to it.
+            if not meaningful_body:
+                raise HTTPException(
+                    422,
+                    f"capture found no extractable content at {url} "
+                    f"(HTTP {http_status}, {len(sections) - len(table_sections)} "
+                    f"text sections, {len(table_sections)} tables)",
+                )
+
+            # B5 content-level dedup: after distill, reuse an existing library doc
+            # with the same body hash (different URL / tracking params / AMP).
+            # force_refresh always forces a new doc_id. The empty-body case that
+            # used to be guarded here — every blank page hashing alike and so
+            # colliding with every other — cannot reach this point any more.
             legacy_hash = out.get("content_hash_legacy") if isinstance(out, dict) else None
-            if not req.force_refresh and content_hash and meaningful_body:
+            if not req.force_refresh and content_hash:
                 # Serialize concurrent same-hash captures so two workers don't both miss.
                 async with _optional_capture_lock(f"ch:{content_hash}"):
                     hit = await asyncio.to_thread(
