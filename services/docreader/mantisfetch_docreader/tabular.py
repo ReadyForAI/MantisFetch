@@ -9,8 +9,8 @@ shape the result into a `ParsedDocument`:
 - `parse_generic` — any other MarkItDown-supported format (PPTX, HTML, …),
   sectioned via the shared splitter.
 
-`_split_sections` (sectioning) and `_count_markdown_tables` (ocr.tables) are
-leaf imports. `_convert_to_markdown` / `_section_sid` / `MAX_PARSE_ROWS` live in
+`_split_sections` (sectioning) and `_extract_markdown_table_blocks` (ocr.tables)
+are leaf imports. `_convert_to_markdown` / `_section_sid` / `MAX_PARSE_ROWS` live in
 the package `__init__`, so they are reached via function-level relative imports
 to break the import cycle (the facade imports this module early); this also lets
 tests that patch `docreader._convert_to_markdown` take effect.
@@ -23,7 +23,7 @@ import re
 from pathlib import Path
 
 from .models import DocumentProfile, PageContent, ParsedDocument, Section
-from .ocr.tables import _count_markdown_tables
+from .ocr.tables import _extract_markdown_table_blocks
 from .sectioning import _split_sections
 
 logger = logging.getLogger("mantisfetch_docreader")
@@ -147,7 +147,37 @@ def parse_csv(filepath: Path) -> ParsedDocument:
     )
 
 
-def parse_generic(filepath: Path, profile: DocumentProfile | None = None) -> ParsedDocument:
+#: MarkItDown marks each slide it emits. The count is the deck's, not an
+#: estimate from how much text the slides happened to contain.
+_SLIDE_MARKER_RE = re.compile(r"^<!--\s*Slide number:\s*\d+\s*-->[ \t]*\n?", re.MULTILINE)
+
+
+def _slide_pages(markdown_text: str) -> list[PageContent]:
+    """One page per slide, or empty for a format that has no slides.
+
+    The markers are structure, not content: left in the text, the first one
+    became a 24-character opening section holding nothing but the comment. They
+    are consumed here instead — the boundary they mark is kept as the page
+    split, and the comment itself does not reach the document.
+
+    Anything before the first marker (MarkItDown's title heading) belongs to
+    slide 1; there is no slide 0 to put it on.
+    """
+    marks = list(_SLIDE_MARKER_RE.finditer(markdown_text))
+    if not marks:
+        return []
+    pages: list[PageContent] = []
+    for i, mark in enumerate(marks):
+        head = markdown_text[: mark.start()] if i == 0 else ""
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(markdown_text)
+        body = (head + markdown_text[mark.end() : end]).strip()
+        pages.append(PageContent(page_num=i + 1, text=body))
+    return pages
+
+
+def parse_generic(
+    filepath: Path, profile: DocumentProfile | None = None, extract_tables: bool = True
+) -> ParsedDocument:
     """Parse any MarkItDown-supported format (PPTX, HTML, etc.)."""
     from . import _convert_to_markdown, _section_sid
 
@@ -157,21 +187,43 @@ def parse_generic(filepath: Path, profile: DocumentProfile | None = None) -> Par
     markdown_text = _convert_to_markdown(filepath)
     logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
 
-    est_pages = max(1, len(markdown_text) // 3000)
-    pages = [PageContent(page_num=1, text=markdown_text)]
+    # A deck knows how many slides it has. Dividing the markdown by 3000 does
+    # not: a 2-slide deck reported total_pages 1, and — because everything was
+    # one PageContent — every section cited p.1-1 however long the deck ran.
+    # Splitting on the markers fixes both halves; a format with no slides keeps
+    # the length estimate on a single page, as before.
+    pages = _slide_pages(markdown_text)
+    if not pages:
+        pages = [PageContent(page_num=1, text=markdown_text)]
+        total_pages = max(1, len(markdown_text) // 3000)
+    else:
+        total_pages = len(pages)
+
+    # The tables were being counted and then dropped. `_count_markdown_tables`
+    # found the one in an HTML page, the response reported table_count 0, and
+    # no sidecar was written — because the count never became content and the
+    # sidecar writer reads PageContent.tables, which stayed empty. DOCX, XLSX
+    # and CSV all populate it; this is the path that did not. Extracting per
+    # page also attributes each table to the slide it is on.
+    if extract_tables:
+        for page in pages:
+            page.tables = _extract_markdown_table_blocks(page.text)
+    table_count = sum(len(page.tables) for page in pages)
+
     sections = _split_sections(pages, section_policy=profile.section_policy if profile else None)
     for sec in sections:
         sec.sid = _section_sid(sec.title, sec.text)
 
-    table_count = _count_markdown_tables(markdown_text)
-
-    logger.info(f"Parse complete: {len(sections)} sections, ~{est_pages} pages")
+    logger.info(f"Parse complete: {len(sections)} sections, {total_pages} pages")
     return ParsedDocument(
         filename=filepath.name,
         file_type=file_type,
-        total_pages=est_pages,
+        total_pages=total_pages,
         pages=pages,
         sections=sections,
         table_count=table_count,
+        # Otherwise the writer walks the table pipeline for a caller who asked
+        # for none. Same result, but the document should record what was asked.
+        extract_tables=extract_tables,
         metadata={"document_profile": profile.name if profile else None},
     )
