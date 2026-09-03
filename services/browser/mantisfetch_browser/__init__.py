@@ -1776,11 +1776,15 @@ def _build_web_table_sidecar(
             "source": "web_capture",
             "caption": meta.get("caption"),
             "heading": meta.get("heading"),
-            # rows/column_count come from the DOM (the full table), so they can
-            # exceed the rows actually stored when the extractor truncated.
-            "row_count": meta.get("rows", len(rows)),
+            # row_count counts EVERY row the DOM table had, header included, and
+            # can exceed what was stored when the extractor truncated.
+            # stored_row_count counts only the data rows actually on disk. The
+            # fallback has to add the header back, or a table without table_meta
+            # would report the two under different definitions.
+            "row_count": meta.get("rows", len(rows) + (1 if header else 0)),
             "column_count": meta.get("cols", len(header or (rows[0] if rows else []))),
             "has_header": bool(header),
+            "header_rows": 1 if header else 0,
             "truncated": bool(meta.get("truncated")),
             "stored_row_count": len(rows),
             "stats": meta.get("stats"),
@@ -1793,7 +1797,13 @@ def _build_web_table_sidecar(
             "row_count": payload["row_count"],
             "column_count": payload["column_count"],
             "has_header": payload["has_header"],
+            "header_rows": payload["header_rows"],
             "truncated": payload["truncated"],
+            # A DOM table is never split across pages the way a PDF table is, so
+            # these are always null — present so the sidecar shape matches
+            # docreader's and consumers need no special case for captures.
+            "continued_from": None,
+            "continued_to": None,
             "source": "web_capture",
             "char_count": len(body),
             "type": "markdown",

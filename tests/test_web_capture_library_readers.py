@@ -185,6 +185,110 @@ def test_table_json_absent_without_tables(tmp_path: Path) -> None:
     assert "tables" not in manifest["paths"]
 
 
+def test_search_text_scope_full_matches_a_capture(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    """Without full.md this scope could never match a capture at all."""
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+    resp = client.get(
+        "/doc/library/search_text", params={"q": TABLE_ONLY_TOKEN, "scope": "full"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1
+
+
+def test_truncated_table_reports_dom_rows_and_stored_rows(tmp_path: Path) -> None:
+    """A truncated table's row_count is the DOM total (header included) while
+    stored_row_count counts the data rows on disk — the GDP case, where the DOM
+    had 223 rows and only a fraction reached the file."""
+    import mantisfetch_browser as lb
+
+    body = "| Country | GDP |\n| --- | --- |\n" + "\n".join(
+        f"| C{n} | {n} |" for n in range(1, 6)
+    )
+    lb._persist_web_capture(
+        doc_id="WEB-902", url="https://example.com/gdp", title="GDP",
+        sections=[{
+            "sid": "t_1", "h": "[Table] GDP", "t": body, "type": "table",
+            "table_meta": {"rows": 223, "cols": 2, "has_header": True, "truncated": True},
+        }],
+        digest="d", tags=[], content_hash="sha256:gdp", docs_dir=tmp_path,
+        content_type="General", extract_tables=True,
+        requested_url="https://example.com/gdp", lang="en-US",
+    )
+    payload = json.loads(
+        (tmp_path / "General" / "WEB-902" / "tables" / "table-01.json").read_text()
+    )
+    assert payload["row_count"] == 223  # what the DOM had
+    assert payload["stored_row_count"] == 5  # what actually reached disk
+    assert payload["truncated"] is True
+    assert payload["header"] == ["Country", "GDP"]
+
+
+def test_row_count_fallback_counts_the_header_too(tmp_path: Path) -> None:
+    """Without table_meta both counts must still use their own definitions:
+    row_count includes the header row, stored_row_count does not."""
+    import mantisfetch_browser as lb
+
+    lb._persist_web_capture(
+        doc_id="WEB-903", url="https://example.com/t", title="T",
+        sections=[{
+            "sid": "t_1", "h": "[Table] X", "type": "table",
+            "t": "| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |",
+        }],
+        digest="d", tags=[], content_hash="sha256:t", docs_dir=tmp_path,
+        content_type="General", extract_tables=True,
+        requested_url="https://example.com/t", lang="en-US",
+    )
+    doc_dir = tmp_path / "General" / "WEB-903"
+    payload = json.loads((doc_dir / "tables" / "table-01.json").read_text())
+    assert payload["row_count"] == 3  # 2 data rows + the header
+    assert payload["stored_row_count"] == 2
+    assert payload["header_rows"] == 1
+
+    # the sidecar entry keeps docreader's shape so consumers need no special case
+    entry = json.loads((doc_dir / "tables.json").read_text())[0]
+    assert entry["continued_from"] is None and entry["continued_to"] is None
+    assert entry["row_count"] == 3 and entry["header_rows"] == 1
+
+
+# ── 4b. the upload retry path must not swallow a capture ────────────────────────
+def test_retry_summary_refuses_a_web_capture(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    """POST /library/{id}/summary reconstructs a document and rewrites it via
+    write_output_extract_only(source="upload"). Run over a web capture that would
+    rewrite full.md, copy the capture's table markdown into sections/, and relabel
+    the document as an upload.
+
+    Before the resolver accepted tables/, a capture *with* tables happened to fail
+    loudly here ("section file missing"); one *without* tables was already being
+    corrupted silently. Captures own their own deferred-summary path, so this now
+    refuses outright.
+    """
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+    doc_dir = captured / "General" / "WEB-900"
+    before = json.loads((doc_dir / "manifest.json").read_text())
+    full_before = (doc_dir / "full.md").read_text(encoding="utf-8")
+
+    resp = client.post("/doc/library/WEB-900/summary")
+    assert resp.status_code == 409
+    assert "web capture" in resp.json()["detail"]
+
+    after = json.loads((doc_dir / "manifest.json").read_text())
+    assert after["source"] == before["source"] == "web_capture"
+    assert after["sections"] == before["sections"]
+    assert (doc_dir / "full.md").read_text(encoding="utf-8") == full_before
+    # the table stayed in tables/, it was not copied into sections/
+    assert sorted(p.name for p in (doc_dir / "sections").iterdir()) == [
+        "01-s_0001-Intro.md"
+    ]
+
+
 # ── 5. markdown → cells round-trip ──────────────────────────────────────────────
 def test_web_table_rows_parses_header_and_cells() -> None:
     from mantisfetch_browser import _web_table_rows
@@ -254,3 +358,24 @@ def test_mcp_doc_search_text_calls_the_right_endpoint(monkeypatch) -> None:
     assert seen["params"]["q"] == "cavitation"
     assert seen["params"]["doc_id"] == "WEB-001"
     assert seen["params"]["scope"] == "section"
+
+
+def test_mcp_doc_search_text_passes_tags_through(monkeypatch) -> None:
+    import asyncio
+
+    import mantisfetch_mcp as mm
+
+    seen: dict = {}
+
+    async def fake_get(path: str, params: dict | None = None):
+        seen.update(params or {})
+        return {"results": [], "total": 0}
+
+    monkeypatch.setattr(mm, "_doc_get", fake_get)
+    asyncio.run(mm.doc_search_text(q="x", tags="bid,2026"))
+    assert seen["tags"] == "bid,2026"
+
+    seen.clear()
+    asyncio.run(mm.doc_search_text(q="x"))
+    assert "tags" not in seen  # omitted rather than sent empty
+    assert "doc_id" not in seen
