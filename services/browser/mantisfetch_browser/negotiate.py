@@ -17,7 +17,11 @@ Each rung has three outcomes, not two:
 
   hit     markdown or plain text with a 2xx  -> use it
   miss    HTML, or 404                       -> try the next rung
-  refuse  5xx                                -> give up entirely
+  refuse  5xx on the URL the caller asked for -> give up entirely
+
+A 5xx on one of the speculative rungs is only a miss. Plenty of hosts answer 500
+or 503 for a path that does not exist rather than 404, and a probe for a file
+beside the page must not fail a page that reads perfectly well in a browser.
 
 The miss case has to include *HTML with a 200*. ``Accept`` is a request header a
 server may ignore, and an SPA's "not found" page is almost always 200 + HTML.

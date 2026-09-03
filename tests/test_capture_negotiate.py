@@ -79,7 +79,8 @@ def _capture(client: TestClient, docs_dir: Path, *, body=None, **payload):
         orig = lb._browser
         lb._browser = browser
         try:
-            resp = client.post("/web/capture", json={"url": "https://example.com/page", **payload})
+            payload.setdefault("url", "https://example.com/page")
+            resp = client.post("/web/capture", json=payload)
         finally:
             lb._browser = orig
     return resp, browser
@@ -362,3 +363,27 @@ def test_fenced_code_keeps_its_indentation() -> None:
 def test_a_heading_inside_a_fence_is_not_a_heading() -> None:
     blocks = markdown_to_blocks("```\n# Not a heading\n```\n")
     assert [b["tag"] for b in blocks] == ["pre"]
+
+
+async def test_reuse_actually_happens_across_urls(client, tmp_path: Path) -> None:
+    """The identity test above compares two formulas. This one proves the lookup
+    is wired: capture a page, then capture the same body under a tracking-param
+    URL and require the same doc_id back.
+
+    _find_capture_by_requested_url cannot cover this — it is an exact string
+    match, so ?utm= walks straight past it. Only the content-hash lookup catches
+    it, and computing the hash without consulting it is what the previous round
+    of review found.
+    """
+    first, browser = _capture(client, tmp_path, body=_negotiated(), extract_tables=False)
+    assert first.status_code == 200
+    browser.new_context.assert_not_awaited()
+
+    second, _ = _capture(
+        client, tmp_path, body=_negotiated(), extract_tables=False,
+        url="https://example.com/page?utm_source=newsletter",
+    )
+    assert second.status_code == 200
+    body = second.json()
+    assert body["reused"] is True
+    assert body["doc_id"] == first.json()["doc_id"]
