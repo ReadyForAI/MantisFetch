@@ -657,7 +657,10 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | `429 too many concurrent requests`                 | Rate limit exceeded            | Wait and retry — server limits concurrent parse operations                 |
 | `404 document not found`                           | Invalid doc_id or unparsed doc | Use search to confirm doc_id first                                         |
 | `404 section not found`                            | Invalid sid                    | Call `/doc/library/{doc_id}/sections` first to get valid sid list           |
-| `500 parse failed`                                 | Corrupted or encrypted PDF     | Prompt user to check the file                                              |
+| `422 <file> is empty (0 bytes)`                    | The upload had no bytes        | **Do not retry.** Nothing was stored and no `doc_id` was taken             |
+| `422 <file> is not a valid docx/xlsx/pptx file`    | The OOXML formats are zips; this file is not one (wrong extension, or a truncated upload) | **Do not retry.** Nothing was stored. Check what was actually uploaded |
+| `422 parse failed`                                 | The file is not the format its extension claims — e.g. a PDF whose header is not a PDF | **Do not retry.** The `.parse-failed.json` record is kept; re-upload the real file |
+| `500 parse failed`                                 | The server could not read a document it should have been able to — a missing converter, a parser fault | Retry; if it persists it is a service problem, not the file |
 | `500 RuntimeError` about missing LLM credentials   | LLM provider credentials not configured | Check the active LLM provider settings and restart service        |
 | Parsing takes too long                             | Large file + OCR               | Use `generate_summary=false` for fast extraction first, generate summary later |
 | Table is empty                                     | Tables are images or complex layouts | First confirm text OCR was ingested; if critical table content is missing, retry only relevant pages with `ocr_pages`, or use `force_ocr=true` only when the extra cost is acceptable |

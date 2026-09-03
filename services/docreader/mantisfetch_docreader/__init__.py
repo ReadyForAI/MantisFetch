@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import weakref
+import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -727,6 +728,8 @@ SUPPORTED_FORMATS = [
     "xml",
 ]
 SUPPORTED_EXTENSIONS = {f".{fmt}" for fmt in SUPPORTED_FORMATS}
+#: OOXML containers — zip archives, unlike the legacy OLE2 .doc/.ppt/.xls.
+_OOXML_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
 # Backward-compat: tender_cn was renamed to bid_cn to match the Bid storage directory.
 
 # Lazy-initialized MarkItDown converter
@@ -755,9 +758,7 @@ def _get_converter():
 # is the cheaper mistake: a container that slipped in here wastes a read and
 # declares nothing (its bytes will not decode as UTF-8), while a text format
 # left out silently goes back to being guessed at.
-_CONTAINER_SUFFIXES = frozenset(
-    {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"}
-)
+_CONTAINER_SUFFIXES = frozenset({".pdf", ".doc", ".ppt", ".xls"}) | _OOXML_SUFFIXES
 _TEXT_FAMILY_SUFFIXES = SUPPORTED_EXTENSIONS - _CONTAINER_SUFFIXES
 
 
@@ -2478,6 +2479,35 @@ def _safe_source_filename(filename: str) -> str:
 PARSE_FAILURE_MARKER = ".parse-failed.json"
 
 
+def _is_unreadable_document(exc: BaseException) -> bool:
+    """True when the parser failed because the file is not what it claims.
+
+    The distinction the status code has to carry: a document the server could
+    not read is the caller's problem to fix (422), a server that could not read
+    a document is ours (500).
+
+    Only PyMuPDF's FileDataError qualifies today — a PDF whose header is not a
+    PDF. The OOXML formats are refused before any parser sees them, by the zip
+    check in the handler, so there is no second class to list here; adding one
+    speculatively would be guessing at which library means what.
+
+    The error is commonly re-raised wrapped, so the whole chain is walked.
+    Nothing is matched on message text: a parser that changes its wording must
+    not silently move a document from 422 back to 500.
+    """
+    import fitz  # noqa: PLC0415
+
+    unreadable = (fitz.FileDataError,)
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, unreadable):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 def _record_parse_failure(
     doc_dir: Path, doc_id: str, phase: str, error: str, *, docs_dir: Path, replacing: bool
 ) -> None:
@@ -3561,6 +3591,37 @@ async def api_parse_doc(
     _allow_running_detached()
 
     try:
+        # An upload with no bytes is not a document. It parsed to a section
+        # titled "Full document" with char_count 0, took a doc_id, and joined
+        # the library and every tag index — an entry whose only content is that
+        # it has none, and which the caller cannot tell from a real one without
+        # opening it. Same judgement /web/capture makes for a page that yields
+        # nothing.
+        #
+        # Size is a property of the upload, known before any parser runs, so
+        # this refuses ahead of the doc_id and writes no failure record: a file
+        # with nothing in it is a rejected request, not a parse that failed.
+        if total_size == 0:
+            raise HTTPException(422, f"{filename} is empty (0 bytes); nothing to parse")
+
+        # The OOXML formats are zips. A file that is not one cannot be read as
+        # one, and nothing downstream will say so: MarkItDown falls back to
+        # reading the bytes as plain text, so 40 bytes of junk named .docx came
+        # back 200 with a one-section document holding the junk. The unzip
+        # budget check already spots this and returns, deferring to "a clearer
+        # parse error" that never arrives.
+        #
+        # is_zipfile reads the end-of-central-directory record only, so a
+        # truncated archive fails here too. Legacy .doc/.ppt/.xls are OLE2, not
+        # zips, and are not checked.
+        if suffix in _OOXML_SUFFIXES and scratch_path is not None:
+            if not await asyncio.to_thread(zipfile.is_zipfile, scratch_path):
+                raise HTTPException(
+                    422,
+                    f"{filename} is not a valid {suffix.lstrip('.')} file "
+                    f"(not a zip archive)",
+                )
+
         # Refuse a document this call cannot afford, before it costs anything.
         # The estimate is cheap and runs before the doc_id is minted, so a
         # refusal burns no id and leaves no directory. It has to sit inside this
@@ -3919,7 +3980,19 @@ async def api_parse_doc(
                     doc_storage_dir, d_id, "parse", str(e),
                     docs_dir=docs_dir, replacing=will_replace,
                 )
-                raise HTTPException(500, t("parse_failed", err=str(e)))
+                # 500 says the server broke. For a file that is not the format
+                # its extension claims — 68 bytes of binary named .pdf — nothing
+                # broke: the request is well-formed and the document is not
+                # readable, which is 422, the same answer /web/capture gives a
+                # dead URL. Getting this wrong costs a caller a retry loop
+                # against a file that will never parse.
+                #
+                # Only the unambiguous cases are remapped. A missing
+                # LibreOffice, an OOM or a bug in a parser is a server fault and
+                # stays 500 — a blanket remap would tell every caller their file
+                # was bad whenever this service was.
+                status = 422 if _is_unreadable_document(e) else 500
+                raise HTTPException(status, t("parse_failed", err=str(e)))
             finally:
                 # Cleanup temp file
                 try:
