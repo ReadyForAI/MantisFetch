@@ -3055,6 +3055,71 @@ def _make_chunk(
     return chunk
 
 
+_FENCE_LINE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def _split_into_atomic_blocks(text: str) -> list[str]:
+    """Split on blank lines, except inside a fenced code block.
+
+    Splitting on every blank line cuts a fence in half: the first chunk keeps an
+    opening ``` with nothing closing it and the next starts with a stray closing
+    one, so a consumer reading either sees broken markdown — everything after the
+    orphan fence renders as code. A blank line between two functions in a code
+    sample is completely ordinary, so this is not a rare shape.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    in_fence = False
+
+    def flush() -> None:
+        joined = "\n".join(current).strip()
+        current.clear()
+        if joined:
+            blocks.append(joined)
+
+    for line in text.split("\n"):
+        if _FENCE_LINE_RE.match(line):
+            if in_fence:
+                current.append(line)
+                in_fence = False
+                flush()
+                continue
+            # An opening fence starts its own block, so the paragraph before it
+            # is not glued to the code.
+            flush()
+            in_fence = True
+            current.append(line)
+            continue
+        if in_fence:
+            current.append(line)
+            continue
+        if not line.strip():
+            flush()
+        else:
+            current.append(line)
+    flush()
+    return blocks
+
+
+def _tail_lines_within(text: str, overlap_tokens: int) -> str:
+    """The trailing whole lines of ``text`` that fit in ``overlap_tokens``.
+
+    Slicing the last N characters instead cuts mid-word, mid-table-row, or into
+    a code fence — the overlap exists to give the next chunk context, and half a
+    row is not context.
+    """
+    if overlap_tokens <= 0:
+        return ""
+    lines = text.split("\n")
+    kept: list[str] = []
+    for line in reversed(lines):
+        candidate = [line, *kept]
+        if _estimate_tokens("\n".join(candidate)) > overlap_tokens and kept:
+            break
+        kept = candidate
+    return "\n".join(kept).strip()
+
+
 def _split_text_by_token_estimate(
     record: dict[str, Any],
     *,
@@ -3064,7 +3129,7 @@ def _split_text_by_token_estimate(
     start_index: int,
 ) -> list[dict[str, Any]]:
     text = str(record.get("text") or "")
-    paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+    paragraphs = _split_into_atomic_blocks(text)
     if not paragraphs:
         paragraphs = [text]
 
@@ -3087,9 +3152,9 @@ def _split_text_by_token_estimate(
             )
             chunk_index += 1
             if overlap_tokens:
-                overlap_chars = max(0, int(overlap_tokens * 4))
-                current_parts = [chunk_text[-overlap_chars:]] if overlap_chars else []
-                current_tokens = _estimate_tokens(current_parts[0]) if current_parts else 0
+                carried = _tail_lines_within(chunk_text, overlap_tokens)
+                current_parts = [carried] if carried else []
+                current_tokens = _estimate_tokens(carried) if carried else 0
             else:
                 current_parts = []
                 current_tokens = 0
