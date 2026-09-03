@@ -10,4 +10,4 @@ importable without any ``sys.path`` changes.
 #: reports a version (``/health``, both FastAPI apps, the MCP ``serverInfo``)
 #: reads this, and ``pyproject.toml`` picks it up via ``dynamic = ["version"]``
 #: — the literal must not be repeated anywhere else.
-__version__ = "1.6.3"
+__version__ = "1.7.0"
