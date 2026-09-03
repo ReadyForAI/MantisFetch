@@ -27,7 +27,8 @@ What is given up: the in-page paths can ask the browser whether an element is
 actually visible (``getComputedStyle`` / ``getBoundingClientRect``). Parsing the
 serialized DOM cannot, so this path is more inclusive — a ``display:none``
 element reaches the blocks. The tags most likely to hide content that way are
-dropped outright below, and boilerplate scoring is the real answer.
+dropped outright below, and the boilerplate pruning that follows them covers the
+chrome that does not announce itself with a tag.
 
 What is *not* done here: tables. Converting HTML to text loses them (a Sphinx
 table survives as prose, not as rows), so table extraction stays in the page
@@ -36,6 +37,7 @@ where the dedicated extractor can read cell geometry.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -82,6 +84,97 @@ _MAX_TOTAL_CHARS = 2_000_000
 # captured section titles.
 _HEADING_NOISE_RE = re.compile(r"(?:\s*\[edit\]|\s*[\u00b6\u00a7])+\s*$")
 
+# ── boilerplate pruning ────────────────────────────────────────────────────────
+# Dropping nav/footer/aside by tag only catches chrome that says what it is.
+# Everything else has to be scored. Measured leftovers on real pages:
+#
+#   Wikipedia tail  "CS1 maint: publisher location", "Articles containing
+#                   Chinese-language text" — hidden maintenance categories, an
+#                   unmarked <div> of nothing but links
+#   Sphinx head/tail "3.14.7 Documentation »", "The Python Standard Library »"
+#                   — a breadcrumb rendered as <li>, and emitted twice
+#
+# Both are ~100% link text, which is what makes link density the load-bearing
+# signal. Hardcoding .navbox / .related instead would fix these two sites and no
+# others.
+_PRUNE_CONTAINERS = ("div", "section", "ul", "ol", "dl")
+
+# Names that describe chrome. Required before anything is removed: link density
+# alone deletes real content. Measured on the Mantis shrimp page, the species
+# list (Archaeocaris vermiformis, Gorgonophontes fraiponti, ...) is a list where
+# every item is a link, so it scores exactly like a navigation block — and it is
+# the article. Density decides *whether* a self-declared chrome container really
+# is one; it cannot nominate a container on its own.
+_CHROME_NAME_RE = re.compile(
+    r"nav|footer|header|sidebar|menu|breadcrumb|crumb|toc|catlinks|advert|"
+    r"promo|social|share|related|banner|cookie|consent|subscribe|newsletter",
+    re.I,
+)
+
+# Below this a self-declared chrome container really is chrome. It exists to
+# spare the container that names itself "related" or "sidebar" and then holds
+# actual prose — a name is a hint about intent, not proof about content.
+_PRUNE_THRESHOLD = 0.35
+
+# A container this small cannot be judged by density — a one-line paragraph and
+# a one-line breadcrumb look identical. Left for the block-level filters.
+_PRUNE_MIN_TEXT = 40
+
+
+def _chrome_name_hit(node: Any) -> bool:
+    """True when the node's class or id names it as chrome."""
+    attrs = node.attrs or {}
+    names = attrs.get("class") or []
+    if isinstance(names, str):
+        names = [names]
+    haystack = " ".join([*names, str(attrs.get("id") or "")])
+    return bool(haystack.strip()) and bool(_CHROME_NAME_RE.search(haystack))
+
+
+def _content_score(node: Any) -> float:
+    """How much this container looks like content rather than chrome, in [0, 1].
+
+    Three signals, none of which is site-specific:
+
+    - link density — the share of the text sitting inside <a>. A navigation
+      block is nearly all links; prose is nearly none. This dominates.
+    - text density — text length against markup length. Chrome is many small
+      elements around little text.
+    - bulk — a long container is unlikely to be chrome whatever else it looks
+      like, so length can rescue a link-heavy but substantial node.
+    """
+    text_len = len(node.get_text(" ", strip=True))
+    if not text_len:
+        return 0.0
+    markup_len = len(str(node)) or 1
+    link_text_len = sum(len(a.get_text(" ", strip=True)) for a in node.find_all("a"))
+
+    link_density = min(1.0, link_text_len / text_len)
+    text_density = min(1.0, text_len / markup_len)
+    bulk = min(1.0, math.log10(text_len + 1) / 4.0)  # 10k chars saturates
+
+    return 0.55 * (1.0 - link_density) + 0.25 * text_density + 0.20 * bulk
+
+
+def _prune_boilerplate(body: Any) -> None:
+    """Remove containers that name themselves chrome and read like it."""
+    for node in list(body.find_all(_PRUNE_CONTAINERS)):
+        if node.parent is None:  # already removed along with an ancestor
+            continue
+        _prune_node(node)
+
+
+def _prune_node(node: Any) -> None:
+    """Remove one container if it both names itself chrome and reads like it."""
+    if node.parent is None:
+        return
+    if not _chrome_name_hit(node):
+        return
+    if len(node.get_text(" ", strip=True)) < _PRUNE_MIN_TEXT:
+        return
+    if _content_score(node) < _PRUNE_THRESHOLD:
+        node.decompose()
+
 
 def _clean_text(node: Any) -> str:
     """Node text with runs of whitespace collapsed."""
@@ -115,6 +208,7 @@ def html_to_blocks(
     body = soup.body or soup
     for tag in body.find_all(_DROP_TAGS):
         tag.decompose()
+    _prune_boilerplate(body)
 
     blocks: list[dict[str, str]] = []
     seen_nested: set[int] = set()

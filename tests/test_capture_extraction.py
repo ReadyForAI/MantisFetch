@@ -369,3 +369,60 @@ def test_storage_budget_keeps_whole_tables() -> None:
 
 def test_section_budget_defaults_are_the_storage_profile() -> None:
     assert SectionBudget() == CAPTURE_PERSIST_BUDGET
+
+
+# ── boilerplate pruning ─────────────────────────────────────────────────────────
+# Dropping nav/footer/aside by tag only catches chrome that says what it is.
+# What was left on real pages: Wikipedia's hidden maintenance categories
+# (div#catlinks) and Sphinx's breadcrumb (div.related), both rendered as plain
+# <li> outside any <nav>.
+
+# Items long enough to clear _MIN_BODY_CHARS, so these tests exercise the pruner
+# rather than the block-length floor. Roughly the length of a real species name.
+LINKS = "".join(
+    f'<li><a href="/{n}">Archaeocaris specimen number {n}</a></li>' for n in range(12)
+)
+
+
+def test_named_chrome_that_is_all_links_is_pruned() -> None:
+    html = f'<body><div id="catlinks"><ul>{LINKS}</ul></div>' \
+           "<p>Real article prose that is long enough to keep.</p></body>"
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "Archaeocaris specimen" not in body
+    assert "Real article prose" in body
+
+
+def test_an_all_links_list_that_is_content_survives() -> None:
+    """The load-bearing case. On the Mantis shrimp page the species list is a
+    list whose every item is a link, so by density alone it is indistinguishable
+    from a navigation block — and it is the article. Density may only judge a
+    container that already names itself chrome; it may never nominate one."""
+    html = f"<body><ul>{LINKS}</ul>" \
+           "<p>Real article prose that is long enough to keep.</p></body>"
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "Archaeocaris specimen" in body
+
+
+def test_a_chrome_name_over_real_prose_survives() -> None:
+    """A name is a hint about intent, not proof about content, so the density
+    check still has to agree before anything is removed."""
+    prose = " ".join(f"Sentence {n} of a genuinely long passage of prose." for n in range(40))
+    html = f'<body><div class="related"><p>{prose}</p></div></body>'
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "genuinely long passage" in body
+
+
+def test_tiny_named_containers_are_left_alone() -> None:
+    """Too little text to judge: a one-line paragraph and a one-line breadcrumb
+    read identically, so the block-level filters decide instead."""
+    html = '<body><div class="menu"><p>Short but real sentence.</p></div></body>'
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "Short but real sentence." in body
+
+
+def test_pruning_removes_the_container_whole() -> None:
+    """Including its headings — a pruned sidebar must not leave a stray title."""
+    html = f'<body><div class="sidebar"><h2>Elsewhere</h2><ul>{LINKS}</ul></div>' \
+           "<h2>Description</h2><p>Article body text long enough to keep.</p></body>"
+    headings = [b["text"] for b in html_to_blocks(html) if b["tag"] in ("h1", "h2", "h3")]
+    assert headings == ["Description"]
