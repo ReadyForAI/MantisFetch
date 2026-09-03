@@ -143,3 +143,85 @@ async def test_map_box_to_element_accepts_object_arg(page) -> None:
     # The point may or may not resolve to an interactive element; the regression
     # guard is only that the multi-arg call itself does not raise TypeError.
     assert info is None or isinstance(info, dict)
+
+
+# ── navigation-table gate ───────────────────────────────────────────────────────
+# A page carrying one data table and one navigation box. Modelled on Wikipedia,
+# where a `vte` navbox is as rectangular and as full of <th> label cells as a
+# real table — structure cannot separate them, only link density can.
+NAV_TABLE_HTML = """<!DOCTYPE html>
+<html><head><title>Gate</title></head><body><article>
+<p>An article about regional revenue that is long enough to be parsed.</p>
+<table><caption>Revenue</caption>
+  <tr><th>Region</th><th>Amount</th></tr>
+  <tr><td><a href="/north">North</a></td><td>1200</td></tr>
+  <tr><td><a href="/south">South</a></td><td>1450</td></tr>
+  <tr><td><a href="/east">East</a></td><td>1310</td></tr>
+</table>
+<table class="navbox">
+  <tr><th><a href="/a">Related topics</a></th>
+      <td><a href="/b">Alpha region</a> <a href="/c">Beta region</a>
+          <a href="/d">Gamma region</a> <a href="/e">Delta region</a></td></tr>
+  <tr><th><a href="/f">See also here</a></th>
+      <td><a href="/g">Epsilon region</a> <a href="/h">Zeta region</a></td></tr>
+</table>
+</article></body></html>
+"""
+
+
+@pytest_asyncio.fixture
+async def nav_page(page):
+    await page.set_content(NAV_TABLE_HTML)
+    return page
+
+
+async def test_navigation_table_is_skipped(nav_page) -> None:
+    """The navbox is all link text; the data table is not."""
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.8},
+    )
+    joined = " ".join(t["text"] for t in tables)
+    assert "Revenue" in joined or "1200" in joined, "the data table was dropped"
+    assert "Alpha region" not in joined, "the navigation box was kept"
+
+
+async def test_the_gate_can_be_disabled(nav_page) -> None:
+    """navLinkDensity=1.0 restores the pre-gate behaviour: every visible table."""
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 1.0},
+    )
+    joined = " ".join(t["text"] for t in tables)
+    assert "Alpha region" in joined
+    assert len(tables) == 2
+
+
+async def test_simple_mode_applies_the_same_gate(nav_page) -> None:
+    """Both extractors share one gate, so they cannot disagree about a table."""
+    result = await mb._distill(
+        _session(nav_page),
+        DistillRequest(session_id="s", distill_mode="simple", include_actions=False),
+    )
+    tables = [s for s in result["sections"] if s.get("type") == "table"]
+    joined = " ".join(t["t"] for t in tables)
+    assert "1200" in joined
+    assert "Alpha region" not in joined
+
+
+async def test_a_data_table_of_links_is_kept(nav_page) -> None:
+    """Link density is a share, not a count: a table whose cells are links but
+    which also carries real values stays under the threshold."""
+    await nav_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        "<table><caption>Cities</caption>"
+        "<tr><th>City</th><th>Population</th></tr>"
+        '<tr><td><a href="/a">Springfield</a></td><td>117203 residents counted</td></tr>'
+        '<tr><td><a href="/b">Shelbyville</a></td><td>241887 residents counted</td></tr>'
+        "</table></article></body></html>"
+    )
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.8},
+    )
+    assert any("Springfield" in t["text"] for t in tables)

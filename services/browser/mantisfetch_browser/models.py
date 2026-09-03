@@ -73,6 +73,11 @@ class SectionBudget(BaseModel):
     total_output_budget_chars: int = Field(default=0, ge=0)
     max_table_rows: int = Field(default=2000, ge=1)
     max_tables: int = Field(default=50, ge=1)
+    # Above this share of cell text sitting inside links, a <table> is treated as
+    # navigation and skipped. 0.8 keeps every content table measured (the densest
+    # was a taxobox at 0.60) and drops every navigation box (the sparsest was
+    # 0.75). 1.0 disables the gate.
+    nav_link_density: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
 # What /web/capture persists with: no clipping of body text, and enough table
