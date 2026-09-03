@@ -261,3 +261,88 @@ def html_title(html: str) -> str | None:
     if soup.title and soup.title.string:
         return " ".join(soup.title.string.split()) or None
     return None
+
+
+# ── markdown ───────────────────────────────────────────────────────────────────
+# The negotiated fetch path receives markdown, not HTML, but everything
+# downstream — sections, sids, content_hash — must not care which arrived. Both
+# converge here on the same block vocabulary, so one page cannot get one identity
+# from one path and a different identity from the other.
+
+_ATX_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$")
+_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+
+
+def markdown_to_blocks(md: str, max_blocks: int = _MAX_BLOCKS) -> list[dict[str, str]]:
+    """Parse markdown into the same blocks ``html_to_blocks`` produces.
+
+    Line-based on purpose. A full CommonMark parser would be a new dependency
+    and would normalize away the structure this exists to keep; what arrives
+    from a .md endpoint or an llms.txt link is ATX headings, paragraphs, fenced
+    code and lists.
+
+    Heading levels below h3 collapse to h3: ``_blocks_to_sections_stable`` only
+    breaks on h1-h3, so emitting h4 would silently make it body text.
+    """
+    if not md:
+        return []
+    blocks: list[dict[str, str]] = []
+    paragraph: list[str] = []
+
+    def flush_paragraph() -> None:
+        if not paragraph:
+            return
+        text = " ".join(" ".join(paragraph).split())
+        paragraph.clear()
+        if len(text) >= _MIN_BODY_CHARS:
+            blocks.append({"tag": "p", "text": text})
+
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines) and len(blocks) < max_blocks:
+        line = lines[i]
+
+        if _FENCE_RE.match(line):
+            # Atomic: a fence's interior is code, and its indentation is the
+            # content. Collected verbatim rather than whitespace-collapsed.
+            flush_paragraph()
+            body: list[str] = []
+            i += 1
+            while i < len(lines) and not _FENCE_RE.match(lines[i]):
+                body.append(lines[i])
+                i += 1
+            i += 1  # closing fence
+            code = "\n".join(body).strip("\n")
+            if code.strip():
+                blocks.append({"tag": "pre", "text": code})
+            continue
+
+        heading = _ATX_RE.match(line)
+        if heading:
+            flush_paragraph()
+            level = min(len(heading.group(1)), 3)
+            title = heading.group(2).strip().rstrip("#").strip()
+            if title:
+                blocks.append({"tag": f"h{level}", "text": title})
+            i += 1
+            continue
+
+        item = _LIST_RE.match(line)
+        if item:
+            flush_paragraph()
+            text = " ".join(item.group(1).split())
+            if len(text) >= _MIN_BODY_CHARS:
+                blocks.append({"tag": "li", "text": text})
+            i += 1
+            continue
+
+        if not line.strip():
+            flush_paragraph()
+        else:
+            paragraph.append(line.strip())
+        i += 1
+
+    if len(blocks) < max_blocks:
+        flush_paragraph()
+    return blocks[:max_blocks]
