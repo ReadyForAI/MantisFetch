@@ -3459,6 +3459,55 @@ async def _capture_negotiated(
     content_hash = _content_identity(title, sections)
     digest = _build_web_digest(title, sections)
 
+    # B5 content-level reuse, the same as the browser path does after distilling.
+    # Extracting _content_identity only makes the two paths agree on the *number*;
+    # reuse happens here, and without it a page already in the library — captured
+    # by the browser path, or reached earlier through a different URL — gets a
+    # second doc_id anyway. _find_capture_by_requested_url cannot cover this: it
+    # is an exact string match, so ?utm= or a .md variant slips straight past it.
+    meaningful_body = any((sec.get("t") or "").strip() for sec in sections)
+    if not req.force_refresh and content_hash and meaningful_body:
+        async with _optional_capture_lock(f"ch:{content_hash}"):
+            hit = await asyncio.to_thread(
+                _find_capture_by_content_hash, docs_dir, content_hash
+            )
+            if hit is not None:
+                merged = await asyncio.to_thread(
+                    _merge_capture_tags_metadata, docs_dir, hit, req.tags, req.metadata
+                )
+                hit_ct = _normalize_content_type(merged.get("content_type") or content_type)
+                metrics.incr("capture_content_hash_hits")
+                return await asyncio.to_thread(
+                    _cached_capture_response, merged, hit_ct, docs_dir, req.summary_mode
+                )
+            doc_id = await asyncio.to_thread(
+                _persist_negotiated, req, doc, content_type, docs_dir, sections,
+                title, digest, content_hash,
+            )
+            return _negotiated_response(
+                req, doc, content_type, docs_dir, sections, title, digest, doc_id
+            )
+    doc_id = await asyncio.to_thread(
+        _persist_negotiated, req, doc, content_type, docs_dir, sections,
+        title, digest, content_hash,
+    )
+    return _negotiated_response(
+        req, doc, content_type, docs_dir, sections, title, digest, doc_id
+    )
+
+
+def _persist_negotiated(
+    req: CaptureRequest,
+    doc: negotiate.NegotiatedDoc,
+    content_type: str,
+    docs_dir: Path,
+    sections: list[dict[str, Any]],
+    title: str | None,
+    digest: str,
+    content_hash: str,
+) -> str:
+    """Mint an id and write a negotiated capture. Runs in a worker thread."""
+
     def _alloc_and_persist() -> str:
         doc_id = _next_web_doc_id(docs_dir)
         _persist_web_capture(
@@ -3481,7 +3530,19 @@ async def _capture_negotiated(
         )
         return doc_id
 
-    doc_id = await asyncio.to_thread(_alloc_and_persist)
+    return _alloc_and_persist()
+
+
+def _negotiated_response(
+    req: CaptureRequest,
+    doc: negotiate.NegotiatedDoc,
+    content_type: str,
+    docs_dir: Path,
+    sections: list[dict[str, Any]],
+    title: str | None,
+    digest: str,
+    doc_id: str,
+) -> CaptureResponse:
     metrics.incr("capture_negotiated_hits")
 
     summary_status: str | None = None

@@ -10,8 +10,8 @@ The ladder, cheapest first (agent-browser's ``read.rs`` does the same):
 
   1. ``Accept: text/markdown`` on the requested URL
   2. the ``.md`` path variant — ``/docs/x`` -> ``/docs/x.md``, ``/`` -> ``/index.md``
-  3. ``llms.txt`` / ``llms-full.txt`` from the nearest ancestors, following the
-     link the index gives for this URL
+  3. ``llms.txt`` from the nearest ancestors, following the per-page link the
+     index gives for this URL
 
 Each rung has three outcomes, not two:
 
@@ -143,6 +143,13 @@ _MD_LINK_RE = re.compile(r"^\s*[-*+]\s+\[([^\]]+)\]\(([^)\s]+)\)")
 def find_llms_link(body: str, base_url: str, target: str) -> str | None:
     """The markdown URL an llms.txt index gives for ``target``, if any.
 
+    Matched by path, not by link text: a title is prose and would match the
+    wrong page. That makes this rung's contribution over the .md variant narrow
+    but real — an index that points at the same path on a different origin, a
+    docs site whose markdown is served from a CDN. Looser matching (last path
+    segment, say) would reach more sites and would also confuse /a/intro with
+    /b/intro, which stores the wrong document.
+
     Matches list-item links only — ``- [Title](/path.md)`` — which is the form
     the convention's examples use. Bare links and links under section headings
     are not read; they can be added when a site is found that needs it.
@@ -222,18 +229,26 @@ async def _url_allowed_async(url: str) -> bool:
 
 
 def _classify(
-    result: tuple[int, str, str] | None, url: str
+    result: tuple[int, str, str] | None, url: str, *, refuse_on_5xx: bool = False
 ) -> tuple[str, str | None, int]:
-    """('hit', body, status) | ('miss', None, status) | raises for 5xx.
+    """('hit', body, status) | ('miss', None, status) | raises for a refused 5xx.
 
     The status travels with the body: a 201 or 203 is a hit, and reporting it as
     200 would put a value in the manifest that the caller was told to trust.
+
+    ``refuse_on_5xx`` is only true for the URL the caller actually asked for. The
+    other rungs are speculative — a .md variant or an llms.txt that does not
+    exist — and plenty of hosts answer 500 or 503 for an unknown path rather than
+    404. Refusing on those would turn a page that reads perfectly well in a
+    browser into a failed capture.
     """
     if result is None:
         return "miss", None, 0
     status, content_type, body = result
     if status >= 500:
-        raise NegotiationRefused(status, url)
+        if refuse_on_5xx:
+            raise NegotiationRefused(status, url)
+        return "miss", None, status
     if status >= 400:
         return "miss", None, status
     if not _is_markdownish(content_type):
@@ -243,54 +258,62 @@ def _classify(
     return "hit", body, status
 
 
+# The requested URL gets the caller's budget; speculative probes get this. A
+# hung host on three rungs would otherwise add the caller's full timeout several
+# times over before the browser — which is the path a miss ends up taking anyway.
+_PROBE_TIMEOUT_S = 3.0
+
+
 async def try_fetch_markdown(url: str, *, timeout_ms: int = 10_000) -> NegotiatedDoc | None:
     """Walk the ladder. None when nothing answered with markdown."""
     import httpx  # noqa: PLC0415 - only on this path
 
-    timeout_s = timeout_ms / 1000.0
+    timeout_s = min(timeout_ms / 1000.0, 15.0)
+    probe_s = min(_PROBE_TIMEOUT_S, timeout_s)
     async with _sem, httpx.AsyncClient() as client:
         # 1. content negotiation on the URL as given
-        outcome, body, status = _classify(await _fetch(client, url, timeout_s), url)
+        outcome, body, status = _classify(
+            await _fetch(client, url, timeout_s), url, refuse_on_5xx=True
+        )
         if outcome == "hit" and body:
             return NegotiatedDoc(body, url, status, "negotiated")
 
         # 2. the .md path variant
         variant = md_path_variant(url)
         if variant:
-            outcome, body, status = _classify(await _fetch(client, variant, timeout_s), variant)
+            outcome, body, status = _classify(await _fetch(client, variant, probe_s), variant)
             if outcome == "hit" and body:
                 return NegotiatedDoc(body, variant, status, "md-path")
 
-        # 3. llms.txt / llms-full.txt from the nearest ancestors. All of them go
-        #    out together: a full miss is the common case, and probing the two
-        #    filenames in sequence would double the latency of the path that
-        #    ends up opening a browser anyway.
-        probes: list[tuple[str, str]] = []
-        for filename, via in (("llms.txt", "llms-index"), ("llms-full.txt", "llms-full")):
-            probes.extend((candidate, via) for candidate in llms_candidates(url, filename))
+        # 3. llms.txt from the nearest ancestors, all probed together: a full
+        #    miss is the common case, and probing them in sequence would only
+        #    delay the browser this path is trying to avoid.
+        #
+        #    Only per-page links are followed. llms-full.txt is deliberately not
+        #    consulted: it is the whole site in one file, so using it as the body
+        #    of some particular URL stores the wrong document — and because the
+        #    existing-URL guard then sees a capture for that URL, the next
+        #    attempt takes the browser path and mints a second doc_id for the
+        #    same page. A caller who wants llms-full.txt can request it directly,
+        #    and rung 1 returns it.
+        candidates = llms_candidates(url, "llms.txt")
         results = await asyncio.gather(
-            *(_fetch(client, candidate, timeout_s) for candidate, _ in probes),
+            *(_fetch(client, candidate, probe_s) for candidate in candidates),
             return_exceptions=True,
         )
-        for (candidate, via), result in zip(probes, results, strict=True):
-            if isinstance(result, NegotiationRefused):
-                raise result
+        for candidate, result in zip(candidates, results, strict=True):
             if isinstance(result, BaseException):
                 continue
-            outcome, index_body, status = _classify(result, candidate)
+            outcome, index_body, _ = _classify(result, candidate)
             if outcome != "hit" or not index_body:
                 continue
-            if via == "llms-full":
-                # The whole-site file. Its h1 names the site, not this page, so
-                # a capture from here carries the site title.
-                return NegotiatedDoc(index_body, candidate, status, via)
             link = find_llms_link(index_body, candidate, url)
             if not link:
                 continue
             # The index named this URL, which does not make it trusted: _fetch
             # runs the SSRF check on it like any other.
-            outcome, body, status = _classify(await _fetch(client, link, timeout_s), link)
+            outcome, body, status = _classify(await _fetch(client, link, probe_s), link)
             if outcome == "hit" and body:
-                return NegotiatedDoc(body, link, status, via)
+                return NegotiatedDoc(body, link, status, "llms-index")
 
     return None

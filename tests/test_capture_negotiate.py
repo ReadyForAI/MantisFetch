@@ -215,9 +215,19 @@ def test_an_empty_body_is_a_miss() -> None:
     assert outcome == "miss"
 
 
-def test_a_5xx_refuses_rather_than_missing() -> None:
+def test_a_5xx_on_the_requested_url_refuses() -> None:
     with pytest.raises(negotiate.NegotiationRefused):
-        negotiate._classify((503, "text/markdown", "x"), "https://e.com/x")
+        negotiate._classify((503, "text/markdown", "x"), "https://e.com/x", refuse_on_5xx=True)
+
+
+def test_a_5xx_on_a_speculative_probe_is_only_a_miss() -> None:
+    """A .md variant or an llms.txt that does not exist gets 500/503 from plenty
+    of hosts instead of 404. Refusing on those would turn a page that reads fine
+    in a browser into a failed capture."""
+    outcome, body, status = negotiate._classify(
+        (503, "text/html", "gateway"), "https://e.com/x.md"
+    )
+    assert outcome == "miss" and body is None and status == 503
 
 
 @pytest.mark.parametrize(
@@ -239,6 +249,73 @@ def test_ancestor_probing_is_capped() -> None:
     candidates = negotiate.llms_candidates("https://e.com/a/b/c/d/e", "llms.txt")
     assert len(candidates) == 3
     assert candidates[-1] == "https://e.com/llms.txt"
+
+
+async def test_llms_full_is_never_used_as_a_pages_body() -> None:
+    """It is the whole site in one file. Storing it as some particular URL's
+    document stores the wrong content — and because the existing-URL guard then
+    sees a capture for that URL, the next attempt takes the browser path and
+    mints a second doc_id for the same page. A site that publishes only
+    llms-full.txt must fall through to the browser."""
+    served = {
+        "https://e.com/llms.txt": (200, "text/markdown", "# Site\n\nNo per-page links.\n"),
+        "https://e.com/llms-full.txt": (
+            200, "text/markdown", "# Whole site\n\nEverything, all pages, one file.\n"),
+    }
+    fetched: list[str] = []
+
+    async def fake_fetch(client, url, timeout_s):
+        fetched.append(url)
+        return served.get(url)
+
+    with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
+        assert await negotiate.try_fetch_markdown("https://e.com/docs/page") is None
+    # the index was read and produced no link for this page; llms-full was not
+    # consulted as a substitute
+    assert "https://e.com/llms.txt" in fetched
+    assert not any(u.endswith("llms-full.txt") for u in fetched)
+
+
+async def test_an_llms_index_link_is_followed() -> None:
+    """The path that should work still works."""
+    # Links are matched by path, so what rung 3 adds over rung 2 is reach to a
+    # different origin for the same path — a docs site whose markdown lives on a
+    # CDN. The local .md variant 404s here, so rung 2 misses first.
+    served = {
+        "https://e.com/llms.txt": (
+            200, "text/markdown", "- [Page](https://cdn.e.com/docs/page.md)\n"),
+        "https://cdn.e.com/docs/page.md": (200, "text/markdown", MARKDOWN),
+    }
+
+    async def fake_fetch(client, url, timeout_s):
+        return served.get(url)
+
+    with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
+        doc = await negotiate.try_fetch_markdown("https://e.com/docs/page")
+    assert doc is not None
+    assert doc.fetch_via == "llms-index"
+    assert doc.final_url == "https://cdn.e.com/docs/page.md"
+
+
+async def test_a_5xx_probe_does_not_abort_the_ladder() -> None:
+    """The .md variant 503s; the index still gets its chance, and a miss still
+    falls through to the browser rather than failing the capture."""
+    async def fake_fetch(client, url, timeout_s):
+        if url.endswith(".md"):
+            return (503, "text/html", "gateway")
+        return None
+
+    with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
+        assert await negotiate.try_fetch_markdown("https://e.com/docs/page") is None
+
+
+async def test_a_5xx_on_the_requested_url_aborts_the_ladder() -> None:
+    async def fake_fetch(client, url, timeout_s):
+        return (503, "text/html", "down") if url == "https://e.com/docs/page" else None
+
+    with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
+        with pytest.raises(negotiate.NegotiationRefused):
+            await negotiate.try_fetch_markdown("https://e.com/docs/page")
 
 
 def test_llms_link_lookup_matches_the_target_page() -> None:
