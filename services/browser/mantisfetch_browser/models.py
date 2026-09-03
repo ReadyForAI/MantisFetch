@@ -277,8 +277,9 @@ class CaptureResponse(BaseModel):
     cache_age_hours: float | None = None
     # The URL the content actually came from (after redirects) and the status it
     # was served with, so a caller can tell a real article from a soft error page
-    # without reading the body. None on a reused response: the cached entry
-    # records the final URL but predates status capture.
+    # without reading the body. A reused response fills both from the cached
+    # capture; http_status is None there when that capture predates the field or
+    # its navigation reported no response.
     final_url: str | None = None
     http_status: int | None = None
     # "pending" when summary_mode="defer" scheduled an LLM digest/brief; poll

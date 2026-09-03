@@ -775,6 +775,23 @@ If false:
 | `timeout_ms`     | int      | `25000`        | 页面加载超时（毫秒） |
 | `force_refresh`  | bool     | `false`        | 绕过 URL 去重缓存、强制重抓（见下方说明） |
 
+**错误页会被拒绝，不入库。** capture 会读最终 URL 被服务的 HTTP 状态码。源站 4xx 返回
+**422**（链接已死或被禁——**不要重试**），源站 5xx 返回 **502**（真的是网关故障，重试可能成功）。
+两者都不往库里写任何东西，所以**拿到 `doc_id` 就一定意味着存下了真实内容**。在此之前，抓一个
+404 会生成一份 digest 写着「Page not found」的文档。
+
+成功的响应会带上 `final_url`（重定向后的最终地址）和 `http_status`，不用读正文就能把软错误页
+和真文章区分开。导航本身没有 response 时（例如同文档内跳转）`http_status` 为 null。
+
+**入库的是整页，不是预览。** capture 改为在进程内解析渲染后的 DOM，不再往页面里注入
+Readability，所以文档的 `h1`/`h2`/`h3` 结构会保留下来、成为可以按 `sid` 读取的 section 标题。
+落盘也改用**存储预算**而不是 distill 响应用的展示预算：正文不再裁剪，大表整张存下。第一跳依旧
+便宜——`/web/capture` 仍然只回 digest 加计数——但 `doc_section` / `doc_table` 现在给的是真内容，
+不再是 1800 字符的节选。
+
+一个要知道的连带影响：正文变了，`content_hash` 也就变了。升级后**第一次**重抓一个抓过的 URL 会
+生成新的 `doc_id` 而不是复用旧的，从第二次起恢复正常。
+
 响应示例：
 
 ```json
@@ -786,7 +803,9 @@ If false:
   "section_count": 8,
   "table_count": 2,
   "reused": false,
-  "cache_age_hours": null
+  "cache_age_hours": null,
+  "final_url": "https://example.com/article",
+  "http_status": 200
 }
 ```
 
@@ -977,6 +996,9 @@ When Agent later searches "Q3 revenue", web tables and Excel tables are discover
 | `429 too many concurrent requests`          | 触发并发限流                                   | 等待后重试，服务限制了并发 capture/session 数量 |
 | `404 session not found`                     | session 已过期或已关闭                         | 重新调用 `new` 创建 session |
 | `502 goto failed`                           | 页面加载超时或网络异常                         | 改用 `wait_until=domcontentloaded` 或增大 `timeout_ms` |
+| `422 capture failed: HTTP 4xx`              | 页面本身返回 404/403/410——链接已死或被禁       | **不要重试。** 什么都没入库。修正 URL，或把链接报为失效 |
+| `502 capture failed: HTTP 5xx`              | 站点返回服务端错误                             | 稍后重试；什么都没入库 |
+| `meta.readability.fallback_reason = script_injection_blocked` | 站点 CSP 禁止注入脚本，Readability 跑不了 | **正常，不是错误**——已降级到 simple 蒸馏且仍有内容。GitHub / MDN / Stack Overflow 常见 |
 | `404 aid not found`                         | 页面已变化，actions 失效                       | 重新执行 `distill` 获取最新 actions |
 | `502 navigate back failed`                  | 浏览器历史中没有可返回页面                     | 改用 `goto` 直接导航 |
 | Consent page / CAPTCHA                      | 网站阻拦                                       | 告知用户“站点阻拦”，建议导入 `storage_state` 或手动介入；**不要提供绕过方法** |

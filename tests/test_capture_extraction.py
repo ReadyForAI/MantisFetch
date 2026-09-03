@@ -103,6 +103,29 @@ def test_max_blocks_is_honoured() -> None:
     assert len(html_to_blocks(html, max_blocks=10)) == 10
 
 
+def test_consent_dialogs_are_dropped() -> None:
+    """Without the page's computed styles a hidden <dialog> is indistinguishable
+    from a shown one, so it would otherwise land in the body text."""
+    html = (
+        "<body><dialog>We use cookies to improve your experience on this site."
+        "</dialog><p>Real article text that is long enough to keep.</p></body>"
+    )
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "cookies" not in body
+    assert "Real article text" in body
+
+
+def test_total_char_ceiling_bounds_one_capture() -> None:
+    """A storage ceiling against a pathological page, not a content budget."""
+    html = "<body>" + "".join(
+        f"<p>{'x' * 1000} block {n}</p>" for n in range(50)
+    ) + "</body>"
+    blocks = html_to_blocks(html, max_chars=5_000)
+    assert 0 < sum(len(b["text"]) for b in blocks) < 10_000
+    # and the default is far above any real page
+    assert len(html_to_blocks(html)) == 50
+
+
 def test_empty_or_unusable_html_yields_nothing() -> None:
     """An empty result is the caller's signal to fall back to the simple path."""
     assert html_to_blocks("") == []

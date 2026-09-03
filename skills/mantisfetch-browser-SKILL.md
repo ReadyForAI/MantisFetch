@@ -773,6 +773,8 @@ Request body:
 | `extract_tables` | bool     | `true`         | Whether to extract HTML tables                   |
 | `lang`           | string   | `"en-US"`      | Browser locale                                   |
 | `timeout_ms`     | int      | `25000`        | Page load timeout in milliseconds                |
+| `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
+| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
 
 **Error pages are refused, not stored.** Capture reads the HTTP status the final
 URL was served with. An upstream 4xx returns **422** (the URL is dead or
@@ -785,8 +787,19 @@ A successful response reports `final_url` (after redirects) and `http_status`, s
 a soft error page can be told apart from an article without reading the body.
 `http_status` is null when the navigation reported no response, e.g. a
 same-document navigation.
-| `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
-| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
+
+**What gets stored is the page, not a preview of it.** Capture extracts in-process
+from the rendered DOM rather than running Readability inside the page, so the
+document's `h1`/`h2`/`h3` tree survives and becomes section titles you can read by
+`sid`. It also persists under a storage budget rather than the display budget used
+for distill responses: section text is not clipped, and a large table is stored
+whole. The first hop stays cheap — `/web/capture` still returns only the digest
+plus counts — but `doc_section` and `doc_table` now return real content instead of
+a 1,800-character excerpt.
+
+Consequence worth knowing: because the stored body changed, `content_hash` changed
+with it. The first capture of a previously-captured URL after upgrading mints a new
+`doc_id` instead of reusing the old one; it settles from the second capture on.
 
 Response example:
 
@@ -800,7 +813,9 @@ Response example:
   "table_count": 2,
   "reused": false,
   "cache_age_hours": null,
-  "summary_status": null
+  "summary_status": null,
+  "final_url": "https://example.com/article",
+  "http_status": 200
 }
 ```
 

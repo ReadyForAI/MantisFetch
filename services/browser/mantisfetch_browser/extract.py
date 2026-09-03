@@ -15,11 +15,19 @@ that:
 - Injecting a script needs a Content-Security-Policy that permits it. Sites that
   do not (GitHub, MDN, Stack Overflow) cannot be read this way at all.
 
-Parsing ``page.content()`` here instead removes all three at once, and needs no
-new dependency: bs4 and lxml already ship in the image for the document reader.
+Parsing ``page.content()`` here instead removes all three at once. bs4 and lxml
+already reach the image as MarkItDown transitive dependencies, but this path
+needs them directly — losing them silently costs every page its heading tree —
+so requirements.txt declares them.
 
 The block vocabulary deliberately matches ``DISTILL_SIMPLE_JS`` so
 ``_blocks_to_sections_stable`` stays the single consumer of both paths.
+
+What is given up: the in-page paths can ask the browser whether an element is
+actually visible (``getComputedStyle`` / ``getBoundingClientRect``). Parsing the
+serialized DOM cannot, so this path is more inclusive — a ``display:none``
+element reaches the blocks. The tags most likely to hide content that way are
+dropped outright below, and boilerplate scoring is the real answer.
 
 What is *not* done here: tables. Converting HTML to text loses them (a Sphinx
 table survives as prose, not as rows), so table extraction stays in the page
@@ -45,6 +53,10 @@ _DROP_TAGS = (
     "footer",
     "header",
     "aside",
+    # A cookie/consent dialog is markup like any other here: without the page's
+    # own computed styles there is no way to tell a hidden one from a shown one,
+    # so it would otherwise become body text.
+    "dialog",
 )
 
 # Emitted as blocks, in document order. Same set DISTILL_SIMPLE_JS queries.
@@ -56,6 +68,13 @@ _HEADING_TAGS = frozenset({"h1", "h2", "h3"})
 _MIN_BODY_CHARS = 20
 
 _MAX_BLOCKS = 1500
+
+# A ceiling on what one capture writes, not a content budget: two orders of
+# magnitude above any real article (the largest measured was 45k), and there
+# purely so a pathological page — a minified blob inside <pre>, an infinite
+# feed — cannot write without bound. If this ever truncates a real page, raise
+# it; do not reach for the display budget instead.
+_MAX_TOTAL_CHARS = 2_000_000
 
 # Permalink affordances that render inside the heading and would otherwise become
 # part of the sid title: Sphinx's pilcrow ("Basic Usage\u00b6") and MediaWiki's
@@ -69,7 +88,9 @@ def _clean_text(node: Any) -> str:
     return " ".join(node.get_text(" ", strip=True).split())
 
 
-def html_to_blocks(html: str, max_blocks: int = _MAX_BLOCKS) -> list[dict[str, str]]:
+def html_to_blocks(
+    html: str, max_blocks: int = _MAX_BLOCKS, max_chars: int = _MAX_TOTAL_CHARS
+) -> list[dict[str, str]]:
     """Parse page HTML into ``[{"tag": ..., "text": ...}]`` distiller blocks.
 
     Returns an empty list when the HTML yields nothing usable, which the caller
@@ -82,9 +103,14 @@ def html_to_blocks(html: str, max_blocks: int = _MAX_BLOCKS) -> list[dict[str, s
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
-        # lxml is present in the image, but never let a parser problem take the
-        # whole capture down when "simple" can still read the live DOM.
-        return []
+        # lxml is a declared dependency, so reaching here means a broken install
+        # rather than a missing extra. Falling straight through to "simple" would
+        # quietly cost every page its heading tree, so try the stdlib parser
+        # first and only give up if that fails too.
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return []
 
     body = soup.body or soup
     for tag in body.find_all(_DROP_TAGS):
@@ -92,10 +118,12 @@ def html_to_blocks(html: str, max_blocks: int = _MAX_BLOCKS) -> list[dict[str, s
 
     blocks: list[dict[str, str]] = []
     seen_nested: set[int] = set()
+    total_chars = 0
     for node in body.find_all(_KEEP_TAGS):
-        # A <li> holding another list, or a <p> wrapping a <pre>, would otherwise
-        # emit its children's text twice — once inside the parent block and again
-        # as its own. Keep the innermost.
+        # A <li> holding a <p>, or a <blockquote> holding both, would otherwise
+        # contribute its text twice — once as the container and again as each
+        # child. The outermost wins: it is emitted whole and its descendants are
+        # marked seen, which keeps a list item's text in one block.
         if id(node) in seen_nested:
             continue
         for descendant in node.find_all(_KEEP_TAGS):
@@ -112,7 +140,8 @@ def html_to_blocks(html: str, max_blocks: int = _MAX_BLOCKS) -> list[dict[str, s
         elif len(text) < _MIN_BODY_CHARS:
             continue
         blocks.append({"tag": tag, "text": text})
-        if len(blocks) >= max_blocks:
+        total_chars += len(text)
+        if len(blocks) >= max_blocks or total_chars >= max_chars:
             break
 
     return blocks
