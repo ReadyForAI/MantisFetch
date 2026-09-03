@@ -45,7 +45,10 @@ def _post(client: TestClient, content: bytes, name: str, doc_id: str, **extra: s
 
 def test_failed_parse_leaves_a_marker(doc_client: TestClient, docs_dir: Path) -> None:
     resp = _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4001")
-    assert resp.status_code == 500
+    # 422, not 500: the file is not a PDF, which is a fact about the upload
+    # rather than a server fault. The record this test is about is written
+    # either way — the status says whose problem it is, not whether it failed.
+    assert resp.status_code == 422
 
     marker = docs_dir / "General" / "DOC-4001" / MARKER
     assert marker.exists(), "a failed parse still leaves an anonymous empty directory"
@@ -64,7 +67,7 @@ def test_successful_parse_leaves_no_marker(doc_client: TestClient, docs_dir: Pat
 
 def test_a_later_success_clears_the_marker(doc_client: TestClient, docs_dir: Path) -> None:
     """A retry that works must stop reporting the previous attempt's failure."""
-    assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4003").status_code == 500
+    assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4003").status_code == 422
     marker = docs_dir / "General" / "DOC-4003" / MARKER
     assert marker.exists()
 
@@ -81,7 +84,7 @@ def test_failed_replacement_does_not_flag_the_existing_document(
     doc = docs_dir / "General" / "DOC-4004"
     before = (doc / "manifest.json").read_text(encoding="utf-8")
 
-    assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4004", replace="true").status_code == 500
+    assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4004", replace="true").status_code == 422
 
     assert not (doc / MARKER).exists(), "a live document was flagged as failed"
     # This particular failure happens before the write, so the document is also
@@ -156,7 +159,7 @@ def test_the_four_states_stay_distinguishable(doc_client: TestClient, docs_dir: 
     either of its neighbours.
     """
     assert _post(doc_client, GOOD_HTML, "ok.html", "DOC-4005").status_code == 200
-    assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4006").status_code == 500
+    assert _post(doc_client, BROKEN_PDF, "bad.pdf", "DOC-4006").status_code == 422
 
     succeeded = docs_dir / "General" / "DOC-4005"
     failed = docs_dir / "General" / "DOC-4006"
