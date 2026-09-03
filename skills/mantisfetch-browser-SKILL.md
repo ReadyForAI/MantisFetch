@@ -783,6 +783,16 @@ gateway failure — retrying may work). Neither writes anything to the library, 
 a `doc_id` coming back always means real content was stored. Before this, a 404
 became a document whose digest read "Page not found".
 
+**A page that answered 200 and yielded nothing is refused on the same terms**,
+also **422**, with `capture found no extractable content at <url> (HTTP 200, 0
+text sections, 0 tables)` — the counts and the status are what tell it apart
+from the dead-URL 422 above. Retrying will not help: the page loaded fine, and
+what it is made of is what could not be read. Pages laid out entirely in tables
+are the usual cause (Hacker News, older enterprise and government sites), since
+extraction reads headings, paragraphs, list items, blockquotes and `pre`, and
+such a page has none of them. If you need one of those, screenshot it or work
+the DOM through a session instead of capturing it.
+
 A successful response reports `final_url` (after redirects) and `http_status`, so
 a soft error page can be told apart from an article without reading the body.
 `http_status` is null when the navigation reported no response, e.g. a
@@ -1008,6 +1018,7 @@ Use `content_type` (`General`, `Contract`, `Bid`, `Knowledge`) to put captured p
 | `404 session not found`                     | Session expired or closed                      | Create a new session with `new`                                                                    |
 | `502 goto failed`                           | Page load timeout or network issue             | Switch to `wait_until=domcontentloaded` or increase `timeout_ms`                                   |
 | `422 capture failed: HTTP 4xx`              | The page itself returned 404/403/410 — the URL is dead or forbidden | **Do not retry.** Nothing was stored. Fix the URL or report the link as dead |
+| `422 capture found no extractable content`  | The page loaded (HTTP 200) but held no headings, paragraphs, lists or data tables — typically a table-layout site | **Do not retry.** Nothing was stored. Screenshot it, or drive it through a session |
 | `502 capture failed: HTTP 5xx`              | The site returned a server error                | Retry later; nothing was stored                                                                    |
 | `meta.readability.fallback_reason = script_injection_blocked` | The site's Content-Security-Policy forbids injected script, so Readability could not run | **Normal, not an error** — capture degraded to the simple distiller and still produced content. Common on GitHub / MDN / Stack Overflow |
 | `404 aid not found`                         | Actions expired (page changed)                 | Re-run `distill` to get latest actions                                                             |
