@@ -143,3 +143,134 @@ async def test_map_box_to_element_accepts_object_arg(page) -> None:
     # The point may or may not resolve to an interactive element; the regression
     # guard is only that the multi-arg call itself does not raise TypeError.
     assert info is None or isinstance(info, dict)
+
+
+# ── navigation-table gate ───────────────────────────────────────────────────────
+# A page carrying one data table and one navigation box. Modelled on Wikipedia,
+# where a `vte` navbox is as rectangular and as full of <th> label cells as a
+# real table — structure cannot separate them, only link density can.
+NAV_TABLE_HTML = """<!DOCTYPE html>
+<html><head><title>Gate</title></head><body><article>
+<p>An article about regional revenue that is long enough to be parsed.</p>
+<table><caption>Revenue</caption>
+  <tr><th>Region</th><th>Amount</th></tr>
+  <tr><td><a href="/north">North</a></td><td>1200</td></tr>
+  <tr><td><a href="/south">South</a></td><td>1450</td></tr>
+  <tr><td><a href="/east">East</a></td><td>1310</td></tr>
+</table>
+<table class="navbox">
+  <tr><th><a href="/a">Related topics</a></th>
+      <td><a href="/b">Alpha region</a> <a href="/c">Beta region</a>
+          <a href="/d">Gamma region</a> <a href="/e">Delta region</a></td></tr>
+  <tr><th><a href="/f">See also here</a></th>
+      <td><a href="/g">Epsilon region</a> <a href="/h">Zeta region</a></td></tr>
+</table>
+</article></body></html>
+"""
+
+
+@pytest_asyncio.fixture
+async def nav_page(page):
+    await page.set_content(NAV_TABLE_HTML)
+    return page
+
+
+async def test_navigation_table_is_skipped(nav_page) -> None:
+    """The navbox is all link text; the data table is not."""
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.8},
+    )
+    joined = " ".join(t["text"] for t in tables)
+    assert "Revenue" in joined or "1200" in joined, "the data table was dropped"
+    assert "Alpha region" not in joined, "the navigation box was kept"
+
+
+async def test_the_gate_can_be_disabled(nav_page) -> None:
+    """navLinkDensity=1.0 restores the pre-gate behaviour: every visible table."""
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 1.0},
+    )
+    joined = " ".join(t["text"] for t in tables)
+    assert "Alpha region" in joined
+    assert len(tables) == 2
+
+
+async def test_simple_mode_applies_the_same_gate(nav_page) -> None:
+    """Both extractors share one gate, so they cannot disagree about a table."""
+    result = await mb._distill(
+        _session(nav_page),
+        DistillRequest(session_id="s", distill_mode="simple", include_actions=False),
+    )
+    tables = [s for s in result["sections"] if s.get("type") == "table"]
+    joined = " ".join(t["t"] for t in tables)
+    assert "1200" in joined
+    assert "Alpha region" not in joined
+
+
+async def test_a_navbox_near_the_threshold_is_still_skipped(nav_page) -> None:
+    """The all-links fixture above sits near 1.0 and would pass any threshold.
+    The real cut runs between the taxobox at 0.60 and the lowest navigation box
+    above it at 0.75, so the fixture that matters is one close to 0.75."""
+    await nav_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        '<table class="navbox"><tr><th>Authority control databases</th>'
+        '<td><a href="/a">International alphabetical listing</a> '
+        '<a href="/b">National archive index reference</a> '
+        '<a href="/c">Scientific taxonomy register entry</a> (edit)</td>'
+        "</tr></table></article></body></html>"
+    )
+    density = await nav_page.evaluate("""() => {
+      const t = document.querySelector("table");
+      let txt = 0, link = 0;
+      for (const c of t.querySelectorAll("td, th")) txt += (c.innerText||"").trim().length;
+      for (const a of t.querySelectorAll("a")) link += (a.innerText||"").trim().length;
+      return link / txt;
+    }""")
+    assert 0.70 < density < 0.85, f"fixture drifted out of the contested band: {density}"
+
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.70},
+    )
+    assert not any("International alphabetical" in t["text"] for t in tables)
+
+
+async def test_the_taxobox_density_stays_under_the_threshold(nav_page) -> None:
+    """The other side of the cut. A taxonomy box is link-heavy — every rank is a
+    link — but carries enough plain text to stay content, and the evaluation
+    named it as an advantage worth keeping."""
+    await nav_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        '<table class="infobox biota">'
+        "<tr><th>Scientific classification</th></tr>"
+        '<tr><td>Kingdom:</td><td><a href="/a">Animalia</a></td></tr>'
+        '<tr><td>Phylum:</td><td><a href="/b">Arthropoda</a></td></tr>'
+        '<tr><td>Order:</td><td><a href="/c">Stomatopoda</a> Latreille, 1817</td></tr>'
+        "<tr><td>Temporal range:</td><td>Carboniferous to Recent</td></tr>"
+        "</table></article></body></html>"
+    )
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.70},
+    )
+    assert any("Stomatopoda" in t["text"] for t in tables)
+
+
+async def test_a_data_table_of_links_is_kept(nav_page) -> None:
+    """Link density is a share, not a count: a table whose cells are links but
+    which also carries real values stays under the threshold."""
+    await nav_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        "<table><caption>Cities</caption>"
+        "<tr><th>City</th><th>Population</th></tr>"
+        '<tr><td><a href="/a">Springfield</a></td><td>117203 residents counted</td></tr>'
+        '<tr><td><a href="/b">Shelbyville</a></td><td>241887 residents counted</td></tr>'
+        "</table></article></body></html>"
+    )
+    tables = await nav_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.8},
+    )
+    assert any("Springfield" in t["text"] for t in tables)

@@ -338,7 +338,8 @@ async def _setup_routing(context: BrowserContext, block_resources: bool):
 # ============================================================
 # Added text density detection for div/section/td (better SPA scraping)
 DISTILL_SIMPLE_JS = r"""
-({ extractTables, maxTableRows }) => {
+({ extractTables, maxTableRows, navLinkDensity }) => {
+  /*DATA_TABLE_GATE*/
   function visible(el) {
     const style = window.getComputedStyle(el);
     if (!style) return false;
@@ -399,6 +400,7 @@ DISTILL_SIMPLE_JS = r"""
     const tableEls = root.querySelectorAll("table");
     for (const tbl of tableEls) {
       if (!visible(tbl)) continue;
+      if (isNavigationTable(tbl)) continue;
       const capEl = tbl.querySelector("caption");
       const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
       let heading = caption;
@@ -508,8 +510,48 @@ READABILITY_EVAL = r"""
 """
 
 # Standalone table extraction JS for Readability mode (Readability strips tables)
+# Is a <table> carrying data, or is it navigation? Shared by both extractors so
+# the two distill paths cannot disagree about a given table.
+#
+# The signal is link density — the share of cell text sitting inside <a>.
+# Measured on the pages the evaluation used:
+#
+#   GDP main table (223 rows)   0.32     Wikipedia `vte` navboxes   0.51 - 0.97
+#   GDP regional groupings      0.25     navbox subgroups           0.59 - 0.94
+#   Mantis shrimp taxobox       0.60     Authority control box      0.75
+#
+# The two ranges overlap, so the threshold is a cut point rather than a clean
+# separator: a navbox at 0.51 survives it. It is set to keep the taxobox, which
+# is the content table this most needs to protect.
+#
+# Nested tables count toward their ancestor's density, because querySelectorAll
+# reaches into them. On Wikipedia that helps — a navbox nesting navboxes reads
+# as more navigational, which it is.
+#
+# A first attempt ported crawl4ai's ten-component is_data_table score instead.
+# On Wikipedia it ranked things backwards: navbox subgroups score 8 (many <th>
+# label cells, rectangular, no nesting) while the taxobox scores 6 and the
+# cladogram 0-3. It would have stored navbox fragments and dropped the taxonomy
+# box the evaluation named as an advantage over a plain fetch. Structure does
+# not separate these two kinds of table on this markup; link density does.
+_DATA_TABLE_GATE_JS = r"""
+  // True when the table reads as navigation rather than data.
+  function isNavigationTable(tbl) {
+    let textLen = 0;
+    for (const cell of tbl.querySelectorAll("td, th")) {
+      textLen += (cell.innerText || "").trim().length;
+    }
+    if (textLen === 0) return false;  // empty: other filters decide
+    let linkLen = 0;
+    for (const a of tbl.querySelectorAll("a")) linkLen += (a.innerText || "").trim().length;
+    return linkLen / textLen > navLinkDensity;
+  }
+"""
+
+
 EXTRACT_TABLES_JS = r"""
-({ maxTableRows, maxTables }) => {
+({ maxTableRows, maxTables, navLinkDensity }) => {
+  /*DATA_TABLE_GATE*/
   function visible(el) {
     const style = window.getComputedStyle(el);
     if (!style) return false;
@@ -522,6 +564,7 @@ EXTRACT_TABLES_JS = r"""
   const tableEls = document.querySelectorAll("table");
   for (const tbl of tableEls) {
     if (!visible(tbl)) continue;
+    if (isNavigationTable(tbl)) continue;
     const capEl = tbl.querySelector("caption");
     const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
     let heading = caption;
@@ -603,6 +646,11 @@ EXTRACT_TABLES_JS = r"""
   return tables;
 }
 """
+
+# Resolve the shared gate into both blobs.
+EXTRACT_TABLES_JS = EXTRACT_TABLES_JS.replace("/*DATA_TABLE_GATE*/", _DATA_TABLE_GATE_JS)
+DISTILL_SIMPLE_JS = DISTILL_SIMPLE_JS.replace("/*DATA_TABLE_GATE*/", _DATA_TABLE_GATE_JS)
+
 
 ACTIONS_DOM_JS = r"""
 (maxActions) => {
@@ -1406,6 +1454,7 @@ async def _distill(
                             {
                                 "maxTableRows": budget.max_table_rows,
                                 "maxTables": budget.max_tables,
+                                "navLinkDensity": budget.nav_link_density,
                             },
                         )
                         or []
@@ -1456,6 +1505,7 @@ async def _distill(
                                 {
                                     "maxTableRows": budget.max_table_rows,
                                     "maxTables": budget.max_tables,
+                                    "navLinkDensity": budget.nav_link_density,
                                 },
                             )
                             or []
@@ -1466,7 +1516,11 @@ async def _distill(
     if mode == "simple":
         dist = await page.evaluate(
             DISTILL_SIMPLE_JS,
-            {"extractTables": req.extract_tables, "maxTableRows": budget.max_table_rows},
+            {
+                "extractTables": req.extract_tables,
+                "maxTableRows": budget.max_table_rows,
+                "navLinkDensity": budget.nav_link_density,
+            },
         )
         blocks = dist.get("blocks") or []
         extracted_tables = dist.get("tables") or []
