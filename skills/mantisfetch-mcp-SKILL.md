@@ -84,7 +84,7 @@ cost and picks the cheapest. Always start cheap and escalate only when needed.
 
 | Tier | Web tools | Doc tools | Cost |
 | ---- | --------- | --------- | ---- |
-| L1 digest | `web_capture` → digest | `doc_digest` | ~250-350 tokens |
+| L1 digest | `web_capture` → digest | `doc_digest` | ~200 tokens (a capture's is ~250-350: it carries the outline) |
 | L2 brief | `web_distill` | `doc_brief` | ~1.5k tokens |
 | L3 section | `web_read_sections` | `doc_section` (after `doc_sections`) | on-demand |
 | L4 full | — | `doc_full` | **almost never** |

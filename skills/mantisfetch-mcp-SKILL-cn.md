@@ -74,7 +74,7 @@ MCP 工具会驱动真实浏览器并读取本地文件，因此该接入面**�
 
 | Tier | Web 工具 | Doc 工具 | 成本 |
 | ---- | -------- | -------- | ---- |
-| L1 digest | `web_capture` → digest | `doc_digest` | ~250-350 tokens |
+| L1 digest | `web_capture` → digest | `doc_digest` | ~200 tokens（capture 的约 250-350：它带着大纲） |
 | L2 brief | `web_distill` | `doc_brief` | ~1.5k tokens |
 | L3 section | `web_read_sections` | `doc_section`（先 `doc_sections`） | 按需 |
 | L4 full | — | `doc_full` | **几乎不用** |
