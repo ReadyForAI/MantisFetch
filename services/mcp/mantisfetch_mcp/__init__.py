@@ -741,11 +741,36 @@ async def doc_full(doc_id: str) -> Any:
 
 @mcp.tool()
 async def doc_search(q: str, tags: str | None = None, limit: int = 20) -> Any:
-    """Search across the document library; returns matching doc ids + metadata."""
+    """Search library METADATA — filename, digest, tags, custom metadata. It does
+    NOT look inside document bodies: a term that only appears in the text will
+    not match here. Use doc_search_text for that."""
     params: dict[str, Any] = {"q": q, "limit": limit}
     if tags:
         params["tags"] = tags
     return await _doc_get("/library/search", params=params)
+
+
+@mcp.tool()
+async def doc_search_text(
+    q: str,
+    tags: str | None = None,
+    doc_id: str | None = None,
+    scope: str = "all",
+    limit: int = 20,
+) -> Any:
+    """Full-text search across the library's document bodies; returns doc_id +
+    sid + a snippet around each hit. This is the one that finds a term occurring
+    only in the text — doc_search matches metadata only. scope: "all" (default),
+    "full" (full.md only) or "section" (section/table files only). A document that
+    matches in both tiers appears once per tier under "all"; prefer
+    scope="section" when you want one hit per section with sid provenance to read
+    next. Pass doc_id to scope the search to one document."""
+    params: dict[str, Any] = {"q": q, "limit": limit, "scope": scope}
+    if tags:
+        params["tags"] = tags
+    if doc_id:
+        params["doc_id"] = doc_id
+    return await _doc_get("/library/search_text", params=params)
 
 
 @mcp.tool()

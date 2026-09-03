@@ -26,7 +26,7 @@ EXPECTED_TOOLS = {
     "web_navigate",
     "web_session_close",
     "web_webmcp_discover",
-    # doc (14)
+    # doc (15)
     "doc_parse",
     "doc_digest",
     "doc_brief",
@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     "doc_sections_batch",
     "doc_full",
     "doc_search",
+    "doc_search_text",
     "doc_search_sections",
     "doc_table",
     "doc_chunks",

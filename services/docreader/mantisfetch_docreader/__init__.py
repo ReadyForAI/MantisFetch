@@ -2953,18 +2953,26 @@ def _filter_documents(
 
 
 def _resolve_manifest_section_path(doc_dir: Path, rel_path: str) -> Path | None:
+    """Resolve a manifest section entry's ``file`` to a path inside the doc dir.
+
+    Both ``sections/`` and ``tables/`` are allowed: web captures declare their
+    extracted tables as manifest ``sections`` entries pointing at
+    ``tables/table-NN.md``, and a sections-only whitelist silently dropped every
+    one of them from search_sections / chunks / search_text.
+    """
     if not isinstance(rel_path, str):
         return None
     raw_path = Path(rel_path)
     if raw_path.is_absolute() or raw_path.suffix != ".md":
         return None
-    sections_dir = (doc_dir / "sections").resolve()
-    section_path = (doc_dir / raw_path).resolve()
-    try:
-        section_path.relative_to(sections_dir)
-    except ValueError:
-        return None
-    return section_path
+    resolved = (doc_dir / raw_path).resolve()
+    for sub in ("sections", "tables"):
+        try:
+            resolved.relative_to((doc_dir / sub).resolve())
+        except ValueError:
+            continue
+        return resolved
+    return None
 
 
 def _load_section_records(docs_dir: Path, doc_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -4357,6 +4365,21 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
     # "running" check and double-schedule, or clobber each other's output.
     async with _optional_doc_id_lock(doc_id):
         parsed, metadata, source_record = _load_parsed_document_from_storage(docs_dir, doc_id)
+        # A web capture must not be reconstructed and rewritten here. This path
+        # ends in write_output_extract_only(source="upload"), which would rewrite
+        # full.md, copy the capture's table markdown into sections/, and relabel
+        # the document as an upload. /web/capture owns its own deferred-summary
+        # path (summary_mode="defer"); re-running an upload's retry over a capture
+        # was never meaningful, it merely used to fail loudly for captures that
+        # had tables, because their manifest entries pointed at tables/ and the
+        # section resolver rejected those. Now that the resolver accepts tables/,
+        # the loud failure would have become a silent destructive rewrite.
+        if parsed.file_type == "web_capture":
+            raise HTTPException(
+                409,
+                f"{doc_id} is a web capture; re-run /web/capture with "
+                'summary_mode="defer" instead of retrying an upload summary',
+            )
         tags = _load_doc_tags(docs_dir, doc_id)
         content_type = _doc_content_type(docs_dir, doc_id)
 
