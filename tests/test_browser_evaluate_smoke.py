@@ -274,3 +274,89 @@ async def test_a_data_table_of_links_is_kept(nav_page) -> None:
         {"maxTableRows": 100, "maxTables": 20, "navLinkDensity": 0.8},
     )
     assert any("Springfield" in t["text"] for t in tables)
+
+
+# ── layout scaffolding ──────────────────────────────────────────────────────────
+# Wikipedia draws cladograms with {{clade}}, which nests <table> 8-23 deep. The
+# extractor emitted the outer one and every inner slice, so the same taxa landed
+# in the library ten times over: one article measured 352,757 characters of
+# tables against 43,139 of prose, 89% of a 2 MB document.
+#
+# Link density does not see it. A cladogram measures 0.08-0.15 — *lower* than the
+# GDP data table at 0.32 — which is why this needed signals of its own.
+NESTED_TABLE_HTML = """<!DOCTYPE html>
+<html><head><title>Clade</title></head><body><article>
+<p>An article about crustacean phylogeny, long enough to be parsed properly.</p>
+<table class="clade"><tr><td>
+  <table class="clade"><tr><td>Stomatopoda</td><td></td><td></td></tr>
+    <tr><td></td><td></td><td>Archaeocaris</td></tr></table>
+</td><td></td></tr></table>
+<table><caption>Species counts</caption>
+  <tr><th>Family</th><th>Species</th></tr>
+  <tr><td>Gonodactylidae</td><td>39</td></tr>
+  <tr><td>Squillidae</td><td>185</td></tr>
+</table>
+</article></body></html>
+"""
+
+
+@pytest_asyncio.fixture
+async def clade_page(page):
+    await page.set_content(NESTED_TABLE_HTML)
+    return page
+
+
+async def test_a_table_containing_tables_is_skipped(clade_page) -> None:
+    """Emitting both duplicates the content — the outer table's text already
+    includes every inner cell."""
+    tables = await clade_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 500, "maxTables": 20, "navLinkDensity": 0.70,
+         "tableMaxEmptyCells": 0.5},
+    )
+    joined = " ".join(t["text"] for t in tables)
+    assert "Species counts" in joined or "Gonodactylidae" in joined, "data table dropped"
+    assert "Archaeocaris" not in joined, "nested scaffolding kept"
+
+
+async def test_a_mostly_empty_grid_is_skipped(clade_page) -> None:
+    """The innermost cladogram slices nest nothing, so nesting alone does not
+    reach them. They are 62-67% empty cells; every data table measured is 0.00."""
+    await clade_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        "<table><tr><td>A</td><td></td><td></td><td></td></tr>"
+        "<tr><td></td><td></td><td>B</td><td></td></tr>"
+        "<tr><td></td><td></td><td></td><td></td></tr></table>"
+        "</article></body></html>"
+    )
+    tables = await clade_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 500, "maxTables": 20, "navLinkDensity": 0.70,
+         "tableMaxEmptyCells": 0.5},
+    )
+    assert not any("A" in t["text"] and "B" in t["text"] for t in tables)
+
+
+async def test_a_dense_data_table_survives_both_new_checks(clade_page) -> None:
+    await clade_page.set_content(
+        "<html><body><article><p>Long enough paragraph of article prose here.</p>"
+        "<table><caption>Revenue</caption><tr><th>Region</th><th>Amount</th></tr>"
+        "<tr><td>North</td><td>1200</td></tr><tr><td>South</td><td>1450</td></tr>"
+        "</table></article></body></html>"
+    )
+    tables = await clade_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 500, "maxTables": 20, "navLinkDensity": 0.70,
+         "tableMaxEmptyCells": 0.5},
+    )
+    assert any("1200" in t["text"] for t in tables)
+
+
+async def test_the_empty_cell_check_can_be_disabled(clade_page) -> None:
+    tables = await clade_page.evaluate(
+        mb.EXTRACT_TABLES_JS,
+        {"maxTableRows": 500, "maxTables": 20, "navLinkDensity": 1.0,
+         "tableMaxEmptyCells": 1.0},
+    )
+    # nesting still applies; the inner slice is reachable on its own
+    assert any("Archaeocaris" in t["text"] for t in tables)

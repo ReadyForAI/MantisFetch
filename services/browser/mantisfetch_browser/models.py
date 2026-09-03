@@ -82,6 +82,10 @@ class SectionBudget(BaseModel):
     # 0.75. 0.70 sits in that gap. Navigation boxes below 0.60 exist and survive
     # — they are what a heuristic on one signal costs. 1.0 disables the gate.
     nav_link_density: float = Field(default=0.70, ge=0.0, le=1.0)
+    # Above this share of empty cells a <table> is drawing a layout rather than
+    # holding values. Wikipedia cladograms measure 0.62-0.67 empty; every data
+    # table measured is 0.00 and the taxobox 0.10. 1.0 disables the check.
+    table_max_empty_cells: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 # What /web/capture persists with: no clipping of body text, and enough table

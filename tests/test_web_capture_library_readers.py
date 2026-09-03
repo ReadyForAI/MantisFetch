@@ -379,3 +379,46 @@ def test_mcp_doc_search_text_passes_tags_through(monkeypatch) -> None:
     asyncio.run(mm.doc_search_text(q="x"))
     assert "tags" not in seen  # omitted rather than sent empty
     assert "doc_id" not in seen
+
+
+# ── a library-wide scan degrades rather than failing ────────────────────────────
+def test_one_unreadable_document_does_not_fail_the_whole_search(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    """search_text walks every document in the library and reads files off disk.
+    An undecodable section, a permission error, or a manifest whose shape
+    surprises the response model turned the whole query into a 500 — no partial
+    results, and nothing saying which document caused it.
+
+    A v1.7.0 retest reported exactly that 500. It could not be reproduced here
+    against a real 55-document library, a 2 MB capture, LANG=zh, or a library
+    mixing pre- and post-upgrade captures, so this hardens the class of failure
+    rather than a known instance.
+    """
+    import mantisfetch_docreader as dr
+
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+
+    def exploding_snippet(text: str, query: str, radius: int = 90) -> str:
+        raise UnicodeDecodeError("utf-8", b"", 0, 1, "simulated bad bytes")
+
+    monkeypatch.setattr(dr, "_make_snippet", exploding_snippet)
+
+    resp = client.get("/doc/library/search_text", params={"q": TABLE_ONLY_TOKEN})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["skipped"] >= 1
+    assert body["results"] == []
+
+
+def test_skipped_is_zero_on_a_healthy_library(
+    captured: Path, client: TestClient, monkeypatch
+) -> None:
+    import mantisfetch_common.storage as storage
+
+    monkeypatch.setattr(storage, "DEFAULT_DOCS_DIR", captured)
+    body = client.get("/doc/library/search_text", params={"q": TABLE_ONLY_TOKEN}).json()
+    assert body["skipped"] == 0
+    assert body["total"] >= 1

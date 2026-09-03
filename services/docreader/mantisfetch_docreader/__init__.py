@@ -2029,6 +2029,10 @@ class SearchResult(BaseModel):
 class SearchResponse(BaseModel):
     results: list[SearchResult]
     total: int
+    # Documents a library-wide scan could not read. Defaults to 0, so a caller
+    # that ignores it is unaffected — but a search that quietly returns less than
+    # it should is worse than one that says how much it skipped.
+    skipped: int = 0
 
 
 class SectionSearchRequest(BaseModel):
@@ -4098,6 +4102,7 @@ async def library_search_text(
         # Note: FTS is populated as an optimization side-channel but is not yet
         # used as an exclusive shortlist (web captures / pre-FTS docs may lack
         # rows). Full scan still runs; B2 lowercase cache keeps it cheap.
+        skipped = 0
         for d in documents:
             current_doc_id = d.get("id", "")
             if not isinstance(current_doc_id, str) or not _DOC_ID_RE.match(current_doc_id):
@@ -4112,143 +4117,158 @@ async def library_search_text(
             except Exception:
                 continue
 
-            if scope in {"all", "full"}:
-                full_path = doc_dir / "full.md"
-                if full_path.exists():
-                    # B2: prefer pre-lowercased cache; fall back to live full.md.
-                    full_lower = read_full_lower(doc_dir)
-                    full_text: str | None = None
-                    if full_lower is None:
-                        full_text = full_path.read_text(encoding="utf-8")
-                        full_lower = full_text.lower()
-                    if q_lower in full_lower:
-                        if full_text is None:
-                            full_text = full_path.read_text(encoding="utf-8")
-                        results.append(
-                            SearchResult(
-                                doc_id=current_doc_id,
-                                filename=d.get("filename", ""),
-                                file_type=d.get("file_type", ""),
-                                content_type=d.get("content_type", "General"),
-                                storage_path=d.get("storage_path"),
-                                digest=d.get("digest", ""),
-                                tags=d.get("tags", []),
-                                source=d.get("source", "upload"),
-                                created_at=d.get("created_at"),
-                                score=_search_score((True, 1.0)),
-                                metadata=d.get("metadata") or {},
-                                source_ref=d.get("source_ref") or None,
-                                source_filename=d.get("source_filename") or None,
-                                source_available=bool(d.get("source_available")),
-                                summary_mode=d.get("summary_mode") or None,
-                                summary_status=d.get("summary_status") or None,
-                                summary_error_code=d.get("summary_error_code") or None,
-                                snippet=_make_snippet(full_text, query),
-                            )
-                        )
+            # One unreadable document must not fail the whole scan. This walks
+            # every document in the library and reads files off disk: an
+            # undecodable section, a permission error or a manifest whose shape
+            # surprises the response model would otherwise turn a search into a
+            # 500 with no partial results and no indication of which document
+            # caused it. The doc_id is logged so the next person has somewhere
+            # to look.
+            try:
 
-            if scope in {"all", "section"}:
-                cached_sections = read_sections_lower(doc_dir)
-                if cached_sections is not None:
-                    for sec in cached_sections:
-                        title = sec.get("title") or ""
-                        title_hit = q_lower in (sec.get("title_lower") or title.lower())
-                        text_hit = q_lower in (sec.get("text_lower") or "")
-                        if not (title_hit or text_hit):
-                            continue
-                        # Snippet from original section file when possible.
-                        section_text = title
-                        rel_path = sec.get("file")
-                        if text_hit and rel_path:
+                if scope in {"all", "full"}:
+                    full_path = doc_dir / "full.md"
+                    if full_path.exists():
+                        # B2: prefer pre-lowercased cache; fall back to live full.md.
+                        full_lower = read_full_lower(doc_dir)
+                        full_text: str | None = None
+                        if full_lower is None:
+                            full_text = full_path.read_text(encoding="utf-8")
+                            full_lower = full_text.lower()
+                        if q_lower in full_lower:
+                            if full_text is None:
+                                full_text = full_path.read_text(encoding="utf-8")
+                            results.append(
+                                SearchResult(
+                                    doc_id=current_doc_id,
+                                    filename=d.get("filename", ""),
+                                    file_type=d.get("file_type", ""),
+                                    content_type=d.get("content_type", "General"),
+                                    storage_path=d.get("storage_path"),
+                                    digest=d.get("digest", ""),
+                                    tags=d.get("tags", []),
+                                    source=d.get("source", "upload"),
+                                    created_at=d.get("created_at"),
+                                    score=_search_score((True, 1.0)),
+                                    metadata=d.get("metadata") or {},
+                                    source_ref=d.get("source_ref") or None,
+                                    source_filename=d.get("source_filename") or None,
+                                    source_available=bool(d.get("source_available")),
+                                    summary_mode=d.get("summary_mode") or None,
+                                    summary_status=d.get("summary_status") or None,
+                                    summary_error_code=d.get("summary_error_code") or None,
+                                    snippet=_make_snippet(full_text, query),
+                                )
+                            )
+
+                if scope in {"all", "section"}:
+                    cached_sections = read_sections_lower(doc_dir)
+                    if cached_sections is not None:
+                        for sec in cached_sections:
+                            title = sec.get("title") or ""
+                            title_hit = q_lower in (sec.get("title_lower") or title.lower())
+                            text_hit = q_lower in (sec.get("text_lower") or "")
+                            if not (title_hit or text_hit):
+                                continue
+                            # Snippet from original section file when possible.
+                            section_text = title
+                            rel_path = sec.get("file")
+                            if text_hit and rel_path:
+                                section_path = _resolve_manifest_section_path(doc_dir, rel_path)
+                                if section_path and section_path.exists():
+                                    section_text = section_path.read_text(encoding="utf-8")
+                            page_start = sec.get("page_start")
+                            page_end = sec.get("page_end")
+                            if page_start is None and page_end is None:
+                                page_start, page_end = _page_bounds(sec.get("page_range"))
+                            results.append(
+                                SearchResult(
+                                    doc_id=current_doc_id,
+                                    filename=d.get("filename", ""),
+                                    file_type=d.get("file_type", ""),
+                                    content_type=d.get("content_type", "General"),
+                                    storage_path=d.get("storage_path"),
+                                    digest=d.get("digest", ""),
+                                    tags=d.get("tags", []),
+                                    source=d.get("source", "upload"),
+                                    created_at=d.get("created_at"),
+                                    score=_search_score((title_hit, 2.0), (text_hit, 1.5)),
+                                    metadata=d.get("metadata") or {},
+                                    source_ref=d.get("source_ref") or None,
+                                    source_filename=d.get("source_filename") or None,
+                                    source_available=bool(d.get("source_available")),
+                                    summary_mode=d.get("summary_mode") or None,
+                                    summary_status=d.get("summary_status") or None,
+                                    summary_error_code=d.get("summary_error_code") or None,
+                                    sid=sec.get("sid"),
+                                    section_title=title,
+                                    page_range=sec.get("page_range"),
+                                    page_start=page_start,
+                                    page_end=page_end,
+                                    snippet=_make_snippet(
+                                        section_text if text_hit else title, query
+                                    ),
+                                )
+                            )
+                    else:
+                        for sec in manifest.get("sections", []):
+                            rel_path = sec.get("file")
+                            if not rel_path:
+                                continue
                             section_path = _resolve_manifest_section_path(doc_dir, rel_path)
-                            if section_path and section_path.exists():
-                                section_text = section_path.read_text(encoding="utf-8")
-                        page_start = sec.get("page_start")
-                        page_end = sec.get("page_end")
-                        if page_start is None and page_end is None:
-                            page_start, page_end = _page_bounds(sec.get("page_range"))
-                        results.append(
-                            SearchResult(
-                                doc_id=current_doc_id,
-                                filename=d.get("filename", ""),
-                                file_type=d.get("file_type", ""),
-                                content_type=d.get("content_type", "General"),
-                                storage_path=d.get("storage_path"),
-                                digest=d.get("digest", ""),
-                                tags=d.get("tags", []),
-                                source=d.get("source", "upload"),
-                                created_at=d.get("created_at"),
-                                score=_search_score((title_hit, 2.0), (text_hit, 1.5)),
-                                metadata=d.get("metadata") or {},
-                                source_ref=d.get("source_ref") or None,
-                                source_filename=d.get("source_filename") or None,
-                                source_available=bool(d.get("source_available")),
-                                summary_mode=d.get("summary_mode") or None,
-                                summary_status=d.get("summary_status") or None,
-                                summary_error_code=d.get("summary_error_code") or None,
-                                sid=sec.get("sid"),
-                                section_title=title,
-                                page_range=sec.get("page_range"),
-                                page_start=page_start,
-                                page_end=page_end,
-                                snippet=_make_snippet(
-                                    section_text if text_hit else title, query
-                                ),
+                            if not section_path:
+                                continue
+                            if not section_path.exists():
+                                continue
+                            section_text = section_path.read_text(encoding="utf-8")
+                            title = sec.get("title", "")
+                            title_hit = q_lower in title.lower()
+                            text_hit = q_lower in section_text.lower()
+                            if not (title_hit or text_hit):
+                                continue
+                            page_start = sec.get("page_start")
+                            page_end = sec.get("page_end")
+                            if page_start is None and page_end is None:
+                                page_start, page_end = _page_bounds(sec.get("page_range"))
+                            results.append(
+                                SearchResult(
+                                    doc_id=current_doc_id,
+                                    filename=d.get("filename", ""),
+                                    file_type=d.get("file_type", ""),
+                                    content_type=d.get("content_type", "General"),
+                                    storage_path=d.get("storage_path"),
+                                    digest=d.get("digest", ""),
+                                    tags=d.get("tags", []),
+                                    source=d.get("source", "upload"),
+                                    created_at=d.get("created_at"),
+                                    score=_search_score((title_hit, 2.0), (text_hit, 1.5)),
+                                    metadata=d.get("metadata") or {},
+                                    source_ref=d.get("source_ref") or None,
+                                    source_filename=d.get("source_filename") or None,
+                                    source_available=bool(d.get("source_available")),
+                                    summary_mode=d.get("summary_mode") or None,
+                                    summary_status=d.get("summary_status") or None,
+                                    summary_error_code=d.get("summary_error_code") or None,
+                                    sid=sec.get("sid"),
+                                    section_title=title,
+                                    page_range=sec.get("page_range"),
+                                    page_start=page_start,
+                                    page_end=page_end,
+                                    snippet=_make_snippet(
+                                        section_text if text_hit else title, query
+                                    ),
+                                )
                             )
-                        )
-                else:
-                    for sec in manifest.get("sections", []):
-                        rel_path = sec.get("file")
-                        if not rel_path:
-                            continue
-                        section_path = _resolve_manifest_section_path(doc_dir, rel_path)
-                        if not section_path:
-                            continue
-                        if not section_path.exists():
-                            continue
-                        section_text = section_path.read_text(encoding="utf-8")
-                        title = sec.get("title", "")
-                        title_hit = q_lower in title.lower()
-                        text_hit = q_lower in section_text.lower()
-                        if not (title_hit or text_hit):
-                            continue
-                        page_start = sec.get("page_start")
-                        page_end = sec.get("page_end")
-                        if page_start is None and page_end is None:
-                            page_start, page_end = _page_bounds(sec.get("page_range"))
-                        results.append(
-                            SearchResult(
-                                doc_id=current_doc_id,
-                                filename=d.get("filename", ""),
-                                file_type=d.get("file_type", ""),
-                                content_type=d.get("content_type", "General"),
-                                storage_path=d.get("storage_path"),
-                                digest=d.get("digest", ""),
-                                tags=d.get("tags", []),
-                                source=d.get("source", "upload"),
-                                created_at=d.get("created_at"),
-                                score=_search_score((title_hit, 2.0), (text_hit, 1.5)),
-                                metadata=d.get("metadata") or {},
-                                source_ref=d.get("source_ref") or None,
-                                source_filename=d.get("source_filename") or None,
-                                source_available=bool(d.get("source_available")),
-                                summary_mode=d.get("summary_mode") or None,
-                                summary_status=d.get("summary_status") or None,
-                                summary_error_code=d.get("summary_error_code") or None,
-                                sid=sec.get("sid"),
-                                section_title=title,
-                                page_range=sec.get("page_range"),
-                                page_start=page_start,
-                                page_end=page_end,
-                                snippet=_make_snippet(
-                                    section_text if text_hit else title, query
-                                ),
-                            )
-                        )
+            except Exception as exc:  # noqa: BLE001 - one document, not the query
+                skipped += 1
+                logger.warning(
+                    "search_text skipping %s: %s: %s",
+                    current_doc_id, type(exc).__name__, exc,
+                )
 
         results.sort(key=lambda item: item.score, reverse=True)
         total = len(results)
-        return SearchResponse(results=results[:limit], total=total)
+        return SearchResponse(results=results[:limit], total=total, skipped=skipped)
 
     return await asyncio.to_thread(_search_sync)
 

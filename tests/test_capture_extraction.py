@@ -438,3 +438,45 @@ def test_chrome_names_match_on_word_boundaries() -> None:
         assert rx.search(hit), hit
     for miss in ("shareholder", "sharemarket-data", "navigator-info", "innavigable"):
         assert not rx.search(miss), miss
+
+
+# ── empty states ────────────────────────────────────────────────────────────────
+def test_an_empty_state_container_is_dropped_without_a_density_check() -> None:
+    """GitHub's blankslate holds "Uh oh! There was an error while loading…" —
+    prose with no links, so every density measure calls it content. The name is
+    the site asserting there is nothing here, which is the only signal there is."""
+    html = (
+        '<body><article><p>Real README prose that is long enough to keep.</p>'
+        '<div class="blankslate blankslate-spacious"><h3>Uh oh!</h3>'
+        "<p>There was an error while loading. Please reload this page.</p></div>"
+        "</article></body>"
+    )
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "Uh oh" not in body
+    assert "error while loading" not in body
+    assert "Real README prose" in body
+
+
+@pytest.mark.parametrize("name", ["blankslate", "empty-state", "emptystate", "skeleton"])
+def test_every_empty_state_name_is_recognised(name: str) -> None:
+    html = (
+        f'<body><article><p>Real prose that is long enough to survive.</p>'
+        f'<div class="{name}"><p>Nothing to show here right now, sorry.</p></div>'
+        "</article></body>"
+    )
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "Nothing to show" not in body
+    assert "Real prose" in body
+
+
+def test_placeholder_is_not_an_empty_state_name() -> None:
+    """It appears on real content containers too, so it needs corroboration it
+    cannot get here — left out rather than guessed at."""
+    html = (
+        '<body><article><div class="placeholder">'
+        "<p>Genuine article text that happens to live in a container someone "
+        "named placeholder, which is not the same as a declared empty state.</p>"
+        "</div></article></body>"
+    )
+    body = " ".join(b["text"] for b in html_to_blocks(html))
+    assert "Genuine article text" in body
