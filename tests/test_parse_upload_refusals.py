@@ -157,3 +157,76 @@ def test_a_self_referential_chain_terminates() -> None:
     a.__context__ = b
     b.__context__ = a
     assert dr._is_unreadable_document(a) is False
+
+
+# ── a PDF with no header ─────────────────────────────────────────────────────────
+# The fake PDF was already refused, but only after a parse had been attempted:
+# it reserved a doc_id and left a .parse-failed.json, while the empty file and
+# the non-zip OOXML left nothing. A v1.7.3 retest read that asymmetry as a
+# half-fix. Checking the header first makes all three land the same way.
+#
+# The bound is PyMuPDF's own, measured: it opens a file with 1 MB of junk ahead
+# of %PDF-, and raises FileDataError whenever %PDF- is absent. So this refuses
+# only what the parser could not have read either way.
+
+
+def test_a_pdf_with_no_header_leaves_nothing_behind(client: TestClient) -> None:
+    import mantisfetch_docreader as dr
+
+    docs_dir = dr._get_docs_dir()
+    before = len(_library(client))
+
+    resp = _parse(client, "not-a-pdf.pdf", b"MZ-NOT-A-PDF\x00binary blob renamed as pdf\n")
+
+    assert resp.status_code == 422
+    assert "no %PDF- header" in resp.json()["detail"]
+    assert len(_library(client)) == before
+    assert not list((docs_dir / "General").glob("DOC-*")), (
+        "the refusal reserved a directory"
+    )
+
+
+def test_a_pdf_whose_header_is_buried_still_reaches_the_parser(client: TestClient) -> None:
+    """PyMuPDF does not require the header at offset 0, so neither may this.
+    A file it would open must not be refused here."""
+    fitz = pytest.importorskip("fitz")
+
+    doc = fitz.open()
+    doc.new_page()
+    real = doc.tobytes()
+    doc.close()
+
+    resp = _parse(client, "padded.pdf", b"x" * 4096 + real)
+    assert resp.status_code == 200
+
+
+def test_a_broken_body_under_a_real_header_still_records_the_attempt(
+    client: TestClient,
+) -> None:
+    """The four on-disk states (#209) hold for a parse that was actually tried.
+    This file claims to be a PDF and only fails once opened, so it keeps the
+    record — unlike the three refusals, which happen before any attempt."""
+    import mantisfetch_docreader as dr
+
+    docs_dir = dr._get_docs_dir()
+    resp = _parse(client, "truncated.pdf", b"%PDF-1.4 claims to be one, and is not")
+
+    assert resp.status_code == 422
+    failed = list((docs_dir / "General").glob("DOC-*"))
+    assert failed, "an attempted parse left no record"
+    assert [p.name for p in failed[0].iterdir()] == [dr.PARSE_FAILURE_MARKER]
+
+
+def test_the_needle_is_found_across_a_chunk_boundary(tmp_path) -> None:
+    """The scan reads in 1 MB chunks. A header straddling a boundary must not
+    be missed — that would refuse a readable PDF."""
+    import mantisfetch_docreader as dr
+
+    for split in range(1, 5):
+        path = tmp_path / f"split{split}.bin"
+        path.write_bytes(b"x" * (1024 * 1024 - split) + b"%PDF-" + b"y" * 10)
+        assert dr._contains_bytes(path, b"%PDF-"), f"missed a header split at {split}"
+
+    absent = tmp_path / "absent.bin"
+    absent.write_bytes(b"x" * (2 * 1024 * 1024))
+    assert not dr._contains_bytes(absent, b"%PDF-")

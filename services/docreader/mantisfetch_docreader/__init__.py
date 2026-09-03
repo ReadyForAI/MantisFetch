@@ -2500,6 +2500,27 @@ def _safe_source_filename(filename: str) -> str:
 PARSE_FAILURE_MARKER = ".parse-failed.json"
 
 
+def _contains_bytes(path: Path, needle: bytes) -> bool:
+    """Whether the file holds this byte sequence anywhere.
+
+    Read in chunks rather than whole: the upload cap is 200 MB by default, and
+    this runs before the parse that will read the file properly. Consecutive
+    chunks overlap by one byte less than the needle so a match straddling a
+    boundary is still found.
+    """
+    chunk_size = 1024 * 1024
+    overlap = len(needle) - 1
+    carry = b""
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(chunk_size)
+            if not chunk:
+                return False
+            if needle in carry + chunk:
+                return True
+            carry = chunk[-overlap:] if overlap else b""
+
+
 def _is_unreadable_document(exc: BaseException) -> bool:
     """True when the parser failed because the file is not what it claims.
 
@@ -3641,6 +3662,24 @@ async def api_parse_doc(
                     422,
                     f"{filename} is not a valid {suffix.lstrip('.')} file "
                     f"(not a zip archive)",
+                )
+
+        # The same refusal for a PDF, so all three land the same way: no id, no
+        # directory, no failure record. Without it a binary blob renamed .pdf
+        # still reserved DOC-0xx and left a .parse-failed.json behind, because
+        # by then a parse had been attempted and #209 keeps a record of one.
+        #
+        # The bound is PyMuPDF's own. It does not require the header at any
+        # offset — measured, it opens a file with a megabyte of junk in front of
+        # %PDF- — and it raises FileDataError whenever %PDF- is absent
+        # altogether. So "the marker appears somewhere" is exactly as permissive
+        # as the parser, and no file this refuses is one it could have read. A
+        # PDF whose header is there but whose body is broken still reaches the
+        # parser, and still leaves the record that says a parse was tried.
+        if suffix == ".pdf" and scratch_path is not None:
+            if not await asyncio.to_thread(_contains_bytes, scratch_path, b"%PDF-"):
+                raise HTTPException(
+                    422, f"{filename} is not a valid pdf file (no %PDF- header)"
                 )
 
         # Refuse a document this call cannot afford, before it costs anything.
