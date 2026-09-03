@@ -812,7 +812,28 @@ def _convert_to_markdown(filepath: Path) -> str:
 
             stream_info = StreamInfo(charset=charset)
     try:
-        result = _get_converter().convert(str(filepath), stream_info=stream_info)
+        result = _get_converter().convert(
+            str(filepath),
+            stream_info=stream_info,
+            # markdownify, which MarkItDown uses for the HTML-shaped formats
+            # (html, docx, xlsx), escapes _ and * by default. A DOCX cell
+            # holding MFPARSE_DOCX_TABLE_W4 was stored as
+            # MFPARSE\_DOCX\_TABLE\_W4, so searching the library for the string
+            # that is in the document returned nothing — the index holds the
+            # escaped form. PDF, CSV, TXT and PPTX do not go through
+            # markdownify and were never affected, which is why the same search
+            # worked there.
+            #
+            # Search is only half of it. What agents read is full.md, and an
+            # identifier quoted out of it carried the backslashes into whatever
+            # they did next.
+            #
+            # Nothing renders this markdown, so the escapes buy nothing: the
+            # text is chunked, searched and handed to a model. Turning them off
+            # is what makes the stored text the document's own.
+            escape_underscores=False,
+            escape_asterisks=False,
+        )
         return result.text_content or ""
     except Exception as e:
         raise RuntimeError(t("file_open_failed", path=str(filepath))) from e
