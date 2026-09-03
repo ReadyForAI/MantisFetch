@@ -51,7 +51,7 @@ from providers.search.base import (
 # YOLO detection + Readability.js loading. Imported as `vision` so endpoints can
 # read the startup-mutated vision.YOLO_ENABLED / vision.READABILITY_* state live;
 # the functions are re-exported for bare calls.
-from . import extract
+from . import extract, negotiate
 from . import security as security
 from . import vision as vision
 from .models import (
@@ -1019,6 +1019,19 @@ async ({ toolName, params, autoSubmit }) => {
 # ============================================================
 # Distill: blocks -> stable sections
 # ============================================================
+def _content_identity(title: str | None, sections: list[dict[str, Any]]) -> str:
+    """The content_hash for a page's distilled body.
+
+    One function on purpose. The negotiated fetch path and the browser path
+    produce their blocks differently but must agree on identity, and a copied
+    formula would drift the first time one of them was edited. URL is excluded
+    deliberately: the same article reached via AMP or with tracking parameters
+    has to collide so content-level reuse can find it.
+    """
+    joined = "\n\n".join(s["t"] for s in sections)
+    return _hash_text((title or "") + "\n" + joined)
+
+
 def _blocks_to_sections_stable(
     blocks: list[dict[str, str]],
     max_sections: int,
@@ -1542,7 +1555,7 @@ async def _distill(
     # URL lives in source_url / requested_url, not in the content identity.
     # Empty pages share the same empty-body hash — callers must not use it for
     # library-wide reuse (see _capture_fresh).
-    content_hash = _hash_text((title or "") + "\n" + joined)
+    content_hash = _content_identity(title, sections)
     # Pre-upgrade formula included the URL; stored for dual lookup only.
     content_hash_legacy = _hash_text((title or "") + "\n" + (url or "") + "\n" + joined)
 
@@ -2071,6 +2084,7 @@ def _persist_web_capture(
     metadata: dict[str, Any] | None = None,
     summary_mode: str = "off",
     http_status: int | None = None,
+    fetch_via: str = "html",
 ) -> None:
     """Write a web capture to the document library and update doc-index.json.
 
@@ -2186,6 +2200,10 @@ def _persist_web_capture(
                 # distinguishable from a capture made before this was recorded,
                 # which has no key at all.
                 "http_status": http_status,
+                # Which rung of the fetch ladder produced this body. Deliberately
+                # not "source", which already means web_capture and is what the
+                # index is filtered on. "html" is the browser path.
+                "fetch_via": fetch_via,
             },
         }
         if summary_mode == "defer":
@@ -3384,6 +3402,174 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             await sessions.remove(sid)
 
 
+def _find_capture_by_requested_url(docs_dir: Path, url: str) -> dict[str, Any] | None:
+    """Any existing web capture whose caller asked for this exact URL.
+
+    Used to keep the negotiated path from minting a second doc_id for a page the
+    browser path already stored (and the reverse). Unlike _find_cached_capture
+    this has no TTL and ignores content_type: the question is not "may I reuse
+    this response" but "does this page already have an identity in the library".
+    """
+    index = _load_doc_index(docs_dir)
+    if index is None:
+        return None
+    for doc in index.get("documents", []):
+        if not isinstance(doc, dict) or doc.get("source") != "web_capture":
+            continue
+        if doc.get("requested_url") == url or doc.get("source_url") == url:
+            return doc
+    return None
+
+
+async def _capture_negotiated(
+    req: CaptureRequest, content_type: str, docs_dir: Path
+) -> CaptureResponse | None:
+    """Capture without a browser when the site will serve markdown.
+
+    Returns None when no rung answered, leaving the caller to take the browser
+    path. Raises for an origin that answered 5xx: falling back would mean
+    hitting a failing server a second time with a much heavier request.
+
+    Everything after the fetch is the browser path's own pipeline — blocks to
+    sections under the storage budget, the same hash over the same joined body,
+    the same persist. Only the source of the blocks differs.
+    """
+    try:
+        doc = await negotiate.try_fetch_markdown(req.url, timeout_ms=req.timeout_ms)
+    except negotiate.NegotiationRefused as exc:
+        raise HTTPException(502, f"capture failed: HTTP {exc.status} for {exc.url}") from exc
+    if doc is None:
+        return None
+
+    blocks = extract.markdown_to_blocks(doc.markdown)
+    if not blocks:
+        return None
+
+    budget = CAPTURE_PERSIST_BUDGET
+    sections = _blocks_to_sections_stable(
+        blocks=blocks,
+        max_sections=budget.max_sections,
+        max_section_chars=budget.max_section_chars,
+        total_budget=budget.total_text_budget_chars,
+    )
+    if not sections:
+        return None
+
+    title = next((b["text"] for b in blocks if b["tag"] == "h1"), None) or req.url
+    content_hash = _content_identity(title, sections)
+    digest = _build_web_digest(title, sections)
+
+    # B5 content-level reuse, the same as the browser path does after distilling.
+    # Extracting _content_identity only makes the two paths agree on the *number*;
+    # reuse happens here, and without it a page already in the library — captured
+    # by the browser path, or reached earlier through a different URL — gets a
+    # second doc_id anyway. _find_capture_by_requested_url cannot cover this: it
+    # is an exact string match, so ?utm= or a .md variant slips straight past it.
+    meaningful_body = any((sec.get("t") or "").strip() for sec in sections)
+    if not req.force_refresh and content_hash and meaningful_body:
+        async with _optional_capture_lock(f"ch:{content_hash}"):
+            hit = await asyncio.to_thread(
+                _find_capture_by_content_hash, docs_dir, content_hash
+            )
+            if hit is not None:
+                merged = await asyncio.to_thread(
+                    _merge_capture_tags_metadata, docs_dir, hit, req.tags, req.metadata
+                )
+                hit_ct = _normalize_content_type(merged.get("content_type") or content_type)
+                metrics.incr("capture_content_hash_hits")
+                return await asyncio.to_thread(
+                    _cached_capture_response, merged, hit_ct, docs_dir, req.summary_mode
+                )
+            doc_id = await asyncio.to_thread(
+                _persist_negotiated, req, doc, content_type, docs_dir, sections,
+                title, digest, content_hash,
+            )
+            return _negotiated_response(
+                req, doc, content_type, docs_dir, sections, title, digest, doc_id
+            )
+    doc_id = await asyncio.to_thread(
+        _persist_negotiated, req, doc, content_type, docs_dir, sections,
+        title, digest, content_hash,
+    )
+    return _negotiated_response(
+        req, doc, content_type, docs_dir, sections, title, digest, doc_id
+    )
+
+
+def _persist_negotiated(
+    req: CaptureRequest,
+    doc: negotiate.NegotiatedDoc,
+    content_type: str,
+    docs_dir: Path,
+    sections: list[dict[str, Any]],
+    title: str | None,
+    digest: str,
+    content_hash: str,
+) -> str:
+    """Mint an id and write a negotiated capture. Runs in a worker thread."""
+
+    def _alloc_and_persist() -> str:
+        doc_id = _next_web_doc_id(docs_dir)
+        _persist_web_capture(
+            doc_id=doc_id,
+            url=doc.final_url,
+            title=title,
+            sections=sections,
+            digest=digest,
+            tags=req.tags,
+            content_hash=content_hash,
+            docs_dir=docs_dir,
+            content_type=content_type,
+            extract_tables=req.extract_tables,
+            requested_url=req.url,
+            lang=req.lang,
+            metadata=req.metadata,
+            summary_mode=req.summary_mode,
+            http_status=doc.http_status,
+            fetch_via=doc.fetch_via,
+        )
+        return doc_id
+
+    return _alloc_and_persist()
+
+
+def _negotiated_response(
+    req: CaptureRequest,
+    doc: negotiate.NegotiatedDoc,
+    content_type: str,
+    docs_dir: Path,
+    sections: list[dict[str, Any]],
+    title: str | None,
+    digest: str,
+    doc_id: str,
+) -> CaptureResponse:
+    metrics.incr("capture_negotiated_hits")
+
+    summary_status: str | None = None
+    if req.summary_mode == "defer":
+        threading.Thread(
+            target=_defer_web_summary,
+            args=(doc_id, sections, docs_dir, content_type, title, doc.final_url),
+            daemon=True,
+            name=f"web-summary-{doc_id}",
+        ).start()
+        summary_status = "pending"
+
+    return CaptureResponse(
+        doc_id=doc_id,
+        content_type=content_type,
+        storage_path=_doc_storage_rel_path(doc_id, content_type),
+        digest=digest,
+        section_count=len(sections),
+        table_count=0,
+        summary_status=summary_status,
+        # The markdown URL, which after a .md rewrite or an llms.txt follow is
+        # not what the caller asked for. requested_url keeps that.
+        final_url=doc.final_url,
+        http_status=doc.http_status,
+    )
+
+
 async def _capture_impl(
     req: CaptureRequest, *, url_ttl_hours: float | None = None
 ) -> CaptureResponse:
@@ -3440,6 +3626,27 @@ async def _capture_impl(
                     _cached_capture_response, cached, content_type, docs_dir, req.summary_mode
                 )
             metrics.incr("capture_cache_misses")
+
+        # Ask the site for markdown before opening a browser. Two conditions
+        # beyond the feature flag, both of which exist to keep this from
+        # changing behaviour the browser path already guarantees:
+        #
+        # extract_tables: a negotiated document has no tables, and the URL cache
+        #   key includes extract_tables — so a table-less document cached under a
+        #   key that promises tables would be handed to every later caller
+        #   asking for them. A caller who wants tables wants the browser path.
+        #
+        # an existing doc for this URL: the content-hash lookup runs after
+        #   extraction, and the two paths do not produce identical blocks, so a
+        #   page first captured one way and then the other mints a second
+        #   doc_id — every time, not occasionally. Deferring to the browser path
+        #   when a doc already exists keeps that from happening.
+        if negotiate.fast_path_enabled() and not req.extract_tables:
+            existing = await asyncio.to_thread(_find_capture_by_requested_url, docs_dir, req.url)
+            if existing is None:
+                fast = await _capture_negotiated(req, content_type, docs_dir)
+                if fast is not None:
+                    return fast
         return await _capture_fresh(req, content_type, docs_dir)
 
 
