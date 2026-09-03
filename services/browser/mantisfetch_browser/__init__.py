@@ -1361,10 +1361,20 @@ async def _distill(session: Session, req: DistillRequest) -> dict[str, Any]:
         else:
             # avoid re-injecting Readability.js
             already = await page.evaluate("typeof Readability !== 'undefined'")
+            injected = True
             if not already:
-                await page.add_script_tag(content=vision.READABILITY_JS)
-
-            data = await page.evaluate(READABILITY_EVAL, 40000)
+                try:
+                    await page.add_script_tag(content=vision.READABILITY_JS)
+                except Exception as e:
+                    # A strict Content-Security-Policy (script-src without
+                    # 'unsafe-inline') blocks the injection outright. That used to
+                    # abort the whole capture with a 500 — GitHub, MDN and Stack
+                    # Overflow were simply uncapturable. The DOM is still there, so
+                    # fall back to the simple distiller instead of failing.
+                    logger.info("readability injection blocked (%s); using simple distill", e)
+                    readability_meta = {"fallback_reason": "script_injection_blocked"}
+                    injected = False
+            data = None if not injected else await page.evaluate(READABILITY_EVAL, 40000)
             if not data or not (data.get("text") or "").strip():
                 mode = "simple"
             else:
@@ -1850,6 +1860,7 @@ def _persist_web_capture(
     lang: str = DEFAULT_LANG,
     metadata: dict[str, Any] | None = None,
     summary_mode: str = "off",
+    http_status: int | None = None,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json.
 
@@ -1952,6 +1963,10 @@ def _persist_web_capture(
                 "source_url": url,
                 "created_at": now_str,
                 "content_hash": content_hash,
+                # Status the final URL was served with. Captures written before
+                # this was recorded have no key at all, which is distinct from a
+                # navigation that reported no response (null).
+                **({"http_status": http_status} if http_status is not None else {}),
             },
         }
         if summary_mode == "defer":
@@ -2494,6 +2509,7 @@ def _cached_capture_response(
         table_count=int(entry.get("tables", 0) or 0),
         reused=True,
         cache_age_hours=age_hours,
+        final_url=entry.get("source_url"),
         summary_status=_resolve_cached_summary(entry, docs_dir, content_type, summary_mode),
     )
 
@@ -2953,11 +2969,24 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             # or serialize other sessions behind fsync of a large capture.
             async with sess.lock:
                 try:
-                    await sess.page.goto(
+                    response = await sess.page.goto(
                         req.url, wait_until="domcontentloaded", timeout=req.timeout_ms
                     )
                 except Exception as e:
                     raise HTTPException(502, f"capture goto failed: {e}")
+
+                # An error page is a successful navigation as far as Playwright is
+                # concerned, so without this a 404 becomes a library document whose
+                # digest reads "Page not found" — and an agent that only reads the
+                # digest believes the article was captured. Reject rather than
+                # storing it under a quality flag: a 4xx body is not the content
+                # the caller asked for, and silently keeping it is the same class
+                # of bug as falling back on an empty result.
+                http_status = response.status if response is not None else None
+                if http_status is not None and http_status >= 400:
+                    raise HTTPException(
+                        502, f"capture failed: HTTP {http_status} for {response.url}"
+                    )
 
                 sess.webmcp_tools = None
                 sess.webmcp_available = False
@@ -3038,6 +3067,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                             lang=req.lang,
                             metadata=req.metadata,
                             summary_mode=req.summary_mode,
+                            http_status=http_status,
                         )
                         return doc_id
 
@@ -3061,6 +3091,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                         lang=req.lang,
                         metadata=req.metadata,
                         summary_mode=req.summary_mode,
+                        http_status=http_status,
                     )
                     return doc_id
 
@@ -3084,6 +3115,8 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                 section_count=len(sections),
                 table_count=len(table_sections),
                 summary_status=summary_status,
+                final_url=url,
+                http_status=http_status,
             )
         finally:
             await sessions.remove(sid)

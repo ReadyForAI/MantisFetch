@@ -240,6 +240,12 @@ class CaptureResponse(BaseModel):
     table_count: int
     reused: bool = False
     cache_age_hours: float | None = None
+    # The URL the content actually came from (after redirects) and the status it
+    # was served with, so a caller can tell a real article from a soft error page
+    # without reading the body. None on a reused response: the cached entry
+    # records the final URL but predates status capture.
+    final_url: str | None = None
+    http_status: int | None = None
     # "pending" when summary_mode="defer" scheduled an LLM digest/brief; poll
     # /doc/library/{doc_id}/summary for progress. None otherwise.
     summary_status: str | None = None

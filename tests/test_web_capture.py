@@ -69,6 +69,18 @@ def _make_distill_result(url: str = "https://example.com") -> dict:
     }
 
 
+def _goto_mock(status: int = 200, url: str = "https://example.com") -> AsyncMock:
+    """page.goto returns a Response; capture reads .status to reject error pages.
+
+    A bare AsyncMock would hand back a mock for .status and the comparison would
+    raise, so the mock has to be as faithful as the code it stands in for.
+    """
+    response = MagicMock()
+    response.status = status
+    response.url = url
+    return AsyncMock(return_value=response)
+
+
 def test_capture_empty_body_returns_422(client: TestClient) -> None:
     """POST /web/capture with empty body must return 422 (field validation), not 404."""
     resp = client.post("/web/capture", json={})
@@ -112,7 +124,7 @@ def test_capture_persists_to_doc_library(client: TestClient) -> None:
         ):
             # Mock the browser context/page creation chain
             mock_page = AsyncMock()
-            mock_page.goto = AsyncMock()
+            mock_page.goto = _goto_mock()
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
 
@@ -292,7 +304,7 @@ def test_capture_extract_tables_mismatch_not_reused(client: TestClient) -> None:
             patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
         ):
             mock_page = AsyncMock()
-            mock_page.goto = AsyncMock()
+            mock_page.goto = _goto_mock()
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
             import mantisfetch_browser as lb
@@ -326,7 +338,7 @@ def test_capture_force_refresh_bypasses_cache(client: TestClient) -> None:
             patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
         ):
             mock_page = AsyncMock()
-            mock_page.goto = AsyncMock()
+            mock_page.goto = _goto_mock()
             mock_context = AsyncMock()
             mock_context.new_page = AsyncMock(return_value=mock_page)
             import mantisfetch_browser as lb
@@ -367,7 +379,7 @@ async def test_concurrent_same_url_captures_only_once(tmp_path: Path) -> None:
         patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
     ):
         mock_page = AsyncMock()
-        mock_page.goto = AsyncMock()
+        mock_page.goto = _goto_mock()
         mock_context = AsyncMock()
         mock_context.new_page = AsyncMock(return_value=mock_page)
         orig_browser = lb._browser
@@ -589,7 +601,7 @@ def test_capture_reuses_by_content_hash_across_urls(client: TestClient) -> None:
         )
 
         mock_page = AsyncMock()
-        mock_page.goto = AsyncMock()
+        mock_page.goto = _goto_mock()
         mock_context = AsyncMock()
         mock_context.new_page = AsyncMock(return_value=mock_page)
         orig_browser = lb._browser
