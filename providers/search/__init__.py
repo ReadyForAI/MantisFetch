@@ -26,6 +26,8 @@ Environment variables:
                                        MANTISFETCH_{TAVILY,BOCHA,BRAVE}_API_KEY override it)
   MANTISFETCH_SEARCH_MAX_RESULTS       default result cap (default 10, hard max 20)
   MANTISFETCH_SEARCH_MIN_INTERVAL_SEC  min seconds between searches (default 2)
+  MANTISFETCH_SEARCH_MAX_WAIT_SEC      how long a search waits for its turn before
+                                       429 instead (default 30; 0 = never wait)
 """
 
 from __future__ import annotations
@@ -58,12 +60,19 @@ __all__ = [
     "default_max_results",
     "clamp_max_results",
     "min_interval_sec",
+    "max_wait_sec",
     "HARD_MAX_RESULTS",
 ]
 
 HARD_MAX_RESULTS = 20
 _DEFAULT_MAX_RESULTS = 10
 _DEFAULT_MIN_INTERVAL_SEC = 2.0
+# How long a search may wait for its turn before the caller is told to come
+# back instead. The throttle is a quota guard, not a queue with no bottom:
+# past this, holding the connection is worse than answering. Kept well under
+# the 60s cap NodalOS agentd puts on upstream calls, so the 429 still
+# arrives before the client gives up.
+_DEFAULT_MAX_WAIT_SEC = 30.0
 
 
 def _registry() -> dict[str, type[SearchProvider]]:
@@ -116,6 +125,24 @@ def min_interval_sec() -> float:
         value = float(raw)
     except ValueError:
         value = _DEFAULT_MIN_INTERVAL_SEC
+    return max(0.0, value)
+
+
+def max_wait_sec() -> float:
+    """How long a search may wait for its turn before being refused instead.
+
+    Bounds the queue that min_interval_sec creates. It is this value, not the
+    interval, that decides how many concurrent searches can be absorbed:
+    ``max_wait / interval``. Raising the interval without raising this shrinks
+    that number, so the two move together.
+
+    0 restores the original behaviour — never wait, refuse immediately.
+    """
+    raw = os.environ.get("MANTISFETCH_SEARCH_MAX_WAIT_SEC", str(_DEFAULT_MAX_WAIT_SEC))
+    try:
+        value = float(raw)
+    except ValueError:
+        value = _DEFAULT_MAX_WAIT_SEC
     return max(0.0, value)
 
 
