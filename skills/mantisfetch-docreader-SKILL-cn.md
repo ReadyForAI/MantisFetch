@@ -654,7 +654,9 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | `422 unsupported format`                           | 上传了不支持的文件格式         | 通过 `/doc/health` 的 `supported_formats` 检查当前支持格式 |
 | `409 doc_id already exists`                         | 显式 `doc_id` 与已有文档冲突   | 传 `replace=true` 覆盖，或不传 `doc_id` 取新 id |
 | `409 summary already running` / `attempt limit reached` | 并发/重复调用 `POST .../summary` | 改为轮询 `GET .../summary`；只有必须覆盖时才传 `force=true` |
-| `429 too many concurrent requests`                 | 触发限流                       | 等待后重试，服务端限制了并发解析数 |
+| `429 too many concurrent parse requests`           | 解析门在整个队列上限（默认 600s）内都没空出槽——服务器是真的饱和了，不是一时忙 | 按 `Retry-After` 给的秒数等待后重试。一般规模的突发会排队通过 |
+| `429 parse queue is holding N bytes`               | 排队中的上传占用的磁盘超过了队列允许的量 | 等待后重试；排队中的解析会一直把上传留在盘上，队列排空后自然恢复 |
+| `422 parse_budget_exceeded` 且带 `queued_seconds`  | 等一个解析槽的时间放不进本次调用声明的 `budget_seconds` | 调大预算，或换一条能等的摄入路径。同样的错误码但**没有** `queued_seconds`，表示是文档本身估算超预算 |
 | `404 document not found`                           | doc_id 无效或文档尚未入库      | 先用 search 确认 doc_id |
 | `404 section not found`                            | sid 无效                       | 先调用 `/doc/library/{doc_id}/sections` 获取有效 sid 列表 |
 | `422 <file> is empty (0 bytes)`                    | 上传的文件没有任何字节         | **不要重试。** 什么也没入库，也没有占用 `doc_id` |
