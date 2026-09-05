@@ -15,6 +15,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -707,6 +708,147 @@ _parse_sem = asyncio.Semaphore(_MAX_CONCURRENT_PARSE)
 _MAX_CONCURRENT_UPLOAD = int(
     os.environ.get("MANTISFETCH_MAX_CONCURRENT_UPLOAD", str(_MAX_CONCURRENT_PARSE))
 )
+# Bytes of staged upload currently held by requests that are parsing or waiting
+# to parse. A queued request keeps its scratch file, so this is the resource a
+# queue actually consumes — the reason the old gate gave for refusing rather
+# than queueing. Measured, that reason did not hold: with the gate at 2, a burst
+# of six wrote all six scratch files before four of them were refused, because
+# the file is staged before the gate is ever consulted. Refusing did not save
+# the disk; it discarded an upload that had already been paid for. What a queue
+# does change is how long the files stay, so the disk gets a real bound here.
+#
+# 10x the per-upload cap: the old design already permitted 2 uploading plus 2
+# parsing, so this is two and a half times what was already allowed, rather
+# than a number picked for feeling about right.
+def _parse_queue_max_bytes() -> int:
+    """Read per call: MAX_UPLOAD_BYTES is defined further down, and the other
+    tunables in this file are read per call too."""
+    raw = os.environ.get("MANTISFETCH_PARSE_QUEUE_MAX_BYTES")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 10 * MAX_UPLOAD_BYTES
+_scratch_bytes_held = 0
+
+# A caller that declared no budget is saying it can wait, and the queue honours
+# that. It is not saying it can wait forever: two wedged OCR jobs would hold the
+# gate indefinitely. 600s is the ceiling SharedSpecs IRP 20260801 puts on a
+# client request timeout, so the number is borrowed rather than invented. This
+# refuses "ten minutes and never got a slot", not "this parse is slow" — the
+# latter is what the budget preflight is for, and it still never refuses a
+# caller who declared no budget.
+_DEFAULT_PARSE_QUEUE_MAX_WAIT_SEC = 600.0
+
+
+def _parse_queue_max_wait_sec() -> float:
+    raw = os.environ.get(
+        "MANTISFETCH_PARSE_QUEUE_MAX_WAIT_SEC", str(_DEFAULT_PARSE_QUEUE_MAX_WAIT_SEC)
+    )
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_PARSE_QUEUE_MAX_WAIT_SEC
+
+
+@contextlib.asynccontextmanager
+async def _parse_slot(
+    *,
+    budget_seconds: float | None,
+    t_entry: float,
+    estimate: dict[str, Any] | None,
+) -> AsyncGenerator[None, None]:
+    """Hold a parse slot, waiting for one within whatever time the caller has.
+
+    Concurrency buys nothing here, which is why waiting is the right answer
+    rather than a bigger gate. Measured on the delivery image: text parsing is
+    GIL-bound (8 concurrent parses used 105% of a 16-core box) and OCR is
+    already internally parallel (one document alone drew 1066%). Throughput was
+    flat or slightly worse at every level from 1 to 16. A refused caller
+    therefore gains nothing by retrying sooner than a queued one would have
+    finished — it just pays an LLM round trip to find that out.
+
+    A caller that declared budget_seconds gets its wait charged against that
+    budget, minus what the parse itself is estimated to need, so the answer
+    arrives inside the window the caller said it had. One that declared none
+    waits up to the queue ceiling.
+    """
+    if budget_seconds is not None and budget_seconds > 0:
+        spent = time.monotonic() - t_entry
+        reserve = float(estimate["estimated_seconds"]) if estimate else 0.0
+        remaining = budget_seconds - spent - reserve
+        if remaining <= 0:
+            # Out of budget to *wait* with — but a free slot costs no waiting,
+            # and refusing one would break the older contract that a caller
+            # whose cost could not be estimated is never turned away on a guess
+            # (test_unknown_cost_is_never_refused). The budget bounds the queue,
+            # it does not deny an open gate. Safe to check then acquire: a
+            # semaphore that is not full acquires on a fast path that never
+            # suspends, so nothing can take the slot in between.
+            if _parse_sem.locked():
+                raise HTTPException(
+                    422, _budget_refusal(budget_seconds, spent, estimate, 0.0)
+                )
+            await _parse_sem.acquire()
+        else:
+            try:
+                await asyncio.wait_for(_parse_sem.acquire(), timeout=remaining)
+            except TimeoutError:
+                raise HTTPException(
+                    422, _budget_refusal(budget_seconds, spent, estimate, remaining)
+                ) from None
+    else:
+        ceiling = _parse_queue_max_wait_sec()
+        if ceiling <= 0:
+            if _parse_sem.locked():
+                raise HTTPException(
+                    429,
+                    "too many concurrent parse requests",
+                    headers={"Retry-After": "30"},
+                )
+            await _parse_sem.acquire()
+            try:
+                yield
+            finally:
+                _parse_sem.release()
+            return
+        try:
+            await asyncio.wait_for(_parse_sem.acquire(), timeout=ceiling)
+        except TimeoutError:
+            raise HTTPException(
+                429,
+                f"too many concurrent parse requests: no slot freed within {ceiling:g}s",
+                headers={"Retry-After": str(math.ceil(min(ceiling, 300)))},
+            ) from None
+    try:
+        yield
+    finally:
+        _parse_sem.release()
+
+
+def _budget_refusal(
+    budget_seconds: float, spent: float, estimate: dict[str, Any] | None, queued: float
+) -> dict[str, Any]:
+    """The 422 body, saying which half of the budget ran out.
+
+    Same error code and shape as the pre-parse estimate refusal — the remedy is
+    the same, ingest it somewhere that can wait — but the diagnosis differs, and
+    a caller tuning its budget needs to know whether the document was too slow
+    or the queue was too long."""
+    body: dict[str, Any] = {
+        "error": "parse_budget_exceeded",
+        "message": (
+            f"waited {queued:.1f}s for a parse slot without getting one, inside the "
+            f"{budget_seconds}s budget this call declared ({spent:.1f}s already spent). "
+            f"The document was not parsed. Ingest it through a path that can wait for it."
+        ),
+        "budget_seconds": budget_seconds,
+        "queued_seconds": round(queued, 1),
+    }
+    if estimate:
+        body.update(estimate)
+    return body
 _upload_sem = asyncio.Semaphore(_MAX_CONCURRENT_UPLOAD)
 
 
@@ -3544,8 +3686,7 @@ async def api_parse_doc(
     budget_seconds: float | None = Form(None, gt=0),
 ):
     """Parse uploaded document (PDF/DOCX), return structured result."""
-    if _parse_sem.locked():
-        raise HTTPException(429, "too many concurrent parse requests")
+    t_entry = time.monotonic()
 
     docs_dir = _get_docs_dir()
     filename = file.filename or "unknown"
@@ -3632,6 +3773,7 @@ async def api_parse_doc(
     # work — see _survives_client_disconnect.
     _allow_running_detached()
 
+    scratch_counted = False
     try:
         # An upload with no bytes is not a document. It parsed to a section
         # titled "Full document" with char_count 0, took a doc_id, and joined
@@ -3645,6 +3787,23 @@ async def api_parse_doc(
         # with nothing in it is a rejected request, not a parse that failed.
         if total_size == 0:
             raise HTTPException(422, f"{filename} is empty (0 bytes); nothing to parse")
+
+        # A queued parse keeps its staged upload on disk for the whole wait, so
+        # the queue is bounded by bytes rather than by count — the resource it
+        # actually consumes. Refused before the doc_id, like the other checks
+        # here, and counted for the request's whole life in the finally below.
+        global _scratch_bytes_held
+        queue_cap = _parse_queue_max_bytes()
+        if _scratch_bytes_held + total_size > queue_cap:
+            raise HTTPException(
+                429,
+                f"parse queue is holding {_scratch_bytes_held} bytes of staged "
+                f"uploads, and this {total_size}-byte upload would put it over the "
+                f"{queue_cap}-byte limit",
+                headers={"Retry-After": "30"},
+            )
+        _scratch_bytes_held += total_size
+        scratch_counted = True
 
         # The OOXML formats are zips. A file that is not one cannot be read as
         # one, and nothing downstream will say so: MarkItDown falls back to
@@ -3694,6 +3853,9 @@ async def api_parse_doc(
         # exactly the documents this would reject) or predates the field; giving
         # them a default would refuse the very work the background path is for.
         # The MCP tool, which has a client timeout it cannot see, sends its own.
+        # Hoisted: the slot wait below reserves the estimated parse time out of
+        # the same budget, so the answer lands inside the window the caller declared.
+        estimate: dict[str, Any] | None = None
         if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
             # The mode decides whether pages go to the LLM at all, and the profile
             # can add region OCR on top; both can arrive through the metadata blob
@@ -3734,11 +3896,6 @@ async def api_parse_doc(
                     },
                 )
 
-        # The early-reject above was a snapshot before the upload started.
-        # Re-check now so a burst that crowded in past the snapshot fails fast
-        # instead of queueing scratch files against `_parse_sem`.
-        if _parse_sem.locked():
-            raise HTTPException(429, "too many concurrent parse requests")
         # Pre-validate the Word OCR image limit for .docx so the 422 fires
         # before _resolve_doc_id advances .counter (issue #67). The check
         # reads two XML files from the docx zip (~50ms) and only runs when
@@ -3780,7 +3937,9 @@ async def api_parse_doc(
 
         # Lock outside _parse_sem so waiters don't burn a parse slot — otherwise
         # unrelated documents get 429'd while one same-id queue drains.
-        async with d_id_lock, _parse_sem:
+        async with d_id_lock, _parse_slot(
+            budget_seconds=budget_seconds, t_entry=t_entry, estimate=estimate
+        ):
             t0 = time.time()
             # Guard against silent overwrite when the caller pins an explicit
             # Re-check existence inside d_id_lock to close the TOCTOU race
@@ -4169,6 +4328,8 @@ async def api_parse_doc(
                 dedup=dedup_status,
             )
     finally:
+        if scratch_counted:
+            _scratch_bytes_held -= total_size
         if scratch_path is not None and scratch_path.exists():
             try:
                 scratch_path.unlink()

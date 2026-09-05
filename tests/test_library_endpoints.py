@@ -674,8 +674,14 @@ class TestLibrarySectionSearchAndChunks:
 
 
 class TestRateLimiting:
-    def test_parse_sem_locked_returns_429(self, client: TestClient):
-        """When _parse_sem is fully acquired, parse should return 429."""
+    def test_parse_sem_locked_returns_429(self, client: TestClient, monkeypatch):
+        """A full parse gate refuses — after waiting for a slot.
+
+        The queue ceiling is set to zero here so the refusal is immediate; with
+        the default 600s this test would spend all of it waiting on a semaphore
+        it guarantees will never free.
+        """
+        monkeypatch.setenv("MANTISFETCH_PARSE_QUEUE_MAX_WAIT_SEC", "0")
         import mantisfetch_docreader
 
         original_sem = mantisfetch_docreader._parse_sem

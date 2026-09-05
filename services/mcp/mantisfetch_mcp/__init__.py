@@ -686,6 +686,15 @@ async def doc_parse(
         # Declared on every call: a tool invocation is spending the agent's turn,
         # so a document that cannot finish inside it should come back as a fast
         # refusal rather than as the client's timeout.
+        #
+        # The budget now also bounds how long the parse waits for a slot, so a
+        # call behind other work no longer fails instantly — it queues, and
+        # completes if the document ahead of it is quick. When it does refuse it
+        # may do so late in the budget rather than in about a second. That is not
+        # a loss: the same seconds used to be spent on 429-and-retry cycles that
+        # could not succeed. What would make queueing behind OCR work genuinely
+        # useful is tracking each in-flight parse's (start, estimate) so a
+        # hopeless wait can be refused immediately; not done here.
         "budget_seconds": str(_PARSE_BUDGET_SEC),
     }
     if doc_id:
