@@ -835,7 +835,7 @@ Response example:
 - The captured page is persisted to the document library (same `doc-index.json` shared with DocReader)
 - Omitted `content_type` defaults to `General`; new captures are stored under `docs/<content_type>/<doc_id>`
 - The session is always closed after capture, even on error
-- Rate-limited: returns `429` when too many concurrent captures are in progress
+- Rate-limited by a queue, not a door: captures wait for a slot (16 in flight by default) and only get `429` if no slot frees within `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC` (default 30s). Issue your captures in parallel — five agents fetching eight pages each all complete, in about 9s total. Do not serialise them to avoid a 429 you will not get.
 - URL validation: private IPs, localhost, and non-HTTP(S) schemes are blocked
 - **URL dedup (opt-in for `/web/capture`):** when `MANTISFETCH_CAPTURE_TTL_HOURS > 0`, a capture of the same `url` + `content_type` + `extract_tables` + `lang` made within that window is reused — the response has `reused: true` and `cache_age_hours`, and no re-fetch happens. Default (`0`) always re-fetches for plain capture. Pass `force_refresh: true` to bypass. Concurrent identical requests serialize per key.
 - **`/web/search_and_capture` URL TTL (default on):** uses `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` (default **24**) so repeated research queries reuse recent hits without re-fetch. Independent of `CAPTURE_TTL_HOURS`.
@@ -1015,7 +1015,7 @@ Use `content_type` (`General`, `Contract`, `Bid`, `Knowledge`) to put captured p
 
 | Error                                       | Cause                                          | Solution                                                                                           |
 | ------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `429 too many concurrent requests`          | Rate limit exceeded                            | Wait and retry — server limits concurrent captures/sessions                                        |
+| `429 too many concurrent captures` / `... session creations` | The gate stayed full for the whole wait bound (default 30s) — the server is genuinely saturated, not merely busy | Wait the seconds in `Retry-After`, then retry. Smaller bursts queue and succeed without an error |
 | `429 search rate limited`                   | A burst of searches would wait longer than the server allows | Wait the number of seconds the message gives (also in `Retry-After`), then retry. Smaller bursts queue and succeed |
 | `404 session not found`                     | Session expired or closed                      | Create a new session with `new`                                                                    |
 | `502 goto failed`                           | Page load timeout or network issue             | Switch to `wait_until=domcontentloaded` or increase `timeout_ms`                                   |
