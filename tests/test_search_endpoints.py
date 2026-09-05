@@ -20,7 +20,7 @@ def _reset_search_state(monkeypatch):
     throttle by default so ordering between tests can't leak a spurious 429."""
     import mantisfetch_browser as lb
 
-    lb._last_search_monotonic = {}
+    lb._next_search_allowed = {}
     monkeypatch.setenv("MANTISFETCH_SEARCH_MIN_INTERVAL_SEC", "0")
     yield
 
@@ -110,14 +110,37 @@ def test_search_config_error_502(client: TestClient) -> None:
 
 
 def test_search_throttle_429(client: TestClient, monkeypatch) -> None:
+    """Over the wait bound the answer is still 429 — but no longer a bare one.
+
+    #145 shipped this deliberately without Retry-After, "consistent with
+    existing 429s". #248 is why that is reversed: this 429 is not like the
+    concurrency one next to it, because it knows exactly when the caller may
+    come back. An agent that cannot read the number pays another LLM round trip
+    to rediscover it.
+    """
     provider = _FakeSearchProvider(results=[])
     monkeypatch.setenv("MANTISFETCH_SEARCH_MIN_INTERVAL_SEC", "100")
+    monkeypatch.setenv("MANTISFETCH_SEARCH_MAX_WAIT_SEC", "0")
     with patch("mantisfetch_browser.create_search_provider", return_value=provider):
         r1 = client.post("/web/search", json={"query": "q"})
         r2 = client.post("/web/search", json={"query": "q"})
     assert r1.status_code == 200
-    assert r2.status_code == 429  # bare 429 — no Retry-After
-    assert "retry-after" not in {k.lower() for k in r2.headers}
+    assert r2.status_code == 429
+    assert r2.headers["retry-after"] == "100"
+    assert "retry after" in r2.json()["detail"].lower()
+
+
+def test_search_throttle_queues_rather_than_refusing(client: TestClient, monkeypatch) -> None:
+    """The default: a second search within the interval waits its turn and
+    succeeds. Unit coverage of the queue arithmetic is in
+    tests/test_search_throttle_queue.py; this pins it through the endpoint."""
+    provider = _FakeSearchProvider(results=[])
+    monkeypatch.setenv("MANTISFETCH_SEARCH_MIN_INTERVAL_SEC", "0.05")
+    with patch("mantisfetch_browser.create_search_provider", return_value=provider):
+        r1 = client.post("/web/search", json={"query": "q"})
+        r2 = client.post("/web/search", json={"query": "q"})
+    assert r1.status_code == 200
+    assert r2.status_code == 200
 
 
 # ── /web/search_and_capture ─────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -35,6 +36,7 @@ from providers.search import (
     clamp_max_results,
     create_search_provider,
     default_max_results,
+    max_wait_sec,
     min_interval_sec,
 )
 from providers.search.base import (
@@ -3738,14 +3740,31 @@ SEARCH_CAPTURE_TOP_MAX = 3  # search_and_capture captures at most this many, ser
 # low-frequency, so burst tolerance buys nothing. Keyed by resolved provider name
 # so an agent hitting two providers (e.g. bocha + tavily) is not serialised across
 # them; the default fallback chain gets its own composite-name bucket.
+#
+# The value held per key is the monotonic time that backend is next free, not the
+# time it was last hit. Callers take a ticket for the earliest free slot and then
+# wait for it, which is what makes a burst queue instead of failing (#248): an
+# agent that issues eight searches in one turn used to get one through and six
+# 429s, and each 429 cost another LLM round trip to discover.
 _search_throttle_lock = asyncio.Lock()
-_last_search_monotonic: dict[str, float] = {}
+_next_search_allowed: dict[str, float] = {}
 
 
 async def _enforce_search_throttle(provider_keys: tuple[str, ...]) -> None:
-    """Raise a bare 429 when a search would hit any backend within the configured
-    min interval of its last hit; otherwise stamp every backend the request touches
-    (a fallback chain charges all its members) so failover can't bypass the limit.
+    """Wait for this search's turn, or refuse when the wait would be too long.
+
+    Every backend the request touches is charged (a fallback chain charges all
+    its members) so failover cannot bypass the limit.
+
+    Taking a ticket and sleeping outside the lock, rather than sleeping while
+    holding it, keeps a queue on one provider from stalling searches on another
+    and lets each caller learn its own wait up front — so the refusal above
+    max_wait_sec() is exact, and a caller that is refused takes no slot. Order is
+    arrival order; asyncio.Lock is FIFO.
+
+    A caller cancelled while sleeping leaves its slot unused, delaying the queue
+    behind it by up to one interval. Returning the slot would mean rewinding a
+    counter other waiters have already read past, which costs more than the hole.
 
     Best-effort burst guard, enforced once up front. Known limitation: it does not
     re-check at the moment a fallback member is actually queried, so a chain whose
@@ -3757,14 +3776,29 @@ async def _enforce_search_throttle(provider_keys: tuple[str, ...]) -> None:
     interval = min_interval_sec()
     if interval <= 0:
         return
+
     async with _search_throttle_lock:
         now = time.monotonic()
+        slot = now
         for key in provider_keys:
-            last = _last_search_monotonic.get(key, 0.0)
-            if last and now - last < interval:
-                raise HTTPException(429, "search rate limited: minimum interval not elapsed")
+            slot = max(slot, _next_search_allowed.get(key, 0.0))
+        wait = slot - now
+        if wait > max_wait_sec():
+            # Say how long, and take no slot: a caller told to come back must not
+            # also have reserved a turn it will never use.
+            retry_after = math.ceil(wait)
+            raise HTTPException(
+                429,
+                f"search rate limited: {wait:.1f}s of queue ahead of this request, "
+                f"over the {max_wait_sec():g}s a search may wait. Retry after "
+                f"{retry_after}s.",
+                headers={"Retry-After": str(retry_after)},
+            )
         for key in provider_keys:
-            _last_search_monotonic[key] = now
+            _next_search_allowed[key] = slot + interval
+
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 
 def _require_search_provider(name: str | None = None):

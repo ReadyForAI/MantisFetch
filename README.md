@@ -325,7 +325,8 @@ A cache hit keeps the document's original top-level provenance (first-touch): a 
 | `MANTISFETCH_SEARCH_API_KEY` | — | Shared API key (fallback for Tavily / Bocha / Brave) |
 | `MANTISFETCH_{TAVILY,BOCHA,BRAVE}_API_KEY` | — | Per-provider API key; overrides the shared one (set these to run several API providers at once) |
 | `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | Default result cap (hard max 20) |
-| `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | Minimum seconds between searches (`429` when exceeded) |
+| `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | Minimum seconds between searches. A search that arrives early waits its turn rather than failing |
+| `MANTISFETCH_SEARCH_MAX_WAIT_SEC` | `30` | How long a search may wait for its turn before `429` instead. A burst of `max_wait / interval` searches is absorbed, plus the one that does not wait at all — 16 at the defaults; `0` = never wait |
 | `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` | `24` | URL-level reuse window for `/web/search_and_capture` only; `0` disables URL reuse on that path (content-hash reuse still applies) |
 
 ### Configuration
@@ -659,7 +660,8 @@ MANTISFETCH_SEARCH_PROVIDER=searxng docker compose --profile search up
 | `MANTISFETCH_SEARCH_API_KEY` | — | 共享 API key（Tavily / 博查 / Brave 的回退） |
 | `MANTISFETCH_{TAVILY,BOCHA,BRAVE}_API_KEY` | — | 各 provider 专属 key；优先于共享 key（同时配置多家 API provider 时用） |
 | `MANTISFETCH_SEARCH_MAX_RESULTS` | `10` | 单次结果上限（硬顶 20） |
-| `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | 两次搜索的最小间隔秒数（超出返回 `429`） |
+| `MANTISFETCH_SEARCH_MIN_INTERVAL_SEC` | `2` | 两次搜索的最小间隔秒数。来早了的搜索排队等，不再直接失败 |
+| `MANTISFETCH_SEARCH_MAX_WAIT_SEC` | `30` | 一次搜索最多等多久轮到自己，超过才 `429`。能吸收 `max_wait / interval` 个排队的，再加上不用等的那一个——默认值下是 16；`0` = 从不等待 |
 
 ### 配置项
 
