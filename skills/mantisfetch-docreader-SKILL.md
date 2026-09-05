@@ -654,7 +654,9 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | `422 unsupported format`                           | Uploaded non-supported file    | Check file format against `/doc/health` `supported_formats`               |
 | `409 doc_id already exists`                         | Explicit `doc_id` collides with an existing doc | Pass `replace=true` to overwrite, or omit `doc_id` for a fresh one         |
 | `409 summary already running` / `attempt limit reached` | Concurrent / repeated `POST .../summary` | Poll `GET .../summary` instead; pass `force=true` only if you must override |
-| `429 too many concurrent requests`                 | Rate limit exceeded            | Wait and retry — server limits concurrent parse operations                 |
+| `429 too many concurrent parse requests`           | The parse gate stayed full for the whole queue ceiling (default 600s) — the server is saturated, not merely busy | Wait the seconds in `Retry-After`, then retry. Ordinary bursts queue and succeed |
+| `429 parse queue is holding N bytes`               | Queued uploads are holding more disk than the queue may | Wait and retry; a queued parse keeps its upload staged, so this clears as the queue drains |
+| `422 parse_budget_exceeded` with `queued_seconds`  | The wait for a parse slot would not fit inside the `budget_seconds` this call declared | Raise the budget, or ingest through a path that can wait. The same code with no `queued_seconds` means the document itself was estimated over budget |
 | `404 document not found`                           | Invalid doc_id or unparsed doc | Use search to confirm doc_id first                                         |
 | `404 section not found`                            | Invalid sid                    | Call `/doc/library/{doc_id}/sections` first to get valid sid list           |
 | `422 <file> is empty (0 bytes)`                    | The upload had no bytes        | **Do not retry.** Nothing was stored and no `doc_id` was taken             |
