@@ -346,6 +346,11 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | Fence root for the read-only `GET /deliverables/{rel_path}` byte face; unset disables it (every request 404s). Must not overlap `MANTISFETCH_DOCS_DIR` or `MANTISFETCH_ALLOWED_DOC_ROOTS` |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | Size cap for a single deliverable download; larger files get 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |
+| `MANTISFETCH_MAX_CONCURRENT_CAPTURE` | `16` | Captures in flight at once. Measured saturation point: throughput holds at ~4.5 captures/second from 16 onward, so more concurrency buys latency, not work. Each in-flight capture costs ~6MB |
+| `MANTISFETCH_MAX_CONCURRENT_SESSIONS` | `20` | Session creations in flight at once. Creation is cheap (0.03s idle, 0.29s with 200 live), so this bounds a burst rather than a resource |
+| `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC` | `30` | How long a capture or session creation waits for a slot before `429`. At the saturated rate 30s absorbs ~135 queued captures — five agents fetching eight pages each finish in ~9s, ten agents in ~19s, none refused. `0` = refuse immediately |
+| `MANTISFETCH_SESSION_MAXSIZE` | `200` | Live sessions kept before the oldest is evicted. **This is a memory budget**: a live session holds a browser context and costs ~15MB, so 200 is ~3GB resident. Size it for the box you deploy on |
+| `MANTISFETCH_SESSION_TTL_SEC` | `1800` | Idle session lifetime before it is closed |
 | `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | Reuse a prior `/web/capture` of the same URL + content_type made within this many hours instead of re-fetching; `0` disables (default). `force_refresh=true` always bypasses. Content-hash library reuse still applies after distill |
 | `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` | `24` | Same as above, but for `/web/search_and_capture` only (default on so research queries do not pile duplicate docs) |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | Maximum concurrent section-summary LLM batches per document |
@@ -680,6 +685,11 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | 只读 `GET /deliverables/{rel_path}` 字节接口的围栏根目录；不设置则禁用（所有请求返回 404）。不得与 `MANTISFETCH_DOCS_DIR` 或 `MANTISFETCH_ALLOWED_DOC_ROOTS` 重叠 |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | 单个交付物下载的大小上限；超出返回 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | 文档目录命名策略：`counter` 保持 `DOC-xxx`；`source_filename` 基于上传文件名生成安全目录名 |
+| `MANTISFETCH_MAX_CONCURRENT_CAPTURE` | `16` | 同时在飞的 capture 数。实测饱和点：16 起吞吐稳定在 ~4.5 次/秒，再加并发只涨延迟不涨产出。每个在飞的 capture 约 6MB |
+| `MANTISFETCH_MAX_CONCURRENT_SESSIONS` | `20` | 同时建 session 的并发数。建一个很便宜（空载 0.03s，200 个活跃时 0.29s），所以这是突发门而不是资源门 |
+| `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC` | `30` | capture / 建 session 最多等多久拿到槽，超过才 `429`。按饱和速率，30s 能吸收约 135 个排队的 capture——5 个 Agent 各抓 8 页约 9s 全成，10 个 Agent 约 19s，无一被拒。`0` = 立即拒绝 |
+| `MANTISFETCH_SESSION_MAXSIZE` | `200` | 活跃 session 上限，超出淘汰最旧的。**这是一个内存预算**：一个活跃 session 持有一个浏览器上下文，约 15MB，所以 200 个约 3GB 常驻。请按部署机器的内存来定 |
+| `MANTISFETCH_SESSION_TTL_SEC` | `1800` | session 空闲多久后关闭 |
 | `MANTISFETCH_CAPTURE_TTL_HOURS` | `0` | 在这么多小时内对同一 URL + content_type 的 `/web/capture` 直接复用已有结果而不重抓；`0` 关闭（默认）。`force_refresh=true` 始终绕过。distill 后仍会按 content_hash 做库内内容级复用 |
 | `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` | `24` | 同上，但仅作用于 `/web/search_and_capture`（默认开启，避免研究查询堆积重复文档） |
 | `MANTISFETCH_SUMMARY_BATCH_CONCURRENCY` | `1` | 单文档 section 摘要的最大 LLM batch 并发数 |

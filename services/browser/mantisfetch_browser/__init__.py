@@ -266,8 +266,45 @@ logger = logging.getLogger("mantisfetch_browser")
 # ============================================================
 
 # ---- Rate limiting (in-memory semaphores) ----
-_MAX_CONCURRENT_CAPTURE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_CAPTURE", "10"))
+# 16 is where capture throughput stops improving. Measured on the delivery image
+# against real pages: a single capture takes ~1.5s, and a burst completes at
+# ~4.5 captures/second from 16 concurrent onward — 16 finish in 3.8s, 24 in
+# 5.9s, 32 in 7.0s, 80 in 19.0s. Past 16 the extra concurrency buys latency, not
+# throughput, and each in-flight capture costs about 6MB, so this is a
+# saturation point rather than a memory ceiling. The previous 10 was a round
+# number from a 2026-03 hardening sweep (#18) with nothing recorded behind it.
+#
+# That ceiling belongs to the machine it was measured on; a customer box
+# saturates somewhere else. Which is why the queue below matters more than the
+# exact number here.
+_MAX_CONCURRENT_CAPTURE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_CAPTURE", "16"))
+# Sessions are cheap to create — 0.03s idle, 0.29s with 200 already live — so
+# this bounds a burst of creations, not a resource. What costs is keeping them:
+# see SESSION_MAXSIZE in session.py.
 _MAX_CONCURRENT_SESSIONS = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_SESSIONS", "20"))
+# How long a request waits for a slot before being refused. Both gates used to
+# refuse the moment they were full, which costs an agent an LLM round trip to
+# discover something it could have waited a second for — the same fault as the
+# search throttle in #248. At the saturated 4.5 captures/second, 30s of queue
+# absorbs roughly 135 captures: five agents issuing eight pages each finish in
+# about 9s, ten agents in about 19s, none of them refused.
+_DEFAULT_CONCURRENCY_MAX_WAIT_SEC = 30.0
+
+
+def _concurrency_max_wait_sec() -> float:
+    """Read per call, the way the search throttle's bounds are read.
+
+    A module-level constant would be fixed at import, which is both
+    inconsistent with the search knobs and untestable without reloading the
+    module.
+    """
+    raw = os.environ.get(
+        "MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC", str(_DEFAULT_CONCURRENCY_MAX_WAIT_SEC)
+    )
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _DEFAULT_CONCURRENCY_MAX_WAIT_SEC
 # Opt-in URL dedup for /capture: a capture of the same (url, content_type) made
 # within this many hours is reused instead of re-fetched. 0 (default) disables it,
 # preserving the original always-capture behavior.
@@ -281,6 +318,34 @@ SEARCH_CAPTURE_TTL_HOURS = float(
 )
 _capture_sem = asyncio.Semaphore(_MAX_CONCURRENT_CAPTURE)
 _session_sem = asyncio.Semaphore(_MAX_CONCURRENT_SESSIONS)
+
+
+async def _acquire_or_refuse(sem: asyncio.Semaphore, what: str) -> None:
+    """Wait for a slot, or refuse with a 429 that says how long we waited.
+
+    Cancellation while waiting is safe: asyncio.Semaphore.acquire restores the
+    counter and wakes the next waiter on CancelledError (verified in 3.11.15,
+    the version the image ships), so a client that disconnects mid-queue does
+    not leak a slot.
+
+    Unlike the search throttle, this cannot predict when a slot frees — that
+    depends on whichever capture finishes first. Retry-After is therefore the
+    wait bound rather than an estimate, and the message says so.
+    """
+    wait = _concurrency_max_wait_sec()
+    if wait <= 0:
+        if sem.locked():
+            raise HTTPException(429, f"{what}", headers={"Retry-After": "1"})
+        await sem.acquire()
+        return
+    try:
+        await asyncio.wait_for(sem.acquire(), timeout=wait)
+    except TimeoutError:
+        raise HTTPException(
+            429,
+            f"{what}: no slot freed within {wait:g}s",
+            headers={"Retry-After": str(math.ceil(wait))},
+        ) from None
 
 
 # ============================================================
@@ -2878,9 +2943,11 @@ async def health() -> dict:
 
 @app.post("/session/new", response_model=NewSessionResponse)
 async def new_session(req: NewSessionRequest) -> NewSessionResponse:
-    if _session_sem.locked():
-        raise HTTPException(429, "too many concurrent session creations")
-    async with _session_sem:
+    # Wait for a slot rather than refusing on sight: creating a session takes
+    # 0.03s idle and 0.29s with 200 already live, so a burst of twenty drains in
+    # about a third of a second. Refusing bought no resource protection at all.
+    await _acquire_or_refuse(_session_sem, "too many concurrent session creations")
+    try:
         if not _browser:
             raise HTTPException(500, "browser not ready")
 
@@ -2909,6 +2976,8 @@ async def new_session(req: NewSessionRequest) -> NewSessionResponse:
         sess = Session(context=context, page=page, lang=req.lang)
         await sessions.put(sid, sess)
         return NewSessionResponse(session_id=sid)
+    finally:
+        _session_sem.release()
 
 
 @app.post("/session/goto", response_model=GotoResponse)
@@ -3236,12 +3305,15 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
     """Do an actual capture (navigate → distill → persist) and return the response.
     The caller holds the per-key cache lock (when caching is on), so concurrent
     same-key requests never reach here twice."""
-    if _capture_sem.locked():
-        raise HTTPException(429, "too many concurrent captures")
     if not _browser:
         raise HTTPException(500, "browser not ready")
 
-    async with _capture_sem:
+    # Wait for a slot rather than refusing on sight. An agent that issues eight
+    # captures in one turn should get eight captures, not one plus seven errors
+    # it has to spend an LLM round trip to understand. `try:` rather than
+    # `async with` because the slot is taken above, under a bound.
+    await _acquire_or_refuse(_capture_sem, "too many concurrent captures")
+    try:
         context = await _browser.new_context(
             user_agent=DEFAULT_UA,
             locale=req.lang,
@@ -3458,6 +3530,8 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
             )
         finally:
             await sessions.remove(sid)
+    finally:
+        _capture_sem.release()
 
 
 def _find_capture_by_requested_url(docs_dir: Path, url: str) -> dict[str, Any] | None:

@@ -693,8 +693,14 @@ class TestRateLimiting:
         finally:
             mantisfetch_docreader._parse_sem = original_sem
 
-    def test_capture_sem_locked_returns_429(self, client: TestClient):
-        """When _capture_sem is fully acquired, capture should return 429."""
+    def test_capture_sem_locked_returns_429(self, client: TestClient, monkeypatch):
+        """A full capture gate refuses — after waiting for a slot.
+
+        The wait bound is set to zero here so the refusal is immediate. With
+        the default 30s this test would spend all of it waiting on a semaphore
+        the test itself guarantees will never free.
+        """
+        monkeypatch.setenv("MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC", "0")
         import mantisfetch_browser
 
         original_sem = mantisfetch_browser._capture_sem
@@ -711,8 +717,9 @@ class TestRateLimiting:
         finally:
             mantisfetch_browser._capture_sem = original_sem
 
-    def test_session_sem_locked_returns_429(self, client: TestClient):
-        """When _session_sem is fully acquired, new session should return 429."""
+    def test_session_sem_locked_returns_429(self, client: TestClient, monkeypatch):
+        """Same for the session gate: it refuses only after waiting."""
+        monkeypatch.setenv("MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC", "0")
         import mantisfetch_browser
 
         original_sem = mantisfetch_browser._session_sem
