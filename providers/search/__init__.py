@@ -133,8 +133,10 @@ def max_wait_sec() -> float:
 
     Bounds the queue that min_interval_sec creates. It is this value, not the
     interval, that decides how many concurrent searches can be absorbed:
-    ``max_wait / interval``. Raising the interval without raising this shrinks
-    that number, so the two move together.
+    ``max_wait / interval`` of them wait, and one more does not wait at all —
+    16 at the defaults, since a wait of exactly max_wait is still allowed.
+    Raising the interval without raising this shrinks that number, so the two
+    move together.
 
     0 restores the original behaviour — never wait, refuse immediately.
     """

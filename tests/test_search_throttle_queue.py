@@ -51,13 +51,36 @@ class _Clock:
     def __init__(self):
         self.now = 1000.0
         self.slept: list[float] = []
+        self._gate: asyncio.Event | None = None
 
     def monotonic(self) -> float:
         return self.now
 
+    def hold(self) -> None:
+        """Make every subsequent sleep block until release().
+
+        Needed to observe what happens *while* a caller waits. Without it a
+        fake sleep returns on the next tick, so a test can never catch another
+        caller being blocked behind it.
+        """
+        self._gate = asyncio.Event()
+
+    def release(self) -> None:
+        if self._gate is not None:
+            self._gate.set()
+
     async def sleep(self, seconds: float) -> None:
         self.slept.append(seconds)
-        await _REAL_SLEEP(0)
+        if self._gate is None:
+            await _REAL_SLEEP(0)
+            return
+        # Bounded: this fake replaces asyncio.sleep process-wide for the
+        # duration of the fixture, so an ungated waiter left behind by a failing
+        # assertion would otherwise hang the run instead of failing it.
+        try:
+            await asyncio.wait_for(self._gate.wait(), timeout=5.0)
+        except TimeoutError:
+            raise AssertionError("a gated sleep was never released") from None
 
 
 @pytest.fixture()
@@ -74,6 +97,20 @@ def _throttle(keys=("fake",)):
     import mantisfetch_browser as lb
 
     return lb._enforce_search_throttle(keys)
+
+
+async def _spin_until(predicate, what: str, turns: int = 2000) -> None:
+    """Yield to the loop until the predicate holds, then give up loudly.
+
+    Bounded on purpose. The state these tests wait for is exactly the state a
+    regression would prevent, so an unbounded spin turns a failure into a hung
+    run — which is what happened the first time this was written.
+    """
+    for _ in range(turns):
+        if predicate():
+            return
+        await _REAL_SLEEP(0)
+    raise AssertionError(f"never reached: {what}")
 
 
 # ── the reported case ────────────────────────────────────────────────────────────
@@ -176,16 +213,31 @@ def test_no_interval_means_no_throttle_at_all(clock, monkeypatch) -> None:
 
 # ── one provider's queue must not stall another ──────────────────────────────────
 def test_a_queue_on_one_provider_does_not_delay_another(clock) -> None:
-    """The reason the sleep is outside the lock. Holding it while waiting would
-    serialise bocha behind tavily for no quota reason."""
+    """The reason the sleep is outside the lock.
+
+    The assertion has to be made *while* the bocha callers are waiting. Letting
+    them finish first and then timing tavily proves nothing: with the sleep
+    moved back inside the lock that version passes too, because by then the
+    lock is free again.
+    """
 
     async def run():
-        await asyncio.gather(*(_throttle(("bocha",)) for _ in range(4)))
-        clock.slept.clear()
-        await _throttle(("tavily",))
+        clock.hold()
+        waiting = [asyncio.create_task(_throttle(("bocha",))) for _ in range(4)]
+        await _spin_until(
+            lambda: len(clock.slept) >= 3, "three bocha callers parked in sleep"
+        )
+
+        # tavily has its own quota and must not be behind bocha's queue. If the
+        # sleep were inside the lock, the first parked bocha caller would still
+        # hold it and this would time out.
+        await asyncio.wait_for(_throttle(("tavily",)), timeout=0.5)
+        assert clock.slept.count(0.0) == 0, "tavily should not have waited at all"
+
+        clock.release()
+        await asyncio.gather(*waiting)
 
     asyncio.run(run())
-    assert clock.slept == []
 
 
 def test_a_fallback_chain_charges_every_member(clock, monkeypatch) -> None:
@@ -202,20 +254,47 @@ def test_a_fallback_chain_charges_every_member(clock, monkeypatch) -> None:
 
 
 # ── cancellation ─────────────────────────────────────────────────────────────────
-def test_a_cancelled_caller_does_not_hold_the_lock() -> None:
-    """The sleep is outside the lock, so a client that disconnects mid-wait
-    cannot wedge every later search. Runs on the real clock — the point is what
-    asyncio does with the cancellation, not the arithmetic."""
+def test_another_search_can_proceed_while_one_is_waiting(clock) -> None:
+    """The lock must be free during a wait, not merely after it.
+
+    Asserting `not lock.locked()` after the waiter is cancelled would pass
+    either way: `async with` releases on CancelledError even when the sleep sits
+    inside it. The discriminating question is whether anyone can acquire the
+    lock while a caller is parked.
+    """
     import mantisfetch_browser as lb
 
-    lb._next_search_allowed = {}
+    async def run():
+        clock.hold()
+        parked = asyncio.create_task(_throttle(("bocha",)))
+        blocked = asyncio.create_task(_throttle(("bocha",)))
+        await _spin_until(lambda: len(clock.slept) >= 1, "a caller parked in sleep")
+
+        assert not lb._search_throttle_lock.locked(), "the lock is held during the wait"
+        await asyncio.wait_for(_throttle(("tavily",)), timeout=0.5)
+
+        clock.release()
+        await asyncio.gather(parked, blocked)
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_caller_leaves_nothing_wedged(clock) -> None:
+    """A client that disconnects mid-wait must not take the queue with it."""
+    import mantisfetch_browser as lb
 
     async def run():
-        await _throttle()  # takes the first slot, no wait
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(_throttle(), timeout=0.05)  # cancelled mid-sleep
+        clock.hold()
+        await _throttle(("bocha",))  # first slot, no wait
+        doomed = asyncio.create_task(_throttle(("bocha",)))
+        await _spin_until(lambda: len(clock.slept) >= 1, "the doomed caller parked in sleep")
+
+        doomed.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await doomed
+
         assert not lb._search_throttle_lock.locked()
-        # and the queue still moves
-        await asyncio.wait_for(_throttle(("other",)), timeout=1.0)
+        clock.release()
+        await asyncio.wait_for(_throttle(("tavily",)), timeout=0.5)
 
     asyncio.run(run())
