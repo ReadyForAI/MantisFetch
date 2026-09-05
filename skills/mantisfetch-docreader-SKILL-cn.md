@@ -657,7 +657,11 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | `429 too many concurrent requests`                 | 触发限流                       | 等待后重试，服务端限制了并发解析数 |
 | `404 document not found`                           | doc_id 无效或文档尚未入库      | 先用 search 确认 doc_id |
 | `404 section not found`                            | sid 无效                       | 先调用 `/doc/library/{doc_id}/sections` 获取有效 sid 列表 |
-| `500 parse failed`                                 | PDF 损坏或加密                 | 提示用户检查文件 |
+| `422 <file> is empty (0 bytes)`                    | 上传的文件没有任何字节         | **不要重试。** 什么也没入库，也没有占用 `doc_id` |
+| `422 <file> is not a valid docx/xlsx/pptx file`    | OOXML 三种格式本质是 zip，而这个文件不是（扩展名不对，或上传被截断） | **不要重试。** 什么也没入库。检查实际上传的是什么 |
+| `422 <file> is not a valid pdf file`               | 整个文件里找不到 `%PDF-` 标记，它根本不是 PDF | **不要重试。** 什么也没入库，也没有占用 `doc_id` |
+| `422 parse failed`                                 | 文件声称是某格式，打开后才失败——例如有 PDF 头但内容损坏 | **不要重试。** 已经尝试过解析，所以那个预留的 id 会保留一份 `.parse-failed.json` 记录；请重新上传正确的文件 |
+| `500 parse failed`                                 | 服务器没能读取一份本应能读的文档——缺少转换器、解析器故障 | 重试；若持续出现，那是服务端问题而不是文件问题 |
 | 与缺少 LLM 凭证相关的 `500 RuntimeError`           | LLM provider 凭证未配置        | 检查当前启用的 LLM provider 配置并重启服务 |
 | Parsing takes too long                             | 文件较大且包含 OCR             | 先用 `generate_summary=false` 做快速提取，再单独生成摘要 |
 | Table is empty                                     | PDF 中的表格是图片或版式复杂   | 先确认正文 OCR 是否已入库；如关键表格缺失，再只对相关页使用 `ocr_pages` 或在明确接受成本时使用 `force_ocr=true` |

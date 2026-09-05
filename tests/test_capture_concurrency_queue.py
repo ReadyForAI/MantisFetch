@@ -189,7 +189,14 @@ def test_a_caller_cancelled_while_queued_does_not_leak_its_slot(gate) -> None:
         doomed = asyncio.create_task(
             lb._acquire_or_refuse(gate, "too many concurrent captures")
         )
-        await _REAL_SLEEP(0)
+        # Wait until it is genuinely parked on the semaphore. A single yield
+        # would leave a race where the cancel lands first, and the test would
+        # pass without ever exercising the restore-on-CancelledError path it
+        # exists to pin. `_waiters` is private, and it is the only way to see
+        # the queue from outside.
+        await _spin_until(
+            lambda: len(gate._waiters or []) == 1, "the doomed caller to queue"
+        )
         doomed.cancel()
         with pytest.raises(asyncio.CancelledError):
             await doomed
@@ -236,5 +243,48 @@ def test_the_session_gate_queues_too(monkeypatch) -> None:
         released.set()
         await asyncio.wait_for(asyncio.gather(*callers), timeout=5)
         assert len(done) == 6
+
+    asyncio.run(run())
+
+
+def test_the_immediate_refusal_cannot_double_book_the_last_slot() -> None:
+    """With the bound at 0 the code checks `locked()` and then acquires, which
+    reads like a race. It is not one, and this pins why: acquiring a semaphore
+    that is not full takes a fast path that returns without suspending, so no
+    other coroutine can interleave between the check and the decrement.
+
+    Worth a test rather than a comment — it rests on CPython's implementation,
+    and a future asyncio that made acquire() always yield once for fairness
+    would open the window silently. If that happens, this hangs instead of
+    passing, which is the right way to find out.
+    """
+    import mantisfetch_browser as lb
+
+    async def run():
+        sem = asyncio.Semaphore(1)
+        got, refused = [], []
+
+        async def one():
+            try:
+                await lb._acquire_or_refuse(sem, "too many concurrent captures")
+                got.append(True)
+            except HTTPException:
+                refused.append(True)
+
+        os_env = "MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC"
+        import os
+
+        prior = os.environ.get(os_env)
+        os.environ[os_env] = "0"
+        try:
+            await asyncio.wait_for(asyncio.gather(*(one() for _ in range(5))), timeout=2)
+        finally:
+            if prior is None:
+                os.environ.pop(os_env, None)
+            else:
+                os.environ[os_env] = prior
+
+        assert len(got) == 1, "the free slot went to more than one caller"
+        assert len(refused) == 4
 
     asyncio.run(run())

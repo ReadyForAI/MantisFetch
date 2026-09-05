@@ -780,6 +780,12 @@ If false:
 两者都不往库里写任何东西，所以**拿到 `doc_id` 就一定意味着存下了真实内容**。在此之前，抓一个
 404 会生成一份 digest 写着「Page not found」的文档。
 
+**返回 200 却抽不出任何内容的页面同样被拒**，也是 **422**，文案是
+`capture found no extractable content at <url> (HTTP 200, 0 text sections, 0 tables)`——计数和状态码
+就是它与上面那个死链 422 的区别。重试没有用：页面加载正常，抽不出来的是它本身的构成。常见成因是
+**整页用表格布局**的站点（Hacker News、较老的政企站），因为抽取只读标题、段落、列表项、引用和
+`pre`，这类页面一个都没有。真需要这种页面就截图，或者用 session 驱动 DOM，而不是 capture。
+
 成功的响应会带上 `final_url`（重定向后的最终地址）和 `http_status`，不用读正文就能把软错误页
 和真文章区分开。导航本身没有 response 时（例如同文档内跳转）`http_status` 为 null。
 
@@ -815,9 +821,10 @@ Readability，所以文档的 `h1`/`h2`/`h3` 结构会保留下来、成为可�
 - 抓取结果会持久化到文档库（与 DocReader 共用同一个 `doc-index.json`）
 - 未传 `content_type` 时默认入库到 `General`；新抓取结果会保存到 `docs/<content_type>/<doc_id>`
 - 即使发生错误，session 也一定会被关闭
-- 有并发限流：并发抓取过多时会返回 `429`
+- 并发限流是**队列不是门**：capture 会等槽（默认同时 16 个在飞），只有在 `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC`（默认 30s）内都没等到才返回 `429`。**请放心并行发**——5 个 Agent 各抓 8 页全部会成功，总共约 9s。不要为了躲一个不会出现的 429 去串行。
 - URL 校验：私有 IP、localhost、非 HTTP(S) 协议都会被拦截
 - **URL 去重（`/web/capture` 默认关闭）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` + `extract_tables` + `lang` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）普通 capture 每次重抓。单次绕过传 `force_refresh: true`。并发同键请求按 key 串行。
+- **并行搜索会排队，不会失败：** 运维会设一个搜索后端的最小调用间隔（`MANTISFETCH_SEARCH_MIN_INTERVAL_SEC`，默认 2s）来保护付费配额。一轮里发好几个搜索没问题——它们轮流执行、全部返回；默认配置下 8 个并行搜索总共约 14s。只有当突发大到某一个要等过`MANTISFETCH_SEARCH_MAX_WAIT_SEC`（默认 30s）才会被拒，那个 `429` 会告诉你等几秒。不要为了躲它而把搜索串行化。
 - **`/web/search_and_capture` URL TTL（默认开启）：** 使用 `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS`（默认 **24**），重复研究查询会复用近期命中，无需重抓；与 `CAPTURE_TTL_HOURS` 独立。
 - **内容哈希复用（distill 后始终开启）：** 若库中已有相同 body `content_hash`（同一文章经 AMP / 跟踪参数 URL），返回该 `doc_id`（`reused: true`），并**合并** tags（并集）与新 metadata 键（已有键 first-touch 保留）。`force_refresh: true` 同样跳过。
 
@@ -993,7 +1000,9 @@ When Agent later searches "Q3 revenue", web tables and Excel tables are discover
 
 | Error                                       | Cause                                          | Solution |
 | ------------------------------------------- | ---------------------------------------------- | -------- |
-| `429 too many concurrent requests`          | 触发并发限流                                   | 等待后重试，服务限制了并发 capture/session 数量 |
+| `429 too many concurrent captures` / `... session creations` | 整个等待上界（默认 30s）内都没有槽空出来——服务器是真的饱和了，不是一时忙 | 按 `Retry-After` 给的秒数等待后重试。规模小一些的突发会排队通过，不会报错 |
+| `429 search rate limited`                   | 一批搜索排队会超过服务器允许的等待上界         | 按消息里给的秒数（也在 `Retry-After` 里）等待后重试。规模小一些的突发会排队通过 |
+| `422 capture found no extractable content`  | 页面加载成功（HTTP 200）但没有标题/段落/列表/数据表——通常是整页表格布局的站点 | **不要重试。** 什么也没入库。改用截图，或用 session 驱动 |
 | `404 session not found`                     | session 已过期或已关闭                         | 重新调用 `new` 创建 session |
 | `502 goto failed`                           | 页面加载超时或网络异常                         | 改用 `wait_until=domcontentloaded` 或增大 `timeout_ms` |
 | `422 capture failed: HTTP 4xx`              | 页面本身返回 404/403/410——链接已死或被禁       | **不要重试。** 什么都没入库。修正 URL，或把链接报为失效 |
