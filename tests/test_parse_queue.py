@@ -248,3 +248,60 @@ def test_through_the_endpoint_a_freed_slot_completes_the_parse(
     resp = _post(client, docs_dir, budget_seconds="30")
     assert resp.status_code == 200, resp.json()
     assert resp.json()["doc_id"]
+
+
+def test_the_estimated_parse_time_is_reserved_out_of_the_budget(monkeypatch) -> None:
+    """The wait is `budget - already spent - what the parse itself will need`.
+
+    Without the reserve a caller could be handed a slot with no budget left to
+    parse in, which is the timeout the budget exists to prevent. Grok's review
+    pointed out this arithmetic had no test of its own.
+    """
+    import time as _time
+
+    import mantisfetch_docreader as dr
+
+    sem = asyncio.Semaphore(0)
+    monkeypatch.setattr(dr, "_parse_sem", sem)
+
+    async def run(reserve_seconds):
+        t0 = _time.monotonic()
+        estimate = {"estimated_seconds": reserve_seconds} if reserve_seconds else None
+        try:
+            async with dr._parse_slot(budget_seconds=0.5, t_entry=t0, estimate=estimate):
+                pass
+        except Exception as exc:  # HTTPException
+            return "refused", _time.monotonic() - t0, exc
+        return "acquired", _time.monotonic() - t0, None
+
+    # No reserve: the whole 0.5s is available to wait in.
+    what, waited, _ = asyncio.run(run(0))
+    assert what == "refused"
+    assert waited >= 0.4, f"waited only {waited:.2f}s — was the budget used?"
+
+    # A 10s parse cannot fit in a 0.5s budget, so there is nothing to wait with
+    # and the refusal is immediate rather than after the budget elapses.
+    what, waited, exc = asyncio.run(run(10))
+    assert what == "refused"
+    assert waited < 0.2, f"waited {waited:.2f}s — the reserve was not subtracted"
+    assert exc.detail["queued_seconds"] == 0
+
+
+def test_the_bytes_already_held_are_what_close_the_gate(client, docs_dir, monkeypatch) -> None:
+    """A cap smaller than one upload would refuse whether or not the counter
+    were consulted. This sets a cap that only closes because bytes are already
+    held, which is the half the earlier test could not show."""
+    import mantisfetch_docreader as dr
+
+    body = b"<h1>T</h1><p>" + b"x" * 400 + b"</p>"
+    monkeypatch.setenv("MANTISFETCH_PARSE_QUEUE_MAX_BYTES", str(len(body) * 2))
+
+    # Nothing held: comfortably under the cap.
+    assert _post(client, docs_dir, content=body).status_code == 200
+
+    # Pretend a queued request is holding most of the allowance.
+    monkeypatch.setattr(dr, "_scratch_bytes_held", len(body) * 2 - 1)
+    resp = _post(client, docs_dir, content=body)
+
+    assert resp.status_code == 429
+    assert "staged uploads" in resp.json()["detail"]

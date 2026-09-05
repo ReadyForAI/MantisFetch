@@ -626,10 +626,18 @@ async def doc_parse(
 
     Large scanned documents can take minutes to parse — longer than an MCP
     client's per-request timeout typically allows. Rather than let that surface
-    as a timeout, this call estimates the cost first and refuses in about a
-    tenth of a second when it does not fit, with `parse_budget_exceeded` and the
-    page count, the estimate and the budget it was measured against. Nothing was
-    started, so nothing is half-done and no id was consumed.
+    as a timeout, this call estimates the cost first and refuses when it does
+    not fit, with `parse_budget_exceeded` and the page count, the estimate and
+    the budget it was measured against. Nothing was started, so nothing is
+    half-done.
+
+    The budget also bounds how long the call waits for a free parse slot, so a
+    refusal can arrive either straight away (the document itself does not fit)
+    or late in the budget (it fits, but nothing freed up in time — that one
+    carries `queued_seconds`). Waiting is not a cost the queue added: parse
+    concurrency is fixed because raising it buys no throughput, so the seconds
+    spent queueing are seconds the work needed anyway, and a call that used to
+    be refused instantly can now simply succeed.
 
     A refusal is not a problem with the document. It means this route cannot
     wait that long, and the document needs to reach the library through a path
@@ -637,8 +645,11 @@ async def doc_parse(
     only the user can arrange. Report the estimate and let the user decide; do
     not retry the call, and do not describe the document as unreadable or
     corrupt. Documents whose cost cannot be estimated (anything but a PDF) are
-    never refused, so a slow parse of one still ends in a timeout — the
-    paragraphs below apply to that case.
+    never refused for being slow — their parse is never denied a free slot, and
+    a slow one still ends in a timeout, which is what the paragraphs below are
+    about. They can still be told to wait: if every slot is busy and none frees
+    inside the budget, the answer is `parse_budget_exceeded` with
+    `queued_seconds` and no estimate.
 
     Once the upload has been received the parse is no longer abandoned when the
     client goes away: it keeps running, and then succeeds or fails on its own

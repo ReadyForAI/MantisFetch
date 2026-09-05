@@ -708,18 +708,14 @@ _parse_sem = asyncio.Semaphore(_MAX_CONCURRENT_PARSE)
 _MAX_CONCURRENT_UPLOAD = int(
     os.environ.get("MANTISFETCH_MAX_CONCURRENT_UPLOAD", str(_MAX_CONCURRENT_PARSE))
 )
-# Bytes of staged upload currently held by requests that are parsing or waiting
-# to parse. A queued request keeps its scratch file, so this is the resource a
-# queue actually consumes — the reason the old gate gave for refusing rather
-# than queueing. Measured, that reason did not hold: with the gate at 2, a burst
-# of six wrote all six scratch files before four of them were refused, because
-# the file is staged before the gate is ever consulted. Refusing did not save
-# the disk; it discarded an upload that had already been paid for. What a queue
-# does change is how long the files stay, so the disk gets a real bound here.
+# Bytes of staged upload held by requests that are parsing or waiting to parse.
+# A queued request keeps its scratch file, so disk — not request count — is what
+# a queue actually consumes, and what has to bound it. (Refusing never bounded
+# it: the upload is staged before the gate is consulted, so a burst of six
+# against a gate of 2 wrote all six files and then discarded four.)
 #
-# 10x the per-upload cap: the old design already permitted 2 uploading plus 2
-# parsing, so this is two and a half times what was already allowed, rather
-# than a number picked for feeling about right.
+# 10x the per-upload cap, against a design that already permitted 2 uploading
+# plus 2 parsing.
 def _parse_queue_max_bytes() -> int:
     """Read per call: MAX_UPLOAD_BYTES is defined further down, and the other
     tunables in this file are read per call too."""
@@ -739,6 +735,11 @@ _scratch_bytes_held = 0
 # refuses "ten minutes and never got a slot", not "this parse is slow" — the
 # latter is what the budget preflight is for, and it still never refuses a
 # caller who declared no budget.
+#
+# It is also the bound on an abandoned request. Uploads run detached, so a
+# client that disconnects mid-queue is not noticed; this caps what one such
+# request can hold to 600s of a slot, and the byte cap above caps what all of
+# them together can hold of the disk.
 _DEFAULT_PARSE_QUEUE_MAX_WAIT_SEC = 600.0
 
 

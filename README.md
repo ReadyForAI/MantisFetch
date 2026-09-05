@@ -347,7 +347,7 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | Size cap for a single deliverable download; larger files get 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | Document directory naming strategy: `counter` keeps `DOC-xxx`; `source_filename` derives a safe directory name from the uploaded filename stem |
 | `MANTISFETCH_PARSE_QUEUE_MAX_WAIT_SEC` | `600` | How long a parse that declared no `budget_seconds` waits for a slot before `429`. One that did declare a budget waits inside it instead. Concurrency buys no parse throughput — text parsing is GIL-bound and OCR is already internally parallel — so the wait costs a caller nothing it would not have spent anyway |
-| `MANTISFETCH_PARSE_QUEUE_MAX_BYTES` | `10 × MANTISFETCH_MAX_UPLOAD_MB` | Staged upload bytes the parse queue may hold. A queued parse keeps its upload on disk, so the queue is bounded by disk rather than by count |
+| `MANTISFETCH_PARSE_QUEUE_MAX_BYTES` | ten times the upload cap (**2GB** at the default 200MB) | Staged upload bytes the parse queue may hold. A queued parse keeps its upload on disk, so the queue is bounded by disk rather than by count |
 | `MANTISFETCH_MAX_CONCURRENT_CAPTURE` | `16` | Captures in flight at once. Measured saturation point: throughput holds at ~4.5 captures/second from 16 onward, so more concurrency buys latency, not work. Each in-flight capture costs ~6MB |
 | `MANTISFETCH_MAX_CONCURRENT_SESSIONS` | `20` | Session creations in flight at once. Creation is cheap (0.03s idle, 0.29s with 200 live), so this bounds a burst rather than a resource |
 | `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC` | `30` | How long a capture or session creation waits for a slot before `429`. At the saturated rate 30s absorbs ~135 queued captures — five agents fetching eight pages each finish in ~9s, ten agents in ~19s, none refused. `0` = refuse immediately |
@@ -688,7 +688,7 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | 单个交付物下载的大小上限；超出返回 413 |
 | `MANTISFETCH_DOC_ID_STRATEGY` | `counter` | 文档目录命名策略：`counter` 保持 `DOC-xxx`；`source_filename` 基于上传文件名生成安全目录名 |
 | `MANTISFETCH_PARSE_QUEUE_MAX_WAIT_SEC` | `600` | 没声明 `budget_seconds` 的解析最多等多久拿到槽，超过才 `429`；声明了预算的则在自己的预算内等。并发对解析吞吐毫无帮助——文本解析被 GIL 绑死，OCR 单文档已内部并行——所以排队花的时间本来也省不掉 |
-| `MANTISFETCH_PARSE_QUEUE_MAX_BYTES` | `10 × MANTISFETCH_MAX_UPLOAD_MB` | 解析队列允许占用的暂存上传字节数。排队中的解析会一直把上传留在盘上，所以队列按磁盘设限而不是按个数 |
+| `MANTISFETCH_PARSE_QUEUE_MAX_BYTES` | 上传上限的十倍（默认 200MB 时为 **2GB**） | 解析队列允许占用的暂存上传字节数。排队中的解析会一直把上传留在盘上，所以队列按磁盘设限而不是按个数 |
 | `MANTISFETCH_MAX_CONCURRENT_CAPTURE` | `16` | 同时在飞的 capture 数。实测饱和点：16 起吞吐稳定在 ~4.5 次/秒，再加并发只涨延迟不涨产出。每个在飞的 capture 约 6MB |
 | `MANTISFETCH_MAX_CONCURRENT_SESSIONS` | `20` | 同时建 session 的并发数。建一个很便宜（空载 0.03s，200 个活跃时 0.29s），所以这是突发门而不是资源门 |
 | `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC` | `30` | capture / 建 session 最多等多久拿到槽，超过才 `429`。按饱和速率，30s 能吸收约 135 个排队的 capture——5 个 Agent 各抓 8 页约 9s 全成，10 个 Agent 约 19s，无一被拒。`0` = 立即拒绝 |
