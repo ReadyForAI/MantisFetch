@@ -871,6 +871,35 @@ SUPPORTED_FORMATS = [
     "xml",
 ]
 SUPPORTED_EXTENSIONS = {f".{fmt}" for fmt in SUPPORTED_FORMATS}
+
+# The raw channel (SharedSpecs 20260708 amendment-1): formats stored as the
+# original file with no parse products at all. Reaching it needs store_only=true
+# on /parse; nothing here is ever parsed, and nothing in SUPPORTED_FORMATS is
+# ever stored raw.
+RAW_FORMATS = ["md", "png", "jpg", "jpeg", "gif", "webp"]
+RAW_EXTENSIONS = {f".{fmt}" for fmt in RAW_FORMATS}
+#: Recorded in the manifest at ingest so the byte face can answer with the media
+#: type the document was admitted as, rather than re-guessing from its name.
+RAW_MEDIA_TYPES = {
+    ".md": "text/markdown",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+#: Which raw formats have a text window on the byte face; the rest are binary.
+RAW_TEXT_EXTENSIONS = {".md"}
+# HarnessServer decides between its `stored` and `ok` terminal states on the
+# strength of these two sets not overlapping (amendment-1 M3): a format in both
+# could be admitted by either channel, and an older MantisFetch would answer
+# 2xx-parsed where the caller expected 2xx-raw. Both sets are MantisFetch's to
+# change, which makes this the one invariant no other product can defend.
+if RAW_EXTENSIONS & SUPPORTED_EXTENSIONS:
+    raise RuntimeError(
+        "raw and parsed formats must not overlap (SharedSpecs 20260708 amd-1 M3); "
+        f"both claim: {sorted(RAW_EXTENSIONS & SUPPORTED_EXTENSIONS)}"
+    )
 #: OOXML containers — zip archives, unlike the legacy OLE2 .doc/.ppt/.xls.
 _OOXML_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
 # Backward-compat: tender_cn was renamed to bid_cn to match the Bid storage directory.
@@ -2147,6 +2176,29 @@ def _safe_filename(title: str, max_len: int = 40) -> str:
 # ═══════════════════════════════════════════
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MANTISFETCH_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+
+
+
+def _raw_max_bytes(suffix: str) -> int:
+    """Per-type ceiling for the raw channel, in MiB like every other _MB key here.
+
+    Two keys rather than one because the two kinds of raw file have nothing to do
+    with each other: markdown goes into a model's context as text (2 MiB is
+    already ~500k tokens), while an image is a base64 attachment on one turn.
+
+    The numbers are a contract, not a local preference — AULO refuses oversize
+    uploads client-side against the same two: md 2,097,152 and image 8,388,608
+    bytes (SharedSpecs 20260708 amendment-1 M3). Read per call so a deployment
+    can lower them without a restart, like the other tunables in this file.
+    """
+    key = "MANTISFETCH_RAW_MAX_MD_MB" if suffix in RAW_TEXT_EXTENSIONS else "MANTISFETCH_RAW_MAX_IMAGE_MB"
+    default = "2" if suffix in RAW_TEXT_EXTENSIONS else "8"
+    try:
+        mib = int(os.environ.get(key, default))
+    except ValueError:
+        logger.warning("%s is not an integer; using the default %s MiB", key, default)
+        mib = int(default)
+    return max(1, mib) * 1024 * 1024
 SEARCH_LIMIT_MAX = int(os.environ.get("MANTISFETCH_SEARCH_LIMIT_MAX", "200"))
 STORE_SOURCE_FILES = os.environ.get("MANTISFETCH_STORE_SOURCE_FILES", "true").lower() not in {
     "0",
@@ -2203,9 +2255,21 @@ class ParseResponse(BaseModel):
     manifest_path: str
     processing_time_sec: float
     source_ref: str | None = None
-    # "miss"     — new parse, no collision
+    # Which channel produced this document. Only "raw" means "the original file
+    # is all there is"; a caller that does not know the field, or reads
+    # "parsed", is right to expect sections. Never null — the whole point of a
+    # discriminator is that reading it cannot fail (#238).
+    kind: str = "parsed"
+    # "miss"     — new document, no collision
     # "replaced" — explicit doc_id collided and replace=true allowed overwrite
+    # "hit"      — these exact bytes are already in the library under another
+    #              doc_id (raw channel only). Advisory: the document asked for
+    #              was still created under the doc_id asked for, and
+    #              existing_doc_id names the other one. "replaced" wins the
+    #              field when both apply; existing_doc_id is set either way, so
+    #              the fact does not depend on which state won.
     dedup: str = "miss"
+    existing_doc_id: str | None = None
 
 
 class SectionInfo(BaseModel):
@@ -3652,6 +3716,29 @@ def _log_detached_endpoint_result(task: asyncio.Future) -> None:
         logger.info("Detached endpoint finished after the client disconnected")
 
 
+async def _reserve_doc_id(
+    docs_dir: Path,
+    filename: str,
+    doc_id: str | None,
+    id_strategy: str | None,
+) -> tuple[str, asyncio.Lock]:
+    """Atomically resolve a doc_id and reserve it via the per-doc lock dict.
+
+    Holding `_doc_id_parse_locks_guard` around resolve + insert means concurrent
+    same-explicit-id requests serialize, and concurrent source_filename uploads
+    can't both pick the same id (the second sees the first's reservation via
+    `_next_filename_doc_id`'s `in _doc_id_parse_locks` check and rolls to the
+    next candidate).
+    """
+    async with _doc_id_parse_locks_guard:
+        d_id = _resolve_doc_id(docs_dir, filename, doc_id, id_strategy)
+        d_id_lock = _doc_id_parse_locks.get(d_id)
+        if d_id_lock is None:
+            d_id_lock = asyncio.Lock()
+            _doc_id_parse_locks[d_id] = d_id_lock
+    return d_id, d_id_lock
+
+
 @app.post("/parse", response_model=ParseResponse)
 @_survives_client_disconnect
 async def api_parse_doc(
@@ -3923,18 +4010,7 @@ async def api_parse_doc(
                         "or a lower max_images value."
                     ),
                 )
-        # Atomically resolve the doc_id and reserve it via the per-doc lock dict.
-        # Holding `_doc_id_parse_locks_guard` around resolve + insert means
-        # concurrent same-explicit-id requests serialize, and concurrent
-        # source_filename uploads can't both pick the same id (the second sees
-        # the first's reservation via `_next_filename_doc_id`'s
-        # `in _doc_id_parse_locks` check and rolls to the next candidate).
-        async with _doc_id_parse_locks_guard:
-            d_id = _resolve_doc_id(docs_dir, filename, doc_id, id_strategy)
-            d_id_lock = _doc_id_parse_locks.get(d_id)
-            if d_id_lock is None:
-                d_id_lock = asyncio.Lock()
-                _doc_id_parse_locks[d_id] = d_id_lock
+        d_id, d_id_lock = await _reserve_doc_id(docs_dir, filename, doc_id, id_strategy)
 
         # Lock outside _parse_sem so waiters don't burn a parse slot — otherwise
         # unrelated documents get 429'd while one same-id queue drains.
