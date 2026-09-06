@@ -825,6 +825,31 @@ async def doc_manifest(doc_id: str) -> Any:
 
 
 @mcp.tool()
+async def doc_source(
+    doc_id: str, offset: int | None = None, limit: int | None = None
+) -> Any:
+    """Describe a document's stored original file, and optionally read its text.
+
+    For documents whose manifest says kind="raw" (markdown and images stored
+    without parsing) this is the only reader — there are no sections, digest or
+    brief to ask for. Returns doc_id, filename, media_type and size_bytes; never
+    the bytes themselves, so an image cannot arrive as base64 in your context.
+    The runtime that assembles a turn is what fetches the bytes.
+
+    Pass offset (0-based line) and/or limit (lines) to read a window of a text
+    original — for paging a markdown file too large to hold at once. Each window
+    is capped at 64 KiB of UTF-8 and cut at a line boundary; next_offset is where
+    to continue, or null at the end. Asking for a window of an image is an error.
+    """
+    params: dict[str, Any] = {}
+    if offset is not None:
+        params["offset"] = offset
+    if limit is not None:
+        params["limit"] = limit
+    return await _doc_get(f"/library/{doc_id}/source/info", params or None)
+
+
+@mcp.tool()
 async def doc_delete(doc_id: str) -> Any:
     """Delete a document from the library by doc_id (removes its index entry +
     parsed products). Idempotent: deleting an unknown doc_id succeeds (returns
