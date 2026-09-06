@@ -540,6 +540,11 @@ model reads the original.
 - **Duplicate content is reported, not merged**: `dedup: "hit"` with
   `existing_doc_id` naming the other copy. The document you asked for is still
   created under the `doc_id` you asked for.
+- **A `409` on the raw channel answers with an object**, not a message string:
+  `{"error": "doc_id_exists", "doc_id", "kind", "message"}` under `detail`.
+  `kind` is the *occupant's* — first-writer-wins, and the loser still has to
+  record which terminal state the document reached. The parse channel's 409 is
+  unchanged.
 - Deleting works exactly as for a parsed document, original included.
 - `GET /doc/library/search` hits carry `kind` too, so "search, then read the
   digest" can branch before it asks for a digest that does not exist.

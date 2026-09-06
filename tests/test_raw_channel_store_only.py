@@ -411,6 +411,40 @@ def test_an_explicit_doc_id_that_exists_is_still_a_conflict(client, docs_dir) ->
     assert resp.status_code == 409
 
 
+def test_the_conflict_says_what_is_already_there(client, docs_dir) -> None:
+    """A 409 here is first-writer-wins, and the caller has to record which
+    terminal state the document reached — Harness reads that off `kind`. Without
+    it a retry of a stored image is recorded as parsed, and AULO only forwards
+    attachments it believes were stored, so the image never reaches the model.
+
+    The occupant's kind, not the request's: storing onto an id that holds a
+    parsed document is a parsed document that is already there.
+    """
+    assert _store(client, doc_id="DOC-903").status_code == 200
+    raw_conflict = _store(client, doc_id="DOC-903").json()["detail"]
+    assert raw_conflict["kind"] == "raw"
+    assert raw_conflict["doc_id"] == "DOC-903"
+    assert "doc_source" in raw_conflict["message"]
+
+    client.post(
+        "/doc/parse",
+        files={"file": ("p.html", b"<h1>T</h1><p>Body worth keeping.</p>", "text/html")},
+        data={"summary_mode": "off", "generate_summary": "false", "doc_id": "DOC-904"},
+    )
+    assert _store(client, doc_id="DOC-904").json()["detail"]["kind"] == "parsed"
+
+
+def test_the_parse_channel_conflict_is_unchanged(client, docs_dir) -> None:
+    """Its 409 text is what HTTP callers read today; the raw channel is new
+    enough to have no such reader, which is why only that one changed shape."""
+    data = {"summary_mode": "off", "generate_summary": "false", "doc_id": "DOC-905"}
+    html = {"file": ("p.html", b"<h1>T</h1><p>Body worth keeping.</p>", "text/html")}
+    assert client.post("/doc/parse", files=html, data=data).status_code == 200
+
+    detail = client.post("/doc/parse", files=html, data=data).json()["detail"]
+    assert isinstance(detail, str) and "already exists" in detail
+
+
 # ── a failed store must not take a readable document with it ─────────────────────
 def test_a_failed_replace_leaves_the_old_document_readable(client, docs_dir, monkeypatch) -> None:
     """The raw channel replaces in place, so it runs under the same rollback the

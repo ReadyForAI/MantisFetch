@@ -3806,12 +3806,7 @@ async def _store_only_ingest(
         if doc_id:
             exists_now = _doc_exists_anywhere(docs_dir, d_id)
             if exists_now and not replace:
-                raise HTTPException(
-                    409,
-                    f"doc_id '{doc_id}' already exists in the library — read it "
-                    f"directly by doc_id (doc_manifest / doc_source). Pass "
-                    f"replace=true only to overwrite.",
-                )
+                raise _doc_id_conflict(docs_dir, doc_id, store_only=True)
             if exists_now and not will_replace:
                 will_replace = True
                 dedup_status = "replaced"
@@ -4155,11 +4150,7 @@ async def api_parse_doc(
     # waste disk + `_upload_sem` writing a scratch file just to be 409'd.
     will_replace = bool(doc_id and _doc_exists_anywhere(docs_dir, doc_id))
     if will_replace and not replace:
-        raise HTTPException(
-            409,
-            f"doc_id '{doc_id}' already exists in the library — read it directly by "
-            f"doc_id (doc_manifest / doc_digest). Pass replace=true only to overwrite.",
-        )
+        raise _doc_id_conflict(docs_dir, str(doc_id), store_only=store_only)
     dedup_status = "replaced" if will_replace else "miss"
 
     # Stream the upload into a scratch file so the in-memory buffer never
@@ -5659,6 +5650,46 @@ def _resolve_source_file(doc_dir: Path, manifest: dict[str, Any], doc_id: str) -
         or "application/octet-stream"
     )
     return path, str(media_type)
+
+
+def _doc_id_conflict(docs_dir: Path, doc_id: str, *, store_only: bool) -> HTTPException:
+    """The 409 for a doc_id that is already taken.
+
+    Harness treats this as first-writer-wins success and then has to say which
+    terminal state the document reached, which it reads off ``kind``
+    (SharedSpecs 20260708 amendment-1 H1). With no kind on the body a raw
+    document that lost the race, or a retry of one already stored, is recorded
+    as parsed — and AULO only forwards attachments it believes were stored, so
+    the image never reaches the model.
+
+    Only the raw channel answers with an object. The parse channel's 409 has
+    HTTP callers reading its text, and the raw channel is new enough to have
+    none — so the shape changes where nothing depends on it, and the field
+    lands where the product that needs it is already looking.
+    """
+    if not store_only:
+        return HTTPException(
+            409,
+            f"doc_id '{doc_id}' already exists in the library — read it directly by "
+            f"doc_id (doc_manifest / doc_digest). Pass replace=true only to overwrite.",
+        )
+    kind = _doc_kind(docs_dir, doc_id)
+    return HTTPException(
+        409,
+        {
+            "error": "doc_id_exists",
+            "doc_id": doc_id,
+            # The occupant's kind, not this request's: a raw upload onto an id
+            # holding a parsed document is a parsed document that is already
+            # there, and saying otherwise would misreport the library.
+            "kind": kind,
+            "message": (
+                f"doc_id '{doc_id}' already exists in the library — read it directly "
+                f"by doc_id ({'doc_source' if kind == 'raw' else 'doc_manifest'}). "
+                f"Pass replace=true only to overwrite."
+            ),
+        },
+    )
 
 
 def _doc_kind(docs_dir: Path, doc_id: str) -> str:

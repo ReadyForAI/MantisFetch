@@ -536,6 +536,9 @@ Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /d
   sections 列举、摘要状态都带 `kind`。
 - **内容重复只告知、不合并**：`dedup: "hit"` 并带 `existing_doc_id` 指出另一份。
   你要的文档仍然按你给的 `doc_id` 建出来。
+- **原件通道的 `409` 返回对象而不是消息字符串**：`detail` 里是
+  `{"error": "doc_id_exists", "doc_id", "kind", "message"}`。`kind` 是**已占位那份**
+  的 —— 先写者赢，输的一方仍然要记录这个文档最终落在哪个状态。解析通道的 409 不变。
 - 删除与解析文档完全一致，原件一并删掉。
 - `GET /doc/library/search` 的命中项也带 `kind`，「先搜再读 digest」这条惯用流程
   可以在去要一个并不存在的 digest 之前先分支。
