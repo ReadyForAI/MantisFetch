@@ -531,6 +531,8 @@ Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /d
 - **内容重复只告知、不合并**：`dedup: "hit"` 并带 `existing_doc_id` 指出另一份。
   你要的文档仍然按你给的 `doc_id` 建出来。
 - 删除与解析文档完全一致，原件一并删掉。
+- `GET /doc/library/search` 的命中项也带 `kind`，「先搜再读 digest」这条惯用流程
+  可以在去要一个并不存在的 digest 之前先分支。
 
 读回来：
 
@@ -542,7 +544,8 @@ Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /d
   窗口，用于分页读大 md。`offset` 是 0 起的行号（缺省 0），`limit` 不给则读到文件
   末尾。单次窗口按 UTF-8 封顶 64 KiB 并在行边界截断；`truncated` 说明是否触顶，
   `next_offset` 是续读位置（读完为 `null`）。单行超过窗口时会从行中间截断返回 ——
-  该行剩余部分不再分页。对图片要窗口是 `422`。
+  该行剩余部分不再分页。对图片要窗口是 `422`；对**解析文档**要窗口也是 `422` ——
+  它有 sections，而它的原件可能有 200 MiB。
 
 ```bash
 curl -X POST http://localhost:9898/doc/parse \

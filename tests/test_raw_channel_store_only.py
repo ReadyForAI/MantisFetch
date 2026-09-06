@@ -362,3 +362,129 @@ def test_an_explicit_doc_id_that_exists_is_still_a_conflict(client, docs_dir) ->
     assert _store(client, doc_id="DOC-902").status_code == 200
     resp = _store(client, doc_id="DOC-902")
     assert resp.status_code == 409
+
+
+# ── a failed store must not take a readable document with it ─────────────────────
+def test_a_failed_replace_leaves_the_old_document_readable(client, docs_dir, monkeypatch) -> None:
+    """The raw channel replaces in place, so it runs under the same rollback the
+    parse path does (#212). Without it a full disk mid-copy would destroy a
+    document that was perfectly readable a moment ago — and leave the index
+    pointing at it."""
+    import mantisfetch_docreader as dr
+
+    parsed = client.post(
+        "/doc/parse",
+        files={"file": ("p.html", b"<h1>T</h1><p>Body worth keeping.</p>", "text/html")},
+        data={"summary_mode": "off", "generate_summary": "false", "doc_id": "DOC-910"},
+    )
+    assert parsed.status_code == 200
+    before = client.get("/doc/library/DOC-910/full").text
+
+    def _boom(*a, **kw):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(dr, "_persist_source_file", _boom)
+    resp = _store(client, doc_id="DOC-910", replace="true")
+    assert resp.status_code == 500
+
+    # Still the document it was: full text, manifest and source all intact.
+    assert client.get("/doc/library/DOC-910/full").text == before
+    assert client.get("/doc/library/DOC-910/manifest").json().get("kind", "parsed") == "parsed"
+    assert client.get("/doc/library/DOC-910/source").content.startswith(b"<h1>T</h1>")
+    # A failed replacement is not that document's fault; marking it would report
+    # a readable document as broken.
+    assert not (docs_dir / "General" / "DOC-910" / dr.PARSE_FAILURE_MARKER).exists()
+
+
+def test_a_failed_new_store_leaves_a_record_not_an_empty_directory(
+    client, docs_dir, monkeypatch
+) -> None:
+    """An empty directory is indistinguishable from one mid-ingest. IRP 20260801
+    §3.6 rules that a failure is recorded rather than deleted, so a caller that
+    timed out can tell "it failed" from "still running"."""
+    import mantisfetch_docreader as dr
+
+    def _boom(*a, **kw):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(dr, "_persist_source_file", _boom)
+    assert _store(client, doc_id="DOC-911").status_code == 500
+
+    marker = docs_dir / "General" / "DOC-911" / dr.PARSE_FAILURE_MARKER
+    assert marker.exists()
+    assert json.loads(marker.read_text())["phase"] == "store"
+
+
+def test_a_later_success_clears_an_earlier_failure_marker(client, docs_dir, monkeypatch) -> None:
+    import mantisfetch_docreader as dr
+
+    real = dr._persist_source_file
+    calls = {"n": 0}
+
+    def _boom_once(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("no space left on device")
+        return real(*a, **kw)
+
+    # Patched for both calls rather than undone between them: monkeypatch.undo()
+    # would also drop this test's docs_dir redirect and send the second write at
+    # whatever library the process is really configured for.
+    monkeypatch.setattr(dr, "_persist_source_file", _boom_once)
+    assert _store(client, doc_id="DOC-912").status_code == 500
+
+    assert _store(client, doc_id="DOC-912", replace="true").status_code == 200
+    assert not (docs_dir / "General" / "DOC-912" / dr.PARSE_FAILURE_MARKER).exists()
+
+
+def test_a_parsed_document_has_no_text_window(client, docs_dir) -> None:
+    """The window reads the whole original to slice it, and a parsed document's
+    original can be 200 MiB. It also has sections, which is the reader it should
+    be using."""
+    doc_id = client.post(
+        "/doc/parse",
+        files={"file": ("p.txt", b"line one\nline two\n", "text/plain")},
+        data={"summary_mode": "off", "generate_summary": "false"},
+    ).json()["doc_id"]
+
+    resp = client.get(f"/doc/library/{doc_id}/source/info", params={"limit": 1})
+    assert resp.status_code == 422
+    assert "parsed document" in resp.json()["detail"]
+    # Its metadata still answers — only the window is refused.
+    assert client.get(f"/doc/library/{doc_id}/source/info").json()["kind"] == "parsed"
+
+
+def test_a_search_hit_says_which_reader_to_use(client, docs_dir) -> None:
+    """ "Search, then read the digest" is the documented flow, and a raw document
+    has no digest — so the discriminator has to be on the hit, not only on the
+    manifest."""
+    raw_id = _store(client, name="plan.md").json()["doc_id"]
+    client.post(
+        "/doc/parse",
+        files={"file": ("plan.html", b"<h1>Plan</h1><p>Body worth keeping.</p>", "text/html")},
+        data={"summary_mode": "off", "generate_summary": "false"},
+    )
+
+    hits = client.get("/doc/library/search", params={"q": "plan"}).json()["results"]
+    kinds = {h["doc_id"]: h["kind"] for h in hits}
+    assert kinds[raw_id] == "raw"
+    assert set(kinds.values()) == {"raw", "parsed"}
+
+
+def test_the_mcp_tool_can_store_a_raw_document_too(client, docs_dir, tmp_path, monkeypatch) -> None:
+    """MCP is presented as the same service through another door. Leaving
+    store_only off it would make markdown ingestable over HTTP and impossible
+    over MCP, for an agent that only has the one."""
+    import base64
+
+    import mantisfetch_mcp as mm
+
+    out = asyncio.run(
+        mm.doc_parse(
+            content_b64=base64.b64encode(MD).decode(),
+            filename="notes.md",
+            store_only=True,
+        )
+    )
+    assert out["kind"] == "raw"
+    assert asyncio.run(mm.doc_source(out["doc_id"]))["media_type"] == "text/markdown"

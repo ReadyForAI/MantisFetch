@@ -171,7 +171,7 @@ Notes:
 
 | Tool | Purpose | Key args |
 | ---- | ------- | -------- |
-| `doc_parse` | Parse a document into the library; returns `doc_id` + structure. | `rel_path?` **xor** `content_b64?`, `filename?`, `content_type="General"`, `generate_summary=true`, `extract_tables=true`, `force_ocr=false`, `tags?`, `doc_id?`, `replace=false` |
+| `doc_parse` | Parse a document into the library; returns `doc_id` + structure. `store_only=true` stores a `.md` / image as-is instead (no parser, `kind: "raw"`, read it back with `doc_source`). | `rel_path?` **xor** `content_b64?`, `filename?`, `content_type="General"`, `generate_summary=true`, `extract_tables=true`, `force_ocr=false`, `tags?`, `doc_id?`, `replace=false`, `store_only=false` |
 | `doc_digest` | Digest tier (~200 tokens): cheapest overview. | `doc_id` |
 | `doc_brief` | Brief tier (~1.5k tokens): section headings + snippets. | `doc_id` |
 | `doc_sections` | List sections (sid + title) for targeted retrieval. | `doc_id` |

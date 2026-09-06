@@ -609,6 +609,7 @@ async def doc_parse(
     tags: list[str] | None = None,
     doc_id: str | None = None,
     replace: bool = False,
+    store_only: bool = False,
 ) -> Any:
     """Parse a document (PDF/DOCX/PPTX/XLSX/CSV/HTML, with OCR fallback) into the
     library; returns doc_id + structure. Provide exactly one source:
@@ -623,6 +624,12 @@ async def doc_parse(
     the library — stop and read it by doc_id; do NOT pass replace= or mint a new
     id. A "passed its staging TTL" error means the attachment expired: ask the user
     to re-upload.
+
+    Markdown and images have no parser here and are refused by this call. Pass
+    store_only=true to store one as-is instead (.md / .png / .jpg / .jpeg / .gif
+    / .webp only): the response and manifest come back with kind="raw", the
+    document has no sections or digest, and doc_source reads it. Nothing is
+    estimated or queued for on that path — the budget below does not apply.
 
     Large scanned documents can take minutes to parse — longer than an MCP
     client's per-request timeout typically allows. Rather than let that surface
@@ -694,6 +701,7 @@ async def doc_parse(
         "extract_tables": str(extract_tables).lower(),
         "force_ocr": str(force_ocr).lower(),
         "replace": str(replace).lower(),
+        "store_only": str(store_only).lower(),
         # Declared on every call: a tool invocation is spending the agent's turn,
         # so a document that cannot finish inside it should come back as a fast
         # refusal rather than as the client's timeout.

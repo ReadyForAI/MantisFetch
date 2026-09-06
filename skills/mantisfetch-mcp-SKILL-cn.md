@@ -150,7 +150,7 @@ capture 正文，snippet 会原样带出页面文字。
 
 | 工具 | 用途 | 关键参数 |
 | ---- | ---- | -------- |
-| `doc_parse` | 解析文档入库；返回 `doc_id` + 结构。 | `rel_path?` **xor** `content_b64?`、`filename?`、`content_type="General"`、`generate_summary=true`、`extract_tables=true`、`force_ocr=false`、`tags?`、`doc_id?`、`replace=false` |
+| `doc_parse` | 解析文档入库；返回 `doc_id` + 结构。带 `store_only=true` 则改为原样入库（不解析、`kind: "raw"`，用 `doc_source` 读回），仅限 `.md` 与图片。 | `rel_path?` **xor** `content_b64?`、`filename?`、`content_type="General"`、`generate_summary=true`、`extract_tables=true`、`force_ocr=false`、`tags?`、`doc_id?`、`replace=false`、`store_only=false` |
 | `doc_digest` | Digest 级（~200 tokens）：最便宜的概览。 | `doc_id` |
 | `doc_brief` | Brief 级（~1.5k tokens）：section 标题 + 片段。 | `doc_id` |
 | `doc_sections` | 列出 sections（sid + 标题）以做定向检索。 | `doc_id` |

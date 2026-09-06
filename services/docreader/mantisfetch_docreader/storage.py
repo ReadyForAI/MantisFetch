@@ -92,6 +92,7 @@ def _update_doc_index(
     source_record: dict[str, Any] | None = None,
     content_type: str | None = None,
     storage_path: str | None = None,
+    kind: str | None = None,
 ):
     """Update doc-index.json with threading lock and atomic write."""
     with _doc_index_lock:
@@ -140,6 +141,12 @@ def _update_doc_index(
             "source_sha256": (source_record or meta.get("source_file") or {}).get("sha256", ""),
             "source_available": bool((source_record or meta.get("source_file") or {}).get("ref")),
         }
+        # Only raw documents carry it, so an existing row keeps meaning what it
+        # meant: absent is parsed. Search hits need it because "find it, then
+        # read its digest" is the standard flow, and a raw document has no
+        # digest to read.
+        if kind == "raw":
+            entry["kind"] = "raw"
         summary_meta = (
             meta.get("parse_metadata", {}).get("summary")
             if isinstance(meta.get("parse_metadata"), dict)
@@ -532,6 +539,7 @@ def _doc_entry_from_manifest(docs_dir: Path, doc_id: str) -> dict[str, Any] | No
         "source_filename": source_file.get("filename", ""),
         "source_sha256": source_file.get("sha256", ""),
         "source_available": bool(source_file.get("ref")),
+        "kind": manifest.get("kind") or "parsed",
         "summary_mode": summary_meta.get("mode"),
         "summary_status": summary_meta.get("status"),
         "summary_error_code": summary_meta.get("error_code"),

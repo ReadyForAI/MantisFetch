@@ -534,6 +534,8 @@ model reads the original.
   `existing_doc_id` naming the other copy. The document you asked for is still
   created under the `doc_id` you asked for.
 - Deleting works exactly as for a parsed document, original included.
+- `GET /doc/library/search` hits carry `kind` too, so "search, then read the
+  digest" can branch before it asks for a digest that does not exist.
 
 Reading it back:
 
@@ -550,7 +552,8 @@ Reading it back:
   `truncated` says whether the cap bit, and `next_offset` is where to continue
   (`null` at the end). A single line longer than the window comes back cut
   mid-line — the remainder of that line is not paged. Asking for a window of an
-  image is a `422`.
+  image is a `422`, and so is asking for one of a **parsed** document — that one
+  has sections, and its original can be 200 MiB.
 
 ```bash
 curl -X POST http://localhost:9898/doc/parse \

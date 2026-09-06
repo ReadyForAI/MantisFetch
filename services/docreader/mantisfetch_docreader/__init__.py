@@ -2295,6 +2295,11 @@ class SearchResult(BaseModel):
     doc_id: str
     filename: str
     file_type: str
+    # Set by library_search, where a hit can be a raw document and the caller
+    # needs to know before reaching for a digest that does not exist. The other
+    # constructors return parsed documents by construction — full-text search
+    # reads full.md and sections, which a raw document has neither of.
+    kind: str = "parsed"
     content_type: str = "General"
     storage_path: str | None = None
     digest: str
@@ -3796,122 +3801,193 @@ async def _store_only_ingest(
         )
         storage_path = _doc_storage_rel_path(d_id, selected_content_type)
         doc_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
-        if will_replace and doc_dir.exists():
-            # A raw document is its original file and nothing else. Replacing a
-            # parsed document with one has to take the old products away, or the
-            # result reads as parsed (sections, digest) while claiming kind=raw.
-            await asyncio.to_thread(shutil.rmtree, doc_dir, ignore_errors=True)
         doc_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # A replacement runs under the same rollback the parse path uses
+            # (#212): the source it is about to overwrite moves aside first, and
+            # the products it is about to remove move into .rollback/. A raw
+            # document is its original file and nothing else, so the parse
+            # products of the document it replaces have to go — but only in a way
+            # a failed persist can undo, or a disk error would destroy a document
+            # that was perfectly readable a moment ago.
+            if will_replace:
+                await asyncio.to_thread(_stash_source, doc_dir)
+            with _restore_on_failure(
+                doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
+            ):
+                # These are copied into the rollback rather than moved, because a
+                # re-parse reads some of them back. Nothing here does, and leaving
+                # them would make the result read as parsed while its manifest
+                # says raw. Removed before the persist: that is the step that can
+                # fail on a full disk, and rollback should have only these cheap
+                # renames to undo when it does.
+                for name in _OVERWRITTEN_FILES:
+                    if name != "manifest.json":
+                        (doc_dir / name).unlink(missing_ok=True)
+                return await _write_raw_document(
+                    docs_dir,
+                    doc_dir=doc_dir,
+                    d_id=d_id,
+                    filename=filename,
+                    suffix=suffix,
+                    scratch_path=scratch_path,
+                    total_size=total_size,
+                    parsed_metadata=parsed_metadata,
+                    tags=tags,
+                    selected_content_type=selected_content_type,
+                    storage_path=storage_path,
+                    dedup_status=dedup_status,
+                    t_entry=t_entry,
+                )
+        except HTTPException as exc:
+            _record_parse_failure(
+                doc_dir, d_id, "store", str(exc.detail),
+                docs_dir=docs_dir, replacing=will_replace,
+            )
+            raise
+        except Exception as exc:
+            _record_parse_failure(
+                doc_dir, d_id, "store", str(exc), docs_dir=docs_dir, replacing=will_replace,
+            )
+            raise HTTPException(500, f"could not store {filename}: {exc}") from exc
 
-        source_record = await asyncio.to_thread(
-            _persist_source_file, doc_dir, filename, scratch_path
-        )
-        # Advisory only: the document the caller asked for is created either
-        # way, under the doc_id the caller asked for. Returning the other id
-        # instead would break `response.doc_id == request.doc_id` (which both
-        # AULO's mapping row and Harness's 409-as-success rely on), and sharing
-        # one doc_id across two chats would let the first session's cleanup
-        # delete the second session's attachment — this library has no
-        # reference counting (SharedSpecs 20260708 amendment-1 M5).
-        existing_doc_id = await asyncio.to_thread(
-            _find_doc_by_source_sha256, docs_dir, source_record["sha256"], d_id
-        )
-        if existing_doc_id and dedup_status == "miss":
-            dedup_status = "hit"
 
-        media_type = RAW_MEDIA_TYPES[suffix]
-        created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        parsed_tags = _parse_tags(tags)
-        digest = f"{filename} ({media_type}, {total_size} bytes)"
-        manifest = {
-            "doc_id": d_id,
-            # The one discriminator. Absent on the parsed side, never null.
-            "kind": "raw",
-            "filename": filename,
-            "file_type": suffix.lstrip("."),
-            # Recorded at ingest so the byte face answers with the type the
-            # document was admitted as, rather than re-guessing from its name.
-            "media_type": media_type,
+async def _write_raw_document(
+    docs_dir: Path,
+    *,
+    doc_dir: Path,
+    d_id: str,
+    filename: str,
+    suffix: str,
+    scratch_path: Path,
+    total_size: int,
+    parsed_metadata: dict[str, Any],
+    tags: str | None,
+    selected_content_type: str,
+    storage_path: str,
+    dedup_status: str,
+    t_entry: float,
+) -> ParseResponse:
+    """Write the original, the manifest and the index entry, in that order.
+
+    Split out so the rollback context above reads as one transaction: everything
+    here either lands or is undone.
+    """
+    source_record = await asyncio.to_thread(
+        _persist_source_file, doc_dir, filename, scratch_path
+    )
+    # Advisory only: the document the caller asked for is created either
+    # way, under the doc_id the caller asked for. Returning the other id
+    # instead would break `response.doc_id == request.doc_id` (which both
+    # AULO's mapping row and Harness's 409-as-success rely on), and sharing
+    # one doc_id across two chats would let the first session's cleanup
+    # delete the second session's attachment — this library has no
+    # reference counting (SharedSpecs 20260708 amendment-1 M5).
+    existing_doc_id = await asyncio.to_thread(
+        _find_doc_by_source_sha256, docs_dir, source_record["sha256"], d_id
+    )
+    if existing_doc_id and dedup_status == "miss":
+        dedup_status = "hit"
+
+    media_type = RAW_MEDIA_TYPES[suffix]
+    created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parsed_tags = _parse_tags(tags)
+    digest = f"{filename} ({media_type}, {total_size} bytes)"
+    manifest = {
+        "doc_id": d_id,
+        # The one discriminator. Absent on the parsed side, never null.
+        "kind": "raw",
+        "filename": filename,
+        "file_type": suffix.lstrip("."),
+        # Recorded at ingest so the byte face answers with the type the
+        # document was admitted as, rather than re-guessing from its name.
+        "media_type": media_type,
+        "source": "upload",
+        "content_type": selected_content_type,
+        "storage_path": storage_path,
+        "tags": parsed_tags,
+        "total_pages": 0,
+        "section_count": 0,
+        "table_count": 0,
+        "image_count": 0,
+        "metadata": parsed_metadata,
+        "source_file": source_record,
+        # Only what exists. Listing digest/brief/full here would send every
+        # reader to four files that were never written.
+        "paths": {"source": source_record["ref"]},
+        "sections": [],
+        "provenance": {
             "source": "upload",
-            "content_type": selected_content_type,
-            "storage_path": storage_path,
-            "tags": parsed_tags,
-            "total_pages": 0,
-            "section_count": 0,
-            "table_count": 0,
-            "image_count": 0,
-            "metadata": parsed_metadata,
-            "source_file": source_record,
-            # Only what exists. Listing digest/brief/full here would send every
-            # reader to four files that were never written.
-            "paths": {"source": source_record["ref"]},
-            "sections": [],
-            "provenance": {
-                "source": "upload",
-                "source_url": filename,
-                "created_at": created_at,
-                "content_hash": "",
-                # No summary worker runs for a raw document, but one may still be
-                # in flight for the parsed document this replaces; a token here
-                # is what tells it its target is gone.
-                "generation": "sha256:" + hashlib.sha256(
-                    f"raw:{d_id}:{source_record['sha256']}".encode()
-                ).hexdigest(),
-                "source_kind": source_record["kind"],
-                "source_filename": source_record["filename"],
-                "source_ref": source_record["ref"],
-                "source_sha256": source_record["sha256"],
-                "source_size_bytes": source_record["size_bytes"],
-            },
-        }
-        _write_json(doc_dir / "manifest.json", manifest)
-        meta = {
-            "doc_id": d_id,
-            "filename": filename,
-            "file_type": suffix.lstrip("."),
-            "total_pages": 0,
-            "section_count": 0,
-            "table_count": 0,
-            "ocr_page_count": 0,
+            "source_url": filename,
             "created_at": created_at,
-            "metadata": parsed_metadata,
-            "content_type": selected_content_type,
-            "storage_path": storage_path,
-        }
-        await asyncio.to_thread(
-            _update_doc_index,
-            docs_dir,
-            meta,
-            digest,
-            tags=parsed_tags,
-            source="upload",
-            source_url=filename,
-            content_hash="",
-            metadata=parsed_metadata,
-            source_record=source_record,
-            content_type=selected_content_type,
-            storage_path=storage_path,
-        )
-        logger.info("stored raw document %s (%s, %d bytes)", d_id, media_type, total_size)
-        return ParseResponse(
-            doc_id=d_id,
-            filename=filename,
-            file_type=suffix.lstrip("."),
-            total_pages=0,
-            section_count=0,
-            table_count=0,
-            image_count=0,
-            ocr_page_count=0,
-            digest=digest,
-            manifest_path=f"docs/{storage_path}/manifest.json",
-            processing_time_sec=round(time.monotonic() - t_entry, 2),
-            source_ref=source_record["ref"],
-            content_type=selected_content_type,
-            storage_path=storage_path,
-            kind="raw",
-            dedup=dedup_status,
-            existing_doc_id=existing_doc_id,
-        )
+            "content_hash": "",
+            # No summary worker runs for a raw document, but one may still be
+            # in flight for the parsed document this replaces; a token here
+            # is what tells it its target is gone.
+            "generation": "sha256:" + hashlib.sha256(
+                f"raw:{d_id}:{source_record['sha256']}".encode()
+            ).hexdigest(),
+            "source_kind": source_record["kind"],
+            "source_filename": source_record["filename"],
+            "source_ref": source_record["ref"],
+            "source_sha256": source_record["sha256"],
+            "source_size_bytes": source_record["size_bytes"],
+        },
+    }
+    _write_json(doc_dir / "manifest.json", manifest)
+    meta = {
+        "doc_id": d_id,
+        "filename": filename,
+        "file_type": suffix.lstrip("."),
+        "total_pages": 0,
+        "section_count": 0,
+        "table_count": 0,
+        "ocr_page_count": 0,
+        "created_at": created_at,
+        "metadata": parsed_metadata,
+        "content_type": selected_content_type,
+        "storage_path": storage_path,
+    }
+    await asyncio.to_thread(
+        _update_doc_index,
+        docs_dir,
+        meta,
+        digest,
+        tags=parsed_tags,
+        source="upload",
+        source_url=filename,
+        content_hash="",
+        metadata=parsed_metadata,
+        source_record=source_record,
+        content_type=selected_content_type,
+        storage_path=storage_path,
+        kind="raw",
+    )
+    # A raw ingest that succeeds clears a marker an earlier failed attempt on
+    # the same doc_id left, and drops the stash the replacement no longer
+    # needs — the same two closing steps the parse path takes.
+    _clear_parse_failure(doc_dir)
+    _discard_stashed_source(doc_dir)
+    logger.info("stored raw document %s (%s, %d bytes)", d_id, media_type, total_size)
+    return ParseResponse(
+        doc_id=d_id,
+        filename=filename,
+        file_type=suffix.lstrip("."),
+        total_pages=0,
+        section_count=0,
+        table_count=0,
+        image_count=0,
+        ocr_page_count=0,
+        digest=digest,
+        manifest_path=f"docs/{storage_path}/manifest.json",
+        processing_time_sec=round(time.monotonic() - t_entry, 2),
+        source_ref=source_record["ref"],
+        content_type=selected_content_type,
+        storage_path=storage_path,
+        kind="raw",
+        dedup=dedup_status,
+        existing_doc_id=existing_doc_id,
+    )
 
 
 async def _reserve_doc_id(
@@ -4714,6 +4790,7 @@ async def library_search(
             doc_id=d.get("id", ""),
             filename=d.get("filename", ""),
             file_type=d.get("file_type", ""),
+            kind=d.get("kind") or "parsed",
             content_type=d.get("content_type", "General"),
             storage_path=d.get("storage_path"),
             digest=d.get("digest", ""),
@@ -5584,6 +5661,17 @@ async def get_source_info(
     if offset is None and limit is None:
         return info
 
+    # The window is a raw-channel face. A parsed document's original can be a
+    # 200 MiB .txt under MANTISFETCH_MAX_UPLOAD_MB, and reading one whole to
+    # answer with 64 KiB would stall the loop — while the thing that document
+    # actually has, and this one does not, is sections. The raw ceilings are
+    # what bound the read below.
+    if info["kind"] != "raw":
+        raise HTTPException(
+            422,
+            f"{doc_id} is a parsed document; read it with digest / brief / "
+            f"sections, or GET /library/{doc_id}/source for the original file",
+        )
     if not media_type.startswith("text/"):
         raise HTTPException(
             422,
@@ -5592,7 +5680,7 @@ async def get_source_info(
         )
 
     start = offset or 0
-    text = path.read_bytes().decode("utf-8", errors="replace")
+    text = (await asyncio.to_thread(path.read_bytes)).decode("utf-8", errors="replace")
     lines = text.splitlines(keepends=True)
     window = lines[start : start + limit] if limit is not None else lines[start:]
 
