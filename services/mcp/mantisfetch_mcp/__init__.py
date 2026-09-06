@@ -292,7 +292,7 @@ def _allowed_doc_roots() -> list[Path]:
     return roots
 
 
-def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
+def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[str, bytes]:
     """Resolve a path relative to an allowlist root, canonicalize, and enforce
     containment. Returns (filename, bytes). Raises ToolError on escape / missing
     root. The relative arg means the model can never express an absolute host path;
@@ -319,10 +319,9 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
             # huge resource file can't spike memory ahead of the docreader's own
             # streaming size enforcement.
             size = candidate.stat().st_size
-            if size > _doc_mod.MAX_UPLOAD_BYTES:
-                raise ToolError(
-                    f"document too large: {size} bytes (max {_doc_mod.MAX_UPLOAD_BYTES})"
-                )
+            cap = max_bytes or _doc_mod.MAX_UPLOAD_BYTES
+            if size > cap:
+                raise ToolError(f"document too large: {size} bytes (max {cap})")
             return candidate.name, candidate.read_bytes()
     # Split "resolved inside an allowed root but the file is absent" from "escaped
     # every root". The former is the expected shape when a chat attachment has
@@ -609,6 +608,7 @@ async def doc_parse(
     tags: list[str] | None = None,
     doc_id: str | None = None,
     replace: bool = False,
+    store_only: bool = False,
 ) -> Any:
     """Parse a document (PDF/DOCX/PPTX/XLSX/CSV/HTML, with OCR fallback) into the
     library; returns doc_id + structure. Provide exactly one source:
@@ -623,6 +623,12 @@ async def doc_parse(
     the library — stop and read it by doc_id; do NOT pass replace= or mint a new
     id. A "passed its staging TTL" error means the attachment expired: ask the user
     to re-upload.
+
+    Markdown and images have no parser here and are refused by this call. Pass
+    store_only=true to store one as-is instead (.md / .png / .jpg / .jpeg / .gif
+    / .webp only): the response and manifest come back with kind="raw", the
+    document has no sections or digest, and doc_source reads it. Nothing is
+    estimated or queued for on that path — the budget below does not apply.
 
     Large scanned documents can take minutes to parse — longer than an MCP
     client's per-request timeout typically allows. Rather than let that surface
@@ -675,14 +681,24 @@ async def doc_parse(
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
 
+    # The raw channel's ceilings are per-type and far below the parse one, and
+    # /parse enforces them on the stream. Applying them here too is not a second
+    # copy of the numbers — it calls the same function — it just means a
+    # store_only file between the two caps is refused by a stat() instead of
+    # being read whole into this process and then 413'd.
+    raw_cap = (
+        _doc_mod._raw_max_bytes(Path(rel_path or filename or "").suffix.lower())
+        if store_only
+        else None
+    )
     if rel_path:
-        name, data = _resolve_local_doc(rel_path)
+        name, data = _resolve_local_doc(rel_path, max_bytes=raw_cap)
     else:
         try:
             data = base64.b64decode(content_b64 or "", validate=True)
         except Exception as e:
             raise ToolError(f"content_b64 is not valid base64: {e}") from e
-        if len(data) > _MAX_INLINE_DOC_BYTES:
+        if len(data) > (raw_cap or _MAX_INLINE_DOC_BYTES):
             raise ToolError(f"inline document too large: {len(data)} bytes")
         if not filename:
             raise ToolError("filename is required with content_b64 (for the extension)")
@@ -694,6 +710,7 @@ async def doc_parse(
         "extract_tables": str(extract_tables).lower(),
         "force_ocr": str(force_ocr).lower(),
         "replace": str(replace).lower(),
+        "store_only": str(store_only).lower(),
         # Declared on every call: a tool invocation is spending the agent's turn,
         # so a document that cannot finish inside it should come back as a fast
         # refusal rather than as the client's timeout.
@@ -822,6 +839,31 @@ async def doc_manifest(doc_id: str) -> Any:
     doc_not_found means it is not ingested yet (parse it). Prefer this over
     doc_digest for a presence check — a digest can lag when summaries are deferred."""
     return await _doc_get(f"/library/{doc_id}/manifest")
+
+
+@mcp.tool()
+async def doc_source(
+    doc_id: str, offset: int | None = None, limit: int | None = None
+) -> Any:
+    """Describe a document's stored original file, and optionally read its text.
+
+    For documents whose manifest says kind="raw" (markdown and images stored
+    without parsing) this is the only reader — there are no sections, digest or
+    brief to ask for. Returns doc_id, filename, media_type and size_bytes; never
+    the bytes themselves, so an image cannot arrive as base64 in your context.
+    The runtime that assembles a turn is what fetches the bytes.
+
+    Pass offset (0-based line) and/or limit (lines) to read a window of a text
+    original — for paging a markdown file too large to hold at once. Each window
+    is capped at 64 KiB of UTF-8 and cut at a line boundary; next_offset is where
+    to continue, or null at the end. Asking for a window of an image is an error.
+    """
+    params: dict[str, Any] = {}
+    if offset is not None:
+        params["offset"] = offset
+    if limit is not None:
+        params["limit"] = limit
+    return await _doc_get(f"/library/{doc_id}/source/info", params or None)
 
 
 @mcp.tool()

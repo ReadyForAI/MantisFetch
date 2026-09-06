@@ -32,7 +32,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
@@ -871,6 +872,35 @@ SUPPORTED_FORMATS = [
     "xml",
 ]
 SUPPORTED_EXTENSIONS = {f".{fmt}" for fmt in SUPPORTED_FORMATS}
+
+# The raw channel (SharedSpecs 20260708 amendment-1): formats stored as the
+# original file with no parse products at all. Reaching it needs store_only=true
+# on /parse; nothing here is ever parsed, and nothing in SUPPORTED_FORMATS is
+# ever stored raw.
+RAW_FORMATS = ["md", "png", "jpg", "jpeg", "gif", "webp"]
+RAW_EXTENSIONS = {f".{fmt}" for fmt in RAW_FORMATS}
+#: Recorded in the manifest at ingest so the byte face can answer with the media
+#: type the document was admitted as, rather than re-guessing from its name.
+RAW_MEDIA_TYPES = {
+    ".md": "text/markdown",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+#: Which raw formats have a text window on the byte face; the rest are binary.
+RAW_TEXT_EXTENSIONS = {".md"}
+# HarnessServer decides between its `stored` and `ok` terminal states on the
+# strength of these two sets not overlapping (amendment-1 M3): a format in both
+# could be admitted by either channel, and an older MantisFetch would answer
+# 2xx-parsed where the caller expected 2xx-raw. Both sets are MantisFetch's to
+# change, which makes this the one invariant no other product can defend.
+if RAW_EXTENSIONS & SUPPORTED_EXTENSIONS:
+    raise RuntimeError(
+        "raw and parsed formats must not overlap (SharedSpecs 20260708 amd-1 M3); "
+        f"both claim: {sorted(RAW_EXTENSIONS & SUPPORTED_EXTENSIONS)}"
+    )
 #: OOXML containers — zip archives, unlike the legacy OLE2 .doc/.ppt/.xls.
 _OOXML_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
 # Backward-compat: tender_cn was renamed to bid_cn to match the Bid storage directory.
@@ -1320,6 +1350,21 @@ def _restore_search_index(docs_dir: Path | None, doc_id: str | None, body: str |
         upsert_fts(docs_dir, doc_id, body or "")
     except Exception as exc:  # pragma: no cover - never mask the original failure
         logger.warning("Could not restore the search index for %s: %s", doc_id, exc)
+
+
+def _clear_search_index(docs_dir: Path, doc_id: str) -> None:
+    """Drop the document's indexed text.
+
+    An empty body deletes the row rather than storing emptiness — see
+    _restore_search_index, which relies on the same behaviour. Never raises: a
+    stale FTS row is worth a warning, not the loss of a write that succeeded.
+    """
+    try:
+        from mantisfetch_common.doc_index_store import upsert_fts  # noqa: PLC0415
+
+        upsert_fts(docs_dir, doc_id, "")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not clear the search index for %s: %s", doc_id, exc)
 
 
 def _resolve_extracted_outputs(
@@ -2154,6 +2199,29 @@ STORE_SOURCE_FILES = os.environ.get("MANTISFETCH_STORE_SOURCE_FILES", "true").lo
     "no",
 }
 
+
+def _raw_max_bytes(suffix: str) -> int:
+    """Per-type ceiling for the raw channel, in MiB like every other _MB key here.
+
+    Two keys rather than one because the two kinds of raw file have nothing to do
+    with each other: markdown goes into a model's context as text (2 MiB is
+    already ~500k tokens), while an image is a base64 attachment on one turn.
+
+    The numbers are a contract, not a local preference — AULO refuses oversize
+    uploads client-side against the same two: md 2,097,152 and image 8,388,608
+    bytes (SharedSpecs 20260708 amendment-1 M3). Read per call so a deployment
+    can lower them without a restart, like the other tunables in this file.
+    """
+    key = "MANTISFETCH_RAW_MAX_MD_MB" if suffix in RAW_TEXT_EXTENSIONS else "MANTISFETCH_RAW_MAX_IMAGE_MB"
+    default = "2" if suffix in RAW_TEXT_EXTENSIONS else "8"
+    try:
+        mib = int(os.environ.get(key, default))
+    except ValueError:
+        logger.warning("%s is not an integer; using the default %s MiB", key, default)
+        mib = int(default)
+    return max(1, mib) * 1024 * 1024
+
+
 _TABLE_ID_RE = re.compile(r"^(table-)?\d+$")
 _IMAGE_ID_RE = re.compile(r"^(IMG-)?\d{1,6}$", re.IGNORECASE)
 
@@ -2203,9 +2271,21 @@ class ParseResponse(BaseModel):
     manifest_path: str
     processing_time_sec: float
     source_ref: str | None = None
-    # "miss"     — new parse, no collision
+    # Which channel produced this document. Only "raw" means "the original file
+    # is all there is"; a caller that does not know the field, or reads
+    # "parsed", is right to expect sections. Never null — the whole point of a
+    # discriminator is that reading it cannot fail (#238).
+    kind: str = "parsed"
+    # "miss"     — new document, no collision
     # "replaced" — explicit doc_id collided and replace=true allowed overwrite
+    # "hit"      — these exact bytes are already in the library under another
+    #              doc_id (raw channel only). Advisory: the document asked for
+    #              was still created under the doc_id asked for, and
+    #              existing_doc_id names the other one. "replaced" wins the
+    #              field when both apply; existing_doc_id is set either way, so
+    #              the fact does not depend on which state won.
     dedup: str = "miss"
+    existing_doc_id: str | None = None
 
 
 class SectionInfo(BaseModel):
@@ -2231,6 +2311,11 @@ class SearchResult(BaseModel):
     doc_id: str
     filename: str
     file_type: str
+    # Set by library_search, where a hit can be a raw document and the caller
+    # needs to know before reaching for a digest that does not exist. The other
+    # constructors return parsed documents by construction — full-text search
+    # reads full.md and sections, which a raw document has neither of.
+    kind: str = "parsed"
     content_type: str = "General"
     storage_path: str | None = None
     digest: str
@@ -3558,6 +3643,10 @@ async def health():
         "version": __version__,
         "docs_dir": _mask_path(_get_docs_dir()),
         "supported_formats": SUPPORTED_FORMATS,
+        # A separate key on purpose: supported_formats means "will be parsed",
+        # and a caller that probes health before uploading must not read these
+        # as parseable. They take store_only=true instead.
+        "raw_formats": RAW_FORMATS,
     }
 
 
@@ -3652,6 +3741,325 @@ def _log_detached_endpoint_result(task: asyncio.Future) -> None:
         logger.info("Detached endpoint finished after the client disconnected")
 
 
+def _parse_tags(tags: str | None) -> list[str]:
+    """Tags arrive as a JSON array string, or as a comma-separated list."""
+    if not tags:
+        return []
+    try:
+        return json.loads(tags)
+    except json.JSONDecodeError:
+        return [t.strip() for t in tags.split(",") if t.strip()]
+
+
+def _find_doc_by_source_sha256(
+    docs_dir: Path, sha256: str, exclude_doc_id: str
+) -> str | None:
+    """The doc_id of another document holding these exact source bytes, or None.
+
+    An index scan, like /web's capture dedup — ``source_sha256`` is already an
+    index field, so no second structure has to be kept in step. Only ever
+    reported, never acted on: see the raw ingest below for why nothing is
+    merged.
+    """
+    if not sha256:
+        return None
+    for entry in _load_doc_index(docs_dir):
+        if entry.get("id") != exclude_doc_id and entry.get("source_sha256") == sha256:
+            return str(entry.get("id"))
+    return None
+
+
+async def _store_only_ingest(
+    docs_dir: Path,
+    *,
+    filename: str,
+    suffix: str,
+    scratch_path: Path,
+    total_size: int,
+    doc_id: str | None,
+    id_strategy: str | None,
+    requested_content_type: str,
+    parsed_metadata: dict[str, Any],
+    tags: str | None,
+    replace: bool,
+    will_replace: bool,
+    t_entry: float,
+) -> ParseResponse:
+    """Store an original file with no parse products at all (store_only=true).
+
+    The raw channel (SharedSpecs 20260708 amendment-1 M1): markdown and images
+    go into the library so the chat that carried them has a durable, deletable
+    place to point at, but nothing here is extracted, summarized or indexed for
+    text — the model reads the original.
+
+    Deliberately outside the parse queue. There is nothing to parse, so a
+    request here must not wait behind two OCR jobs: AULO's ingest model
+    (IRP 20260801 §2.2) is "land the bytes and answer", and an 8 MiB image
+    queued for ten minutes breaks it. The upload gate and the staged-bytes
+    accounting still apply — those bound disk, which this does consume.
+    """
+    d_id, d_id_lock = await _reserve_doc_id(docs_dir, filename, doc_id, id_strategy)
+    async with d_id_lock:
+        dedup_status = "replaced" if will_replace else "miss"
+        # Same TOCTOU recheck the parse path makes: two concurrent same-id
+        # requests both saw the id as free before either had written.
+        if doc_id:
+            exists_now = _doc_exists_anywhere(docs_dir, d_id)
+            if exists_now and not replace:
+                raise _doc_id_conflict(docs_dir, doc_id, store_only=True)
+            if exists_now and not will_replace:
+                will_replace = True
+                dedup_status = "replaced"
+
+        selected_content_type = (
+            _doc_content_type(docs_dir, d_id) if will_replace else requested_content_type
+        )
+        storage_path = _doc_storage_rel_path(d_id, selected_content_type)
+        doc_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            return await asyncio.to_thread(
+                _store_raw_serialized,
+                docs_dir,
+                doc_dir=doc_dir,
+                d_id=d_id,
+                filename=filename,
+                suffix=suffix,
+                scratch_path=scratch_path,
+                total_size=total_size,
+                parsed_metadata=parsed_metadata,
+                tags=tags,
+                selected_content_type=selected_content_type,
+                storage_path=storage_path,
+                dedup_status=dedup_status,
+                will_replace=will_replace,
+                t_entry=t_entry,
+            )
+        except HTTPException as exc:
+            _record_parse_failure(
+                doc_dir, d_id, "store", str(exc.detail),
+                docs_dir=docs_dir, replacing=will_replace,
+            )
+            raise
+        except Exception as exc:
+            _record_parse_failure(
+                doc_dir, d_id, "store", str(exc), docs_dir=docs_dir, replacing=will_replace,
+            )
+            raise HTTPException(500, f"could not store {filename}: {exc}") from exc
+
+
+def _store_raw_serialized(
+    docs_dir: Path,
+    *,
+    doc_dir: Path,
+    d_id: str,
+    will_replace: bool,
+    **write_kwargs: Any,
+) -> ParseResponse:
+    """The whole raw write, held against anything else touching this document.
+
+    ``_document_writer_lock`` rather than the caller's per-doc asyncio lock,
+    which cannot cover the other writer: a deferred summary runs in a plain
+    thread that can never take an asyncio lock, and it rewrites the same
+    directory — same ``.rollback/``, same products. Every other rewrite in this
+    file goes through ``_reversible_rewrite``, which takes this lock for exactly
+    that reason (#168); the raw path is the one that does not go through it, so
+    it takes the lock itself.
+
+    Synchronous and run in a thread, so acquiring a threading lock never blocks
+    the event loop.
+    """
+    with _document_writer_lock(docs_dir, d_id):
+        # A replacement runs under the same rollback the parse path uses (#212):
+        # the source it is about to overwrite moves aside first, and the products
+        # it is about to remove move into .rollback/. A raw document is its
+        # original file and nothing else, so the parse products of the document
+        # it replaces have to go — but only in a way a failed persist can undo,
+        # or a disk error would destroy a document that was perfectly readable a
+        # moment ago.
+        if will_replace:
+            _stash_source(doc_dir)
+        with _restore_on_failure(
+            doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
+        ):
+            # These are copied into the rollback rather than moved, because a
+            # re-parse reads some of them back. Nothing here does, and leaving
+            # them would make the result read as parsed while its manifest says
+            # raw. Removed before the persist: that is the step that can fail on
+            # a full disk, and rollback should have only these cheap renames to
+            # undo when it does.
+            for name in _OVERWRITTEN_FILES:
+                if name != "manifest.json":
+                    (doc_dir / name).unlink(missing_ok=True)
+            response = _write_raw_document(
+                docs_dir, doc_dir=doc_dir, d_id=d_id, **write_kwargs
+            )
+        # A raw ingest that succeeds clears a marker an earlier failed attempt on
+        # the same doc_id left, and drops the stash the replacement no longer
+        # needs — the same two closing steps the parse path takes, but inside the
+        # lock, because both of them move files around in this directory.
+        _clear_parse_failure(doc_dir)
+        _discard_stashed_source(doc_dir)
+        return response
+
+
+def _write_raw_document(
+    docs_dir: Path,
+    *,
+    doc_dir: Path,
+    d_id: str,
+    filename: str,
+    suffix: str,
+    scratch_path: Path,
+    total_size: int,
+    parsed_metadata: dict[str, Any],
+    tags: str | None,
+    selected_content_type: str,
+    storage_path: str,
+    dedup_status: str,
+    t_entry: float,
+) -> ParseResponse:
+    """Write the original, the manifest and the index entry, in that order.
+
+    Split out so the rollback context above reads as one transaction: everything
+    here either lands or is undone.
+    """
+    source_record = _persist_source_file(doc_dir, filename, scratch_path)
+    # Advisory only: the document the caller asked for is created either
+    # way, under the doc_id the caller asked for. Returning the other id
+    # instead would break `response.doc_id == request.doc_id` (which both
+    # AULO's mapping row and Harness's 409-as-success rely on), and sharing
+    # one doc_id across two chats would let the first session's cleanup
+    # delete the second session's attachment — this library has no
+    # reference counting (SharedSpecs 20260708 amendment-1 M5).
+    existing_doc_id = _find_doc_by_source_sha256(docs_dir, source_record["sha256"], d_id)
+    if existing_doc_id and dedup_status == "miss":
+        dedup_status = "hit"
+
+    media_type = RAW_MEDIA_TYPES[suffix]
+    created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parsed_tags = _parse_tags(tags)
+    digest = f"{filename} ({media_type}, {total_size} bytes)"
+    manifest = {
+        "doc_id": d_id,
+        # The one discriminator. Absent on the parsed side, never null.
+        "kind": "raw",
+        "filename": filename,
+        "file_type": suffix.lstrip("."),
+        # Recorded at ingest so the byte face answers with the type the
+        # document was admitted as, rather than re-guessing from its name.
+        "media_type": media_type,
+        "source": "upload",
+        "content_type": selected_content_type,
+        "storage_path": storage_path,
+        "tags": parsed_tags,
+        "total_pages": 0,
+        "section_count": 0,
+        "table_count": 0,
+        "image_count": 0,
+        "metadata": parsed_metadata,
+        "source_file": source_record,
+        # Only what exists. Listing digest/brief/full here would send every
+        # reader to four files that were never written.
+        "paths": {"source": source_record["ref"]},
+        "sections": [],
+        "provenance": {
+            "source": "upload",
+            "source_url": filename,
+            "created_at": created_at,
+            "content_hash": "",
+            # No summary worker runs for a raw document, but one may still be
+            # in flight for the parsed document this replaces; a token here
+            # is what tells it its target is gone.
+            "generation": "sha256:" + hashlib.sha256(
+                f"raw:{d_id}:{source_record['sha256']}".encode()
+            ).hexdigest(),
+            "source_kind": source_record["kind"],
+            "source_filename": source_record["filename"],
+            "source_ref": source_record["ref"],
+            "source_sha256": source_record["sha256"],
+            "source_size_bytes": source_record["size_bytes"],
+        },
+    }
+    _write_json(doc_dir / "manifest.json", manifest)
+    meta = {
+        "doc_id": d_id,
+        "filename": filename,
+        "file_type": suffix.lstrip("."),
+        "total_pages": 0,
+        "section_count": 0,
+        "table_count": 0,
+        "ocr_page_count": 0,
+        "created_at": created_at,
+        "metadata": parsed_metadata,
+        "content_type": selected_content_type,
+        "storage_path": storage_path,
+    }
+    # The text a replaced parsed document put in the library-wide FTS table is
+    # part of its state too, and nothing else here removes it: full.md and the
+    # lowercase caches are unlinked above, so file-based search stops matching,
+    # while the FTS row would go on answering with the old body. Inside the
+    # rollback context, so a failed write puts the row back.
+    _clear_search_index(docs_dir, d_id)
+    _update_doc_index(
+        docs_dir,
+        meta,
+        digest,
+        tags=parsed_tags,
+        source="upload",
+        source_url=filename,
+        content_hash="",
+        metadata=parsed_metadata,
+        source_record=source_record,
+        content_type=selected_content_type,
+        storage_path=storage_path,
+        kind="raw",
+    )
+    logger.info("stored raw document %s (%s, %d bytes)", d_id, media_type, total_size)
+    return ParseResponse(
+        doc_id=d_id,
+        filename=filename,
+        file_type=suffix.lstrip("."),
+        total_pages=0,
+        section_count=0,
+        table_count=0,
+        image_count=0,
+        ocr_page_count=0,
+        digest=digest,
+        manifest_path=f"docs/{storage_path}/manifest.json",
+        processing_time_sec=round(time.monotonic() - t_entry, 2),
+        source_ref=source_record["ref"],
+        content_type=selected_content_type,
+        storage_path=storage_path,
+        kind="raw",
+        dedup=dedup_status,
+        existing_doc_id=existing_doc_id,
+    )
+
+
+async def _reserve_doc_id(
+    docs_dir: Path,
+    filename: str,
+    doc_id: str | None,
+    id_strategy: str | None,
+) -> tuple[str, asyncio.Lock]:
+    """Atomically resolve a doc_id and reserve it via the per-doc lock dict.
+
+    Holding `_doc_id_parse_locks_guard` around resolve + insert means concurrent
+    same-explicit-id requests serialize, and concurrent source_filename uploads
+    can't both pick the same id (the second sees the first's reservation via
+    `_next_filename_doc_id`'s `in _doc_id_parse_locks` check and rolls to the
+    next candidate).
+    """
+    async with _doc_id_parse_locks_guard:
+        d_id = _resolve_doc_id(docs_dir, filename, doc_id, id_strategy)
+        d_id_lock = _doc_id_parse_locks.get(d_id)
+        if d_id_lock is None:
+            d_id_lock = asyncio.Lock()
+            _doc_id_parse_locks[d_id] = d_id_lock
+    return d_id, d_id_lock
+
+
 @app.post("/parse", response_model=ParseResponse)
 @_survives_client_disconnect
 async def api_parse_doc(
@@ -3678,6 +4086,10 @@ async def api_parse_doc(
     tags: str | None = Form(None),  # JSON array string: '["Q3","financial"]'
     metadata: str | None = Form(None),  # JSON object string
     replace: bool = Form(False),
+    # The raw channel: store the original file, run no parser. Only the formats
+    # in RAW_FORMATS may take it, and they are exactly the ones no parser here
+    # can read (SharedSpecs 20260708 amendment-1 M1).
+    store_only: bool = Form(False),
     # How long the caller can wait. The single source of truth is the caller —
     # it is the only side that knows its own timeout, so nothing here has to be
     # kept in sync with it. Omit it to accept however long the parse takes.
@@ -3692,7 +4104,28 @@ async def api_parse_doc(
     docs_dir = _get_docs_dir()
     filename = file.filename or "unknown"
     suffix = Path(filename).suffix.lower()
-    if suffix not in SUPPORTED_EXTENSIONS:
+    if store_only:
+        # store_only is a parameter and the extension is a fact; they can
+        # disagree. A parseable file asking for the raw channel is refused
+        # rather than quietly stored, because the two allow-lists not
+        # overlapping is what lets a caller decide the channel from the
+        # extension alone — and what HarnessServer's terminal state depends on.
+        if suffix not in RAW_EXTENSIONS:
+            detail = (
+                f"{suffix} is a parsed format; drop store_only to ingest it"
+                if suffix in SUPPORTED_EXTENSIONS
+                else f"store_only accepts {', '.join(sorted(RAW_EXTENSIONS))}, not {suffix or 'a file with no extension'}"
+            )
+            raise HTTPException(422, detail)
+        if not STORE_SOURCE_FILES:
+            # Otherwise the request would succeed and store nothing: a document
+            # with neither parse products nor an original.
+            raise HTTPException(
+                422,
+                "store_only needs MANTISFETCH_STORE_SOURCE_FILES=true; with source "
+                "files off there is nowhere to put the original",
+            )
+    elif suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(422, t("unsupported_format", fmt=suffix))
 
     # Run cheap form validations before _resolve_doc_id so a 422 doesn't
@@ -3717,11 +4150,7 @@ async def api_parse_doc(
     # waste disk + `_upload_sem` writing a scratch file just to be 409'd.
     will_replace = bool(doc_id and _doc_exists_anywhere(docs_dir, doc_id))
     if will_replace and not replace:
-        raise HTTPException(
-            409,
-            f"doc_id '{doc_id}' already exists in the library — read it directly by "
-            f"doc_id (doc_manifest / doc_digest). Pass replace=true only to overwrite.",
-        )
+        raise _doc_id_conflict(docs_dir, str(doc_id), store_only=store_only)
     dedup_status = "replaced" if will_replace else "miss"
 
     # Stream the upload into a scratch file so the in-memory buffer never
@@ -3733,6 +4162,10 @@ async def api_parse_doc(
     # is the durable mount where the upload would eventually land anyway.
     scratch_dir = docs_dir / ".upload-tmp"
     scratch_dir.mkdir(parents=True, exist_ok=True)
+    # The raw channel's ceiling is per-type and far below the parse one, and it
+    # is a contract AULO pre-checks against — so it has to bound the stream, not
+    # be checked after 200 MiB have landed.
+    upload_cap = _raw_max_bytes(suffix) if store_only else MAX_UPLOAD_BYTES
     async with _upload_sem:
         scratch_fd, scratch_path_str = tempfile.mkstemp(
             suffix=suffix, prefix="mantisfetch-upload-", dir=str(scratch_dir)
@@ -3750,10 +4183,10 @@ async def api_parse_doc(
                     if not chunk:
                         break
                     total_size += len(chunk)
-                    if total_size > MAX_UPLOAD_BYTES:
+                    if total_size > upload_cap:
                         raise HTTPException(
                             413,
-                            f"file too large: {total_size} bytes (max {MAX_UPLOAD_BYTES})",
+                            f"file too large: {total_size} bytes (max {upload_cap})",
                         )
                     dst.write(chunk)
             upload_ok = True
@@ -3805,6 +4238,25 @@ async def api_parse_doc(
             )
         _scratch_bytes_held += total_size
         scratch_counted = True
+
+        # Nothing below this point applies to a raw file: no parser to validate
+        # for, nothing to estimate, and no slot to wait for.
+        if store_only:
+            return await _store_only_ingest(
+                docs_dir,
+                filename=filename,
+                suffix=suffix,
+                scratch_path=scratch_path,
+                total_size=total_size,
+                doc_id=doc_id,
+                id_strategy=id_strategy,
+                requested_content_type=requested_content_type,
+                parsed_metadata=parsed_metadata,
+                tags=tags,
+                replace=replace,
+                will_replace=will_replace,
+                t_entry=t_entry,
+            )
 
         # The OOXML formats are zips. A file that is not one cannot be read as
         # one, and nothing downstream will say so: MarkItDown falls back to
@@ -3923,18 +4375,7 @@ async def api_parse_doc(
                         "or a lower max_images value."
                     ),
                 )
-        # Atomically resolve the doc_id and reserve it via the per-doc lock dict.
-        # Holding `_doc_id_parse_locks_guard` around resolve + insert means
-        # concurrent same-explicit-id requests serialize, and concurrent
-        # source_filename uploads can't both pick the same id (the second sees
-        # the first's reservation via `_next_filename_doc_id`'s
-        # `in _doc_id_parse_locks` check and rolls to the next candidate).
-        async with _doc_id_parse_locks_guard:
-            d_id = _resolve_doc_id(docs_dir, filename, doc_id, id_strategy)
-            d_id_lock = _doc_id_parse_locks.get(d_id)
-            if d_id_lock is None:
-                d_id_lock = asyncio.Lock()
-                _doc_id_parse_locks[d_id] = d_id_lock
+        d_id, d_id_lock = await _reserve_doc_id(docs_dir, filename, doc_id, id_strategy)
 
         # Lock outside _parse_sem so waiters don't burn a parse slot — otherwise
         # unrelated documents get 429'd while one same-id queue drains.
@@ -4046,13 +4487,7 @@ async def api_parse_doc(
                 summary_mode = "defer"
                 parsed_metadata.setdefault("summary_deferred_reason", "budget_declared")
 
-            # Parse tags
-            parsed_tags: list[str] = []
-            if tags:
-                try:
-                    parsed_tags = json.loads(tags)
-                except json.JSONDecodeError:
-                    parsed_tags = [t.strip() for t in tags.split(",") if t.strip()]
+            parsed_tags = _parse_tags(tags)
 
             # Resolved outside the try so the failure recorders below always have
             # a directory to write into — it is a pure path computation.
@@ -4398,6 +4833,7 @@ async def library_search(
             doc_id=d.get("id", ""),
             filename=d.get("filename", ""),
             file_type=d.get("file_type", ""),
+            kind=d.get("kind") or "parsed",
             content_type=d.get("content_type", "General"),
             storage_path=d.get("storage_path"),
             digest=d.get("digest", ""),
@@ -4830,6 +5266,9 @@ async def get_summary_status(doc_id: str):
     summary = parse_metadata.get("summary") if isinstance(parse_metadata.get("summary"), dict) else {}
     return {
         "doc_id": doc_id,
+        # A raw document has no summary and never will; without this the empty
+        # object reads as "not generated yet" and invites a POST.
+        "kind": manifest.get("kind") or "parsed",
         "summary": summary,
         "paths": manifest.get("paths") or {},
     }
@@ -4859,6 +5298,19 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
                 409,
                 f"{doc_id} is a web capture; re-run /web/capture with "
                 'summary_mode="defer" instead of retrying an upload summary',
+            )
+        # Same class of destructive rewrite, one channel further along. A raw
+        # document reconstructs as a parsed one with no sections, and this path
+        # would write digest/brief/full over it and re-index it without its
+        # kind — turning "the original file is all there is" into a document
+        # that claims to be parsed and has nothing in it. Reachable by an agent
+        # doing the obvious thing: digest 404s, so ask for a summary.
+        if _doc_kind(docs_dir, doc_id) == "raw":
+            raise HTTPException(
+                409,
+                f"{doc_id} is a raw document — it was stored, not parsed, so "
+                f"there is nothing to summarize. Read it with "
+                f"GET /library/{doc_id}/source",
             )
         tags = _load_doc_tags(docs_dir, doc_id)
         content_type = _doc_content_type(docs_dir, doc_id)
@@ -5166,6 +5618,227 @@ async def get_image_bytes(doc_id: str, image_id: str, variant: str = "rendered")
     raise HTTPException(404, f"image not found: {image_id}")
 
 
+#: One response of the text window never exceeds this. Lines are not a length:
+#: a single-line 2 MiB markdown file is legal, and paging it by line count alone
+#: would hand a model the whole thing in one call.
+RAW_TEXT_WINDOW_MAX_BYTES = 65536
+
+
+def _resolve_source_file(doc_dir: Path, manifest: dict[str, Any], doc_id: str) -> tuple[Path, str]:
+    """The stored original for a document, with the media type to serve it as.
+
+    Media type comes from the manifest for raw documents — the type the file was
+    admitted as is part of the contract, so it is recorded at ingest rather than
+    re-guessed here from a name the uploader chose.
+    """
+    source_file = manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
+    ref = source_file.get("ref") or ""
+    if not ref:
+        raise HTTPException(
+            404,
+            f"no original file stored for {doc_id} — it was ingested with "
+            f"MANTISFETCH_STORE_SOURCE_FILES off",
+        )
+    # The ref comes from the manifest rather than the URL, but resolve and
+    # contain it anyway: it is written from an uploaded filename.
+    path = (doc_dir / ref).resolve()
+    if not path.is_relative_to(doc_dir.resolve()) or not path.is_file():
+        raise HTTPException(404, f"original file missing for {doc_id}: {ref}")
+    media_type = (
+        manifest.get("media_type")
+        or mimetypes.guess_type(path.name)[0]
+        or "application/octet-stream"
+    )
+    return path, str(media_type)
+
+
+def _doc_id_conflict(docs_dir: Path, doc_id: str, *, store_only: bool) -> HTTPException:
+    """The 409 for a doc_id that is already taken.
+
+    Harness treats this as first-writer-wins success and then has to say which
+    terminal state the document reached, which it reads off ``kind``
+    (SharedSpecs 20260708 amendment-1 H1). With no kind on the body a raw
+    document that lost the race, or a retry of one already stored, is recorded
+    as parsed — and AULO only forwards attachments it believes were stored, so
+    the image never reaches the model.
+
+    Only the raw channel answers with an object. The parse channel's 409 has
+    HTTP callers reading its text, and the raw channel is new enough to have
+    none — so the shape changes where nothing depends on it, and the field
+    lands where the product that needs it is already looking.
+    """
+    if not store_only:
+        return HTTPException(
+            409,
+            f"doc_id '{doc_id}' already exists in the library — read it directly by "
+            f"doc_id (doc_manifest / doc_digest). Pass replace=true only to overwrite.",
+        )
+    kind = _doc_kind(docs_dir, doc_id)
+    return HTTPException(
+        409,
+        {
+            "error": "doc_id_exists",
+            "doc_id": doc_id,
+            # The occupant's kind, not this request's: a raw upload onto an id
+            # holding a parsed document is a parsed document that is already
+            # there, and saying otherwise would misreport the library.
+            "kind": kind,
+            "message": (
+                f"doc_id '{doc_id}' already exists in the library — read it directly "
+                f"by doc_id ({'doc_source' if kind == 'raw' else 'doc_manifest'}). "
+                f"Pass replace=true only to overwrite."
+            ),
+        },
+    )
+
+
+def _doc_kind(docs_dir: Path, doc_id: str) -> str:
+    """"raw" for a stored original, "parsed" for everything else (and for a
+    document whose manifest cannot be read — the conservative answer, since
+    every reader's default is parsed)."""
+    try:
+        manifest_path = _resolve_doc_dir(docs_dir, doc_id) / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return "raw" if isinstance(manifest, dict) and manifest.get("kind") == "raw" else "parsed"
+    except Exception:
+        return "parsed"
+
+
+def _read_manifest_or_404(doc_id: str) -> tuple[Path, dict[str, Any]]:
+    _validate_doc_id(doc_id)
+    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
+    manifest_path = doc_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise HTTPException(500, f"manifest unreadable for {doc_id}")
+    return doc_dir, manifest
+
+
+@app.get("/library/{doc_id}/source")
+async def get_source_bytes(doc_id: str):
+    """Return the stored original file, with the media type it was admitted as.
+
+    The byte face of the raw channel (SharedSpecs 20260708 amendment-1 M2): the
+    runtime assembling a turn fetches the attachment here by doc_id and puts it
+    in front of the model — markdown as text, an image as an image part. It
+    serves a parsed document's stored original on the same rule, which costs
+    nothing and saves a second endpoint; only ``kind: raw`` is contract.
+    """
+    doc_dir, manifest = _read_manifest_or_404(doc_id)
+    path, media_type = _resolve_source_file(doc_dir, manifest, doc_id)
+    # FileResponse rather than reading it here: a raw original is at most 8 MiB,
+    # but this also serves a parsed document's stored source, which can be the
+    # whole MANTISFETCH_MAX_UPLOAD_MB. Buffering that on the event loop would
+    # stall every other request on the worker.
+    return FileResponse(
+        path,
+        media_type=media_type,
+        # Same two headers the deliverables byte face sets, for the same reason:
+        # this surface is loopback-open, and a parsed document's stored original
+        # can be .html — a browser pointed at this URL would otherwise run
+        # uploaded markup in the API's own origin. Programmatic readers key off
+        # Content-Type and do not notice either header.
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'attachment; filename="{_safe_source_filename(path.name)}"',
+        },
+    )
+
+
+@app.get("/library/{doc_id}/source/info")
+async def get_source_info(
+    doc_id: str,
+    offset: int | None = Query(None, ge=0, description="0-based first line of the window"),
+    limit: int | None = Query(None, ge=1, description="how many lines"),
+):
+    """Describe the stored original, and optionally read a window of its text.
+
+    Without ``offset``/``limit`` this answers metadata only — the shape an agent
+    can afford to hold: enough to decide whether to read further, no bytes. With
+    either of them it also returns a line window of a text original, so a model
+    can page a markdown file too large to inline.
+
+    Window rules (the contract, SharedSpecs 20260708 amendment-1 M2):
+
+    - ``offset`` is a 0-based line index and defaults to 0; ``limit`` runs to the
+      end of the file.
+    - the returned text never exceeds RAW_TEXT_WINDOW_MAX_BYTES encoded as UTF-8;
+      it is cut at the last whole line that fits, and ``truncated`` says so.
+      A single line longer than the window is served cut mid-line rather than
+      empty — a paging caller must never be handed nothing and told to continue.
+      The remainder of such a line is not paged.
+    - ``next_offset`` is null once the window reached the end of the file.
+    - bytes are decoded as UTF-8 with replacement, so a U+FFFD in the text is
+      this endpoint's, not the file's.
+    - an image has no text window: asking for one is a 422, not a silent
+      metadata answer, because it almost always means the wrong doc_id.
+    """
+    doc_dir, manifest = _read_manifest_or_404(doc_id)
+    path, media_type = _resolve_source_file(doc_dir, manifest, doc_id)
+    size_bytes = path.stat().st_size
+    info: dict[str, Any] = {
+        "doc_id": doc_id,
+        "filename": manifest.get("filename") or path.name,
+        "media_type": media_type,
+        "size_bytes": size_bytes,
+        "kind": manifest.get("kind") or "parsed",
+    }
+    if offset is None and limit is None:
+        return info
+
+    # The window is a raw-channel face. A parsed document's original can be a
+    # 200 MiB .txt under MANTISFETCH_MAX_UPLOAD_MB, and reading one whole to
+    # answer with 64 KiB would stall the loop — while the thing that document
+    # actually has, and this one does not, is sections. The raw ceilings are
+    # what bound the read below.
+    if info["kind"] != "raw":
+        raise HTTPException(
+            422,
+            f"{doc_id} is a parsed document; read it with digest / brief / "
+            f"sections, or GET /library/{doc_id}/source for the original file",
+        )
+    if not media_type.startswith("text/"):
+        raise HTTPException(
+            422,
+            f"{doc_id} is {media_type} and has no text window; read it with "
+            f"GET /library/{doc_id}/source",
+        )
+
+    start = offset or 0
+    text = (await asyncio.to_thread(path.read_bytes)).decode("utf-8", errors="replace")
+    lines = text.splitlines(keepends=True)
+    window = lines[start : start + limit] if limit is not None else lines[start:]
+
+    kept: list[str] = []
+    used = 0
+    truncated = False
+    for line in window:
+        line_bytes = len(line.encode("utf-8"))
+        if used + line_bytes > RAW_TEXT_WINDOW_MAX_BYTES:
+            if not kept:
+                # Never return an empty window with more to read: the caller
+                # would ask again from the same offset forever.
+                cut = line.encode("utf-8")[:RAW_TEXT_WINDOW_MAX_BYTES]
+                kept.append(cut.decode("utf-8", errors="ignore"))
+            truncated = True
+            break
+        kept.append(line)
+        used += line_bytes
+
+    consumed = max(1, len(kept)) if window else 0
+    next_offset = start + consumed
+    info.update({
+        "text": "".join(kept),
+        "offset": start,
+        "next_offset": next_offset if next_offset < len(lines) else None,
+        "total_lines": len(lines),
+        "truncated": truncated,
+    })
+    return info
+
+
 @app.get("/library/{doc_id}/sections")
 async def list_sections(doc_id: str):
     """List all sections from manifest."""
@@ -5176,6 +5849,11 @@ async def list_sections(doc_id: str):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     return {
         "doc_id": doc_id,
+        # Unlike digest/brief/full, this one answers for a raw document: it has
+        # no sections, and an empty list is the true answer. The kind is what
+        # tells the caller that reading the original is the next move rather
+        # than that the document came out empty.
+        "kind": manifest.get("kind") or "parsed",
         "sections": manifest.get("sections", []),
     }
 

@@ -105,6 +105,8 @@ services:
 | `MANTISFETCH_OCR_EXTRA_BODY_JSON` | — | Optional JSON object merged into OCR request body |
 | `MANTISFETCH_DOCS_DIR` | `~/.mantisfetch/docs` | Document library directory |
 | `MANTISFETCH_STORE_SOURCE_FILES` | `true` | Persist uploaded source files under each document's `source/` directory |
+| `MANTISFETCH_RAW_MAX_MD_MB` | `2` | Raw-channel ceiling for markdown, in MiB (2 = 2,097,152 bytes) |
+| `MANTISFETCH_RAW_MAX_IMAGE_MB` | `8` | Raw-channel ceiling for images, in MiB (8 = 8,388,608 bytes) |
 
 #### Using a local Ollama model
 
@@ -268,6 +270,8 @@ Access documents stored by `/web/capture` and `/doc/parse`.
 | `GET` | `/doc/library/{doc_id}/summary` | Summary status (poll after a deferred parse) |
 | `POST` | `/doc/library/{doc_id}/summary` | (Re)schedule or retry summary generation |
 | `GET` | `/doc/library/{doc_id}/manifest` | Provenance metadata (source, timestamps, content hash) |
+| `GET` | `/doc/library/{doc_id}/source` | The stored original file, served as the media type it was admitted as |
+| `GET` | `/doc/library/{doc_id}/source/info` | Original-file metadata (no bytes); `offset`/`limit` read a line window of a text original |
 
 #### MCP
 
@@ -281,6 +285,9 @@ DocReader notes:
 - `POST /doc/parse` also accepts an optional `doc_id` form field. Valid values may contain letters, digits, and internal hyphens, for example `DOC-001`, `NBS250321`, or `doc001`. Reusing an existing `doc_id` returns `409` unless `replace=true`.
 - `POST /doc/parse` accepts `summary_mode` (`sync` / `defer` / `off`); with `defer`, the summary is generated in the background — poll `GET /doc/library/{doc_id}/summary` for status, and `POST` the same path to retry a failed one.
 - `POST /doc/parse` accepts `parse_mode` (`fast` / `accurate` / `full`, default `accurate`) to tune PDF parsing intensity vs. cost.
+- `POST /doc/parse` accepts `store_only=true` for the **raw channel**: `md` and `png/jpg/jpeg/gif/webp` are stored as the original file with no parse products at all, and read back via `/doc/library/{doc_id}/source`. The response and manifest carry `kind: "raw"` (parsed documents read `"parsed"`), as do search hits, the sections listing and summary status; such documents 404 on digest/brief/full, 409 on a summary retry, and do not appear in `search_text`. `GET /doc/health` lists the channel's formats as `raw_formats`. A `409` on this channel returns an object under `detail` carrying the existing document's `kind`; the parse channel's `409` is unchanged. The raw and parsed format sets never overlap — a parseable extension asking for `store_only` is a `422`. Requires `MANTISFETCH_STORE_SOURCE_FILES=true`.
+- `POST /doc/parse` reports duplicate content on the raw channel as `dedup: "hit"` plus `existing_doc_id`, and still creates the document under the `doc_id` the caller asked for — nothing is merged.
+- `GET /doc/library/search` results carry `kind` as well, so a caller can tell a raw hit from a parsed one before reaching for a digest.
 - `GET /doc/library/{doc_id}/table/{table_id}/json` returns structured cells; for tables reconstructed from scanned pages, merged cells now carry a recovered `colspan` (the Markdown form is unchanged).
 - `POST /doc/parse` and `POST /web/capture` accept `content_type`, one of `General`, `Contract`, `Bid`, or `Knowledge` (case-insensitive on input; persisted in title case); the default is `General`.
 - New ingested documents are stored under `${MANTISFETCH_DOCS_DIR}/<content_type>/<doc_id>`, while legacy flat `${MANTISFETCH_DOCS_DIR}/<doc_id>` documents remain readable.
@@ -461,6 +468,8 @@ services:
 | `MANTISFETCH_OCR_EXTRA_BODY_JSON` | — | 可选：合并到 OCR 请求体中的 JSON 对象 |
 | `MANTISFETCH_DOCS_DIR` | `~/.mantisfetch/docs` | 文档库存储目录 |
 | `MANTISFETCH_STORE_SOURCE_FILES` | `true` | 是否将上传原件保存在每个文档目录下的 `source/` 子目录 |
+| `MANTISFETCH_RAW_MAX_MD_MB` | `2` | 原件通道 markdown 上限，单位 MiB（2 = 2,097,152 字节） |
+| `MANTISFETCH_RAW_MAX_IMAGE_MB` | `8` | 原件通道图片上限，单位 MiB（8 = 8,388,608 字节） |
 
 #### 使用本地 Ollama 模型
 
@@ -610,6 +619,8 @@ MANTISFETCH_OCR_MODEL_FALLBACK=deepseek/deepseek-chat
 | `GET` | `/doc/library/{doc_id}/summary` | 摘要状态（延迟解析后轮询） |
 | `POST` | `/doc/library/{doc_id}/summary` | （重新）调度或重试摘要生成 |
 | `GET` | `/doc/library/{doc_id}/manifest` | 来源元数据（来源地址、时间戳、内容哈希） |
+| `GET` | `/doc/library/{doc_id}/source` | 入库原件字节，按入库时记录的 media type 返回 |
+| `GET` | `/doc/library/{doc_id}/source/info` | 原件元数据（不返字节）；带 `offset`/`limit` 时返回文本原件的行窗口 |
 
 #### MCP
 
@@ -623,6 +634,9 @@ DocReader 补充说明：
 - `POST /doc/parse` 也支持可选 `doc_id` 表单字段；合法值可包含字母、数字和中间连字符，例如 `DOC-001`、`NBS250321`、`doc001`。复用已有 `doc_id` 会返回 `409`，除非 `replace=true`。
 - `POST /doc/parse` 支持 `summary_mode`（`sync` / `defer` / `off`）；用 `defer` 时摘要在后台生成 —— 轮询 `GET /doc/library/{doc_id}/summary` 查看状态，`POST` 同一路径可重试失败的摘要。
 - `POST /doc/parse` 支持 `parse_mode`（`fast` / `accurate` / `full`，默认 `accurate`），用于在 PDF 解析强度与成本间权衡。
+- `POST /doc/parse` 支持 `store_only=true` 走**原件通道**：`md` 与 `png/jpg/jpeg/gif/webp` 只存原件、完全不解析，通过 `/doc/library/{doc_id}/source` 读回。响应与 manifest 带 `kind: "raw"`（解析文档为 `"parsed"`），搜索命中、sections 列举、摘要状态同样带；这类文档在 digest/brief/full 上 404、摘要重试上 409，也不会出现在 `search_text` 结果里。`GET /doc/health` 以 `raw_formats` 列出本通道的格式。本通道的 `409` 在 `detail` 里返回对象、带上已有文档的 `kind`；解析通道的 `409` 不变。原件与解析两套扩展名集合互不相交 —— 可解析的扩展名带 `store_only` 会返回 `422`。要求 `MANTISFETCH_STORE_SOURCE_FILES=true`。
+- 原件通道遇到内容重复时返回 `dedup: "hit"` 与 `existing_doc_id`，但仍按调用方给的 `doc_id` 建文档 —— 只告知，不合并。
+- `GET /doc/library/search` 的结果也带 `kind`，调用方在去要 digest 之前就能分辨原件文档与解析文档。
 - `GET /doc/library/{doc_id}/table/{table_id}/json` 返回结构化单元格；对从扫描页重建的表格，合并单元格现在带恢复的 `colspan`（Markdown 形式不变）。
 - `POST /doc/parse` 和 `POST /web/capture` 支持 `content_type`，可选值为 `General`、`Contract`、`Bid`、`Knowledge`（输入大小写不敏感，存储统一为首字母大写）；默认 `General`。
 - 新入库文档会保存到 `${MANTISFETCH_DOCS_DIR}/<content_type>/<doc_id>`，旧版平铺的 `${MANTISFETCH_DOCS_DIR}/<doc_id>` 文档仍可读取。

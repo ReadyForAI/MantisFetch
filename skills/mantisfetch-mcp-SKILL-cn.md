@@ -150,7 +150,7 @@ capture 正文，snippet 会原样带出页面文字。
 
 | 工具 | 用途 | 关键参数 |
 | ---- | ---- | -------- |
-| `doc_parse` | 解析文档入库；返回 `doc_id` + 结构。 | `rel_path?` **xor** `content_b64?`、`filename?`、`content_type="General"`、`generate_summary=true`、`extract_tables=true`、`force_ocr=false`、`tags?`、`doc_id?`、`replace=false` |
+| `doc_parse` | 解析文档入库；返回 `doc_id` + 结构。带 `store_only=true` 则改为原样入库（不解析、`kind: "raw"`，用 `doc_source` 读回），仅限 `.md` 与图片。 | `rel_path?` **xor** `content_b64?`、`filename?`、`content_type="General"`、`generate_summary=true`、`extract_tables=true`、`force_ocr=false`、`tags?`、`doc_id?`、`replace=false`、`store_only=false` |
 | `doc_digest` | Digest 级（~200 tokens）：最便宜的概览。 | `doc_id` |
 | `doc_brief` | Brief 级（~1.5k tokens）：section 标题 + 片段。 | `doc_id` |
 | `doc_sections` | 列出 sections（sid + 标题）以做定向检索。 | `doc_id` |
@@ -163,7 +163,11 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
 | `doc_chunks` | 面向下游 RAG 的检索友好分块。 | `doc_id`、`include_text=false` |
 | `doc_manifest` | provenance manifest（来源、hash、时间戳）。 | `doc_id` |
+| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面 —— 只返元数据，不返字节。带 `offset`/`limit` 分页读文本原件：0 起行号、单窗口 64 KiB、`next_offset` 续读。对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
 | `doc_summary` | 文档的三级生成摘要 / 状态。 | `doc_id` |
+
+manifest 里 `kind` 为 `"raw"` 的文档没有 digest / brief / sections / 全文 ——
+`doc_source` 是它唯一的读取面，`doc_search_text` 也看不到它。
 
 解析参数、OCR 策略、分类文档库布局、搜索过滤项见
 [文档解析 Skill](./mantisfetch-docreader-SKILL-cn.md)。`doc_table` 用 `fmt="json"` 返回结构化单元格，

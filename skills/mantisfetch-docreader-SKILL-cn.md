@@ -124,13 +124,15 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
   "ok": true,
   "version": "1.0.0",
   "docs_dir": "~/.mantisfetch/docs",
-  "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"]
+  "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"],
+  "raw_formats": ["md", "png", "jpg", "jpeg", "gif", "webp"]
 }
 ```
 
 说明：
 - `docs_dir` 会显示脱敏后的路径（家目录以 `~` 表示），这是有意为之的安全设计
 - `supported_formats` 包括 PDF、Office、CSV、HTML、文本、JSON、JSONL、XML；`.doc` 和 `.ppt` 会先由服务端转换为 `.docx` / `.pptx`
+- `raw_formats` 是解析器完全读不了的那些，用 `store_only=true` 上传（见 §4.19）。两个集合永不相交
 - `.doc` / `.ppt` 支持依赖服务端已安装 LibreOffice/soffice；Docker 镜像默认包含转换组件
 - 文档解析由 [MarkItDown](https://github.com/microsoft/markitdown)（Microsoft）驱动
 
@@ -165,6 +167,7 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
 | `concurrency`         | int    | `3`        | OCR/摘要并发度 |
 | `tags`                | string | null       | 标签，支持 JSON 数组（`'["Q3","financial"]'`）或逗号分隔（`"Q3,financial"`） |
 | `metadata`            | string | null       | 自定义 metadata（JSON object）。会写入 manifest；浅层标量字段会进入索引。 |
+| `store_only`          | bool   | `false`    | 原件通道：只存原件、完全不解析。仅 `.md` 与 `.png/.jpg/.jpeg/.gif/.webp` 可用 —— 见 §4.19 |
 
 调用示例：
 
@@ -257,6 +260,7 @@ curl -X POST http://localhost:9898/doc/parse \
 - `metadata` 必须是 JSON object；嵌套对象会保留在 manifest 中，而浅层标量字段可用于 `/doc/library/search` 过滤
 - `source_ref` 指向文档目录内保存的上传原件，前提是 `MANTISFETCH_STORE_SOURCE_FILES=true`
 - 大文件（100+ 页 PDF）解析可能需要 30–60 秒，Agent 应设置更长的超时
+- 响应带 `kind`：有章节的一律 `"parsed"`，`store_only` 入库的是 `"raw"`。判别请读这个字段，别用 `section_count == 0` 推
 
 ### 4.3 搜索文档库
 
@@ -511,6 +515,56 @@ table_id 格式：`"01"` 或 `"table-01"`。
 {"doc_id": "DOC-010", "sections": [{"sid": "a3f8e1b902cd", "content": "# Executive Summary\n\n..."}], "missing": ["unknown_sid"]}
 ```
 
+### 4.19 原件通道 —— 只存原件、不解析
+
+Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /doc/parse` 带
+`store_only=true` 会把文件存下来、写一份 manifest，仅此而已。不抽取、不摘要、
+不进全文索引 —— 由模型直接读原件。
+
+- **允许集**：`.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp` —— `GET /doc/health`
+  也会以 `raw_formats` 给出，与解析通道读的 `supported_formats` 并列。别的都不行，解析
+  通道收的扩展名也不行：`.pdf` 带 `store_only=true` 会返回 `422` —— 于是「走哪条
+  通道」只由扩展名决定。
+- **上限**：markdown 2 MiB（2,097,152 字节），图片 8 MiB（8,388,608），来自
+  `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`。超了是 `413`。
+- **要求** `MANTISFETCH_STORE_SOURCE_FILES=true`；否则返回 `422`，而不是存出一个
+  既无产物又无原件的空文档。
+- **原件文档没有任何解析产物。** `digest` / `brief` / `full` 返回 `404`；
+  `sections` 返回 `200`，带 `kind: "raw"` 与空列表（它是列举端点，「没有」就是
+  正确答案）；`POST .../summary` 返回 `409` —— 没有可摘要的东西，而那条重试路径
+  会把文档改写成解析文档。`search_text` 看不到它。manifest、解析响应、搜索命中、
+  sections 列举、摘要状态都带 `kind`。
+- **内容重复只告知、不合并**：`dedup: "hit"` 并带 `existing_doc_id` 指出另一份。
+  你要的文档仍然按你给的 `doc_id` 建出来。
+- **原件通道的 `409` 返回对象而不是消息字符串**：`detail` 里是
+  `{"error": "doc_id_exists", "doc_id", "kind", "message"}`。`kind` 是**已占位那份**
+  的 —— 先写者赢，输的一方仍然要记录这个文档最终落在哪个状态。解析通道的 409 不变。
+- 删除与解析文档完全一致，原件一并删掉。
+- `GET /doc/library/search` 的命中项也带 `kind`，「先搜再读 digest」这条惯用流程
+  可以在去要一个并不存在的 digest 之前先分支。
+
+读回来：
+
+- `GET /doc/library/{doc_id}/source` —— 原件字节，按入库时记录的 media type 返回。
+  运行时就是用它把附件送到模型面前（md 作文本、图片作 image part）。
+- `GET /doc/library/{doc_id}/source/info` —— 只返元数据：`doc_id`、`filename`、
+  `media_type`、`size_bytes`、`kind`。不返字节，图片不会以 base64 落进 Agent 上下文。
+- `GET /doc/library/{doc_id}/source/info?offset=0&limit=200` —— **文本**原件的行
+  窗口，用于分页读大 md。`offset` 是 0 起的行号（缺省 0），`limit` 不给则读到文件
+  末尾。单次窗口按 UTF-8 封顶 64 KiB 并在行边界截断；`truncated` 说明是否触顶，
+  `next_offset` 是续读位置（读完为 `null`）。单行超过窗口时会从行中间截断返回 ——
+  该行剩余部分不再分页。对图片要窗口是 `422`；对**解析文档**要窗口也是 `422` ——
+  它有 sections，而它的原件可能有 200 MiB。
+
+```bash
+curl -X POST http://localhost:9898/doc/parse \
+  -F "file=@notes.md" -F "store_only=true"
+# {"doc_id":"DOC-042","kind":"raw","section_count":0,"source_ref":"source/notes.md", ...}
+
+curl http://localhost:9898/doc/library/DOC-042/source          # 原件字节
+curl "http://localhost:9898/doc/library/DOC-042/source/info?limit=200"   # 行窗口
+```
+
 ---
 
 ## 5. 文档库目录结构
@@ -651,8 +705,10 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 
 | Error                                              | Cause                          | Solution |
 | -------------------------------------------------- | ------------------------------ | -------- |
-| `422 unsupported format`                           | 上传了不支持的文件格式         | 通过 `/doc/health` 的 `supported_formats` 检查当前支持格式 |
+| `422 unsupported format`                           | 上传了不支持的文件格式         | 查 `/doc/health`：`supported_formats` 会解析，`raw_formats` 要带 `store_only=true` |
 | `409 doc_id already exists`                         | 显式 `doc_id` 与已有文档冲突   | 传 `replace=true` 覆盖，或不传 `doc_id` 取新 id |
+| `422 <ext> is a parsed format; drop store_only`     | 可解析的扩展名要走原件通道     | 去掉 `store_only`；通道由扩展名决定 |
+| `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | 原件通道没地方放原件 | 该部署打开原件保存 |
 | `409 summary already running` / `attempt limit reached` | 并发/重复调用 `POST .../summary` | 改为轮询 `GET .../summary`；只有必须覆盖时才传 `force=true` |
 | `429 too many concurrent parse requests`           | 解析门在整个队列上限（默认 600s）内都没空出槽——服务器是真的饱和了，不是一时忙 | 按 `Retry-After` 给的秒数等待后重试。一般规模的突发会排队通过 |
 | `429 parse queue is holding N bytes`               | 排队中的上传占用的磁盘超过了队列允许的量 | 等待后重试；排队中的解析会一直把上传留在盘上，队列排空后自然恢复 |
