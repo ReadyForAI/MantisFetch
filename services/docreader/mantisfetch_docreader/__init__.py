@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
@@ -1349,6 +1350,21 @@ def _restore_search_index(docs_dir: Path | None, doc_id: str | None, body: str |
         upsert_fts(docs_dir, doc_id, body or "")
     except Exception as exc:  # pragma: no cover - never mask the original failure
         logger.warning("Could not restore the search index for %s: %s", doc_id, exc)
+
+
+def _clear_search_index(docs_dir: Path, doc_id: str) -> None:
+    """Drop the document's indexed text.
+
+    An empty body deletes the row rather than storing emptiness — see
+    _restore_search_index, which relies on the same behaviour. Never raises: a
+    stale FTS row is worth a warning, not the loss of a write that succeeded.
+    """
+    try:
+        from mantisfetch_common.doc_index_store import upsert_fts  # noqa: PLC0415
+
+        upsert_fts(docs_dir, doc_id, "")
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not clear the search index for %s: %s", doc_id, exc)
 
 
 def _resolve_extracted_outputs(
@@ -3627,6 +3643,10 @@ async def health():
         "version": __version__,
         "docs_dir": _mask_path(_get_docs_dir()),
         "supported_formats": SUPPORTED_FORMATS,
+        # A separate key on purpose: supported_formats means "will be parsed",
+        # and a caller that probes health before uploading must not read these
+        # as parseable. They take store_only=true instead.
+        "raw_formats": RAW_FORMATS,
     }
 
 
@@ -3803,42 +3823,23 @@ async def _store_only_ingest(
         doc_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
         doc_dir.mkdir(parents=True, exist_ok=True)
         try:
-            # A replacement runs under the same rollback the parse path uses
-            # (#212): the source it is about to overwrite moves aside first, and
-            # the products it is about to remove move into .rollback/. A raw
-            # document is its original file and nothing else, so the parse
-            # products of the document it replaces have to go — but only in a way
-            # a failed persist can undo, or a disk error would destroy a document
-            # that was perfectly readable a moment ago.
-            if will_replace:
-                await asyncio.to_thread(_stash_source, doc_dir)
-            with _restore_on_failure(
-                doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
-            ):
-                # These are copied into the rollback rather than moved, because a
-                # re-parse reads some of them back. Nothing here does, and leaving
-                # them would make the result read as parsed while its manifest
-                # says raw. Removed before the persist: that is the step that can
-                # fail on a full disk, and rollback should have only these cheap
-                # renames to undo when it does.
-                for name in _OVERWRITTEN_FILES:
-                    if name != "manifest.json":
-                        (doc_dir / name).unlink(missing_ok=True)
-                return await _write_raw_document(
-                    docs_dir,
-                    doc_dir=doc_dir,
-                    d_id=d_id,
-                    filename=filename,
-                    suffix=suffix,
-                    scratch_path=scratch_path,
-                    total_size=total_size,
-                    parsed_metadata=parsed_metadata,
-                    tags=tags,
-                    selected_content_type=selected_content_type,
-                    storage_path=storage_path,
-                    dedup_status=dedup_status,
-                    t_entry=t_entry,
-                )
+            return await asyncio.to_thread(
+                _store_raw_serialized,
+                docs_dir,
+                doc_dir=doc_dir,
+                d_id=d_id,
+                filename=filename,
+                suffix=suffix,
+                scratch_path=scratch_path,
+                total_size=total_size,
+                parsed_metadata=parsed_metadata,
+                tags=tags,
+                selected_content_type=selected_content_type,
+                storage_path=storage_path,
+                dedup_status=dedup_status,
+                will_replace=will_replace,
+                t_entry=t_entry,
+            )
         except HTTPException as exc:
             _record_parse_failure(
                 doc_dir, d_id, "store", str(exc.detail),
@@ -3852,7 +3853,62 @@ async def _store_only_ingest(
             raise HTTPException(500, f"could not store {filename}: {exc}") from exc
 
 
-async def _write_raw_document(
+def _store_raw_serialized(
+    docs_dir: Path,
+    *,
+    doc_dir: Path,
+    d_id: str,
+    will_replace: bool,
+    **write_kwargs: Any,
+) -> ParseResponse:
+    """The whole raw write, held against anything else touching this document.
+
+    ``_document_writer_lock`` rather than the caller's per-doc asyncio lock,
+    which cannot cover the other writer: a deferred summary runs in a plain
+    thread that can never take an asyncio lock, and it rewrites the same
+    directory — same ``.rollback/``, same products. Every other rewrite in this
+    file goes through ``_reversible_rewrite``, which takes this lock for exactly
+    that reason (#168); the raw path is the one that does not go through it, so
+    it takes the lock itself.
+
+    Synchronous and run in a thread, so acquiring a threading lock never blocks
+    the event loop.
+    """
+    with _document_writer_lock(docs_dir, d_id):
+        # A replacement runs under the same rollback the parse path uses (#212):
+        # the source it is about to overwrite moves aside first, and the products
+        # it is about to remove move into .rollback/. A raw document is its
+        # original file and nothing else, so the parse products of the document
+        # it replaces have to go — but only in a way a failed persist can undo,
+        # or a disk error would destroy a document that was perfectly readable a
+        # moment ago.
+        if will_replace:
+            _stash_source(doc_dir)
+        with _restore_on_failure(
+            doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
+        ):
+            # These are copied into the rollback rather than moved, because a
+            # re-parse reads some of them back. Nothing here does, and leaving
+            # them would make the result read as parsed while its manifest says
+            # raw. Removed before the persist: that is the step that can fail on
+            # a full disk, and rollback should have only these cheap renames to
+            # undo when it does.
+            for name in _OVERWRITTEN_FILES:
+                if name != "manifest.json":
+                    (doc_dir / name).unlink(missing_ok=True)
+            response = _write_raw_document(
+                docs_dir, doc_dir=doc_dir, d_id=d_id, **write_kwargs
+            )
+        # A raw ingest that succeeds clears a marker an earlier failed attempt on
+        # the same doc_id left, and drops the stash the replacement no longer
+        # needs — the same two closing steps the parse path takes, but inside the
+        # lock, because both of them move files around in this directory.
+        _clear_parse_failure(doc_dir)
+        _discard_stashed_source(doc_dir)
+        return response
+
+
+def _write_raw_document(
     docs_dir: Path,
     *,
     doc_dir: Path,
@@ -3873,9 +3929,7 @@ async def _write_raw_document(
     Split out so the rollback context above reads as one transaction: everything
     here either lands or is undone.
     """
-    source_record = await asyncio.to_thread(
-        _persist_source_file, doc_dir, filename, scratch_path
-    )
+    source_record = _persist_source_file(doc_dir, filename, scratch_path)
     # Advisory only: the document the caller asked for is created either
     # way, under the doc_id the caller asked for. Returning the other id
     # instead would break `response.doc_id == request.doc_id` (which both
@@ -3883,9 +3937,7 @@ async def _write_raw_document(
     # one doc_id across two chats would let the first session's cleanup
     # delete the second session's attachment — this library has no
     # reference counting (SharedSpecs 20260708 amendment-1 M5).
-    existing_doc_id = await asyncio.to_thread(
-        _find_doc_by_source_sha256, docs_dir, source_record["sha256"], d_id
-    )
+    existing_doc_id = _find_doc_by_source_sha256(docs_dir, source_record["sha256"], d_id)
     if existing_doc_id and dedup_status == "miss":
         dedup_status = "hit"
 
@@ -3948,8 +4000,13 @@ async def _write_raw_document(
         "content_type": selected_content_type,
         "storage_path": storage_path,
     }
-    await asyncio.to_thread(
-        _update_doc_index,
+    # The text a replaced parsed document put in the library-wide FTS table is
+    # part of its state too, and nothing else here removes it: full.md and the
+    # lowercase caches are unlinked above, so file-based search stops matching,
+    # while the FTS row would go on answering with the old body. Inside the
+    # rollback context, so a failed write puts the row back.
+    _clear_search_index(docs_dir, d_id)
+    _update_doc_index(
         docs_dir,
         meta,
         digest,
@@ -3963,11 +4020,6 @@ async def _write_raw_document(
         storage_path=storage_path,
         kind="raw",
     )
-    # A raw ingest that succeeds clears a marker an earlier failed attempt on
-    # the same doc_id left, and drops the stash the replacement no longer
-    # needs — the same two closing steps the parse path takes.
-    _clear_parse_failure(doc_dir)
-    _discard_stashed_source(doc_dir)
     logger.info("stored raw document %s (%s, %d bytes)", d_id, media_type, total_size)
     return ParseResponse(
         doc_id=d_id,
@@ -5223,6 +5275,9 @@ async def get_summary_status(doc_id: str):
     summary = parse_metadata.get("summary") if isinstance(parse_metadata.get("summary"), dict) else {}
     return {
         "doc_id": doc_id,
+        # A raw document has no summary and never will; without this the empty
+        # object reads as "not generated yet" and invites a POST.
+        "kind": manifest.get("kind") or "parsed",
         "summary": summary,
         "paths": manifest.get("paths") or {},
     }
@@ -5252,6 +5307,19 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
                 409,
                 f"{doc_id} is a web capture; re-run /web/capture with "
                 'summary_mode="defer" instead of retrying an upload summary',
+            )
+        # Same class of destructive rewrite, one channel further along. A raw
+        # document reconstructs as a parsed one with no sections, and this path
+        # would write digest/brief/full over it and re-index it without its
+        # kind — turning "the original file is all there is" into a document
+        # that claims to be parsed and has nothing in it. Reachable by an agent
+        # doing the obvious thing: digest 404s, so ask for a summary.
+        if _doc_kind(docs_dir, doc_id) == "raw":
+            raise HTTPException(
+                409,
+                f"{doc_id} is a raw document — it was stored, not parsed, so "
+                f"there is nothing to summarize. Read it with "
+                f"GET /library/{doc_id}/source",
             )
         tags = _load_doc_tags(docs_dir, doc_id)
         content_type = _doc_content_type(docs_dir, doc_id)
@@ -5593,6 +5661,18 @@ def _resolve_source_file(doc_dir: Path, manifest: dict[str, Any], doc_id: str) -
     return path, str(media_type)
 
 
+def _doc_kind(docs_dir: Path, doc_id: str) -> str:
+    """"raw" for a stored original, "parsed" for everything else (and for a
+    document whose manifest cannot be read — the conservative answer, since
+    every reader's default is parsed)."""
+    try:
+        manifest_path = _resolve_doc_dir(docs_dir, doc_id) / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return "raw" if isinstance(manifest, dict) and manifest.get("kind") == "raw" else "parsed"
+    except Exception:
+        return "parsed"
+
+
 def _read_manifest_or_404(doc_id: str) -> tuple[Path, dict[str, Any]]:
     _validate_doc_id(doc_id)
     doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
@@ -5617,7 +5697,11 @@ async def get_source_bytes(doc_id: str):
     """
     doc_dir, manifest = _read_manifest_or_404(doc_id)
     path, media_type = _resolve_source_file(doc_dir, manifest, doc_id)
-    return Response(content=path.read_bytes(), media_type=media_type)
+    # FileResponse rather than reading it here: a raw original is at most 8 MiB,
+    # but this also serves a parsed document's stored source, which can be the
+    # whole MANTISFETCH_MAX_UPLOAD_MB. Buffering that on the event loop would
+    # stall every other request on the worker.
+    return FileResponse(path, media_type=media_type)
 
 
 @app.get("/library/{doc_id}/source/info")
@@ -5722,6 +5806,11 @@ async def list_sections(doc_id: str):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     return {
         "doc_id": doc_id,
+        # Unlike digest/brief/full, this one answers for a raw document: it has
+        # no sections, and an empty list is the true answer. The kind is what
+        # tells the caller that reading the original is the next move rather
+        # than that the document came out empty.
+        "kind": manifest.get("kind") or "parsed",
         "sections": manifest.get("sections", []),
     }
 

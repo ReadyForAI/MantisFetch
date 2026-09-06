@@ -124,13 +124,15 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
   "ok": true,
   "version": "1.0.0",
   "docs_dir": "~/.mantisfetch/docs",
-  "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"]
+  "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"],
+  "raw_formats": ["md", "png", "jpg", "jpeg", "gif", "webp"]
 }
 ```
 
 说明：
 - `docs_dir` 会显示脱敏后的路径（家目录以 `~` 表示），这是有意为之的安全设计
 - `supported_formats` 包括 PDF、Office、CSV、HTML、文本、JSON、JSONL、XML；`.doc` 和 `.ppt` 会先由服务端转换为 `.docx` / `.pptx`
+- `raw_formats` 是解析器完全读不了的那些，用 `store_only=true` 上传（见 §4.19）。两个集合永不相交
 - `.doc` / `.ppt` 支持依赖服务端已安装 LibreOffice/soffice；Docker 镜像默认包含转换组件
 - 文档解析由 [MarkItDown](https://github.com/microsoft/markitdown)（Microsoft）驱动
 
@@ -519,15 +521,19 @@ Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /d
 `store_only=true` 会把文件存下来、写一份 manifest，仅此而已。不抽取、不摘要、
 不进全文索引 —— 由模型直接读原件。
 
-- **允许集**：`.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`。别的都不行，解析
+- **允许集**：`.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp` —— `GET /doc/health`
+  也会以 `raw_formats` 给出，与解析通道读的 `supported_formats` 并列。别的都不行，解析
   通道收的扩展名也不行：`.pdf` 带 `store_only=true` 会返回 `422` —— 于是「走哪条
   通道」只由扩展名决定。
 - **上限**：markdown 2 MiB（2,097,152 字节），图片 8 MiB（8,388,608），来自
   `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`。超了是 `413`。
 - **要求** `MANTISFETCH_STORE_SOURCE_FILES=true`；否则返回 `422`，而不是存出一个
   既无产物又无原件的空文档。
-- **原件文档没有 digest / brief / full / sections** —— 这四个端点返回 `404`，
-  `search_text` 也看不到它。manifest 与解析响应里 `kind` 为 `"raw"`。
+- **原件文档没有任何解析产物。** `digest` / `brief` / `full` 返回 `404`；
+  `sections` 返回 `200`，带 `kind: "raw"` 与空列表（它是列举端点，「没有」就是
+  正确答案）；`POST .../summary` 返回 `409` —— 没有可摘要的东西，而那条重试路径
+  会把文档改写成解析文档。`search_text` 看不到它。manifest、解析响应、搜索命中、
+  sections 列举、摘要状态都带 `kind`。
 - **内容重复只告知、不合并**：`dedup: "hit"` 并带 `existing_doc_id` 指出另一份。
   你要的文档仍然按你给的 `doc_id` 建出来。
 - 删除与解析文档完全一致，原件一并删掉。
@@ -696,7 +702,7 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 
 | Error                                              | Cause                          | Solution |
 | -------------------------------------------------- | ------------------------------ | -------- |
-| `422 unsupported format`                           | 上传了不支持的文件格式         | 通过 `/doc/health` 的 `supported_formats` 检查当前支持格式 |
+| `422 unsupported format`                           | 上传了不支持的文件格式         | 查 `/doc/health`：`supported_formats` 会解析，`raw_formats` 要带 `store_only=true` |
 | `409 doc_id already exists`                         | 显式 `doc_id` 与已有文档冲突   | 传 `replace=true` 覆盖，或不传 `doc_id` 取新 id |
 | `422 <ext> is a parsed format; drop store_only`     | 可解析的扩展名要走原件通道     | 去掉 `store_only`；通道由扩展名决定 |
 | `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | 原件通道没地方放原件 | 该部署打开原件保存 |

@@ -310,6 +310,47 @@ def test_the_three_tier_readers_404_rather_than_break(client, docs_dir) -> None:
         assert client.get(f"/doc/library/{doc_id}/{tier}").status_code == 404
 
 
+def test_listing_sections_answers_with_the_kind_rather_than_a_bare_empty_list(
+    client, docs_dir
+) -> None:
+    """A listing endpoint should answer for a document that exists. "No
+    sections" is the true answer here — what an agent needs alongside it is why,
+    or an empty list reads as "this document came out empty"."""
+    doc_id = _store(client).json()["doc_id"]
+
+    body = client.get(f"/doc/library/{doc_id}/sections").json()
+    assert body["kind"] == "raw"
+    assert body["sections"] == []
+
+
+def test_a_raw_document_cannot_be_summarized(client, docs_dir) -> None:
+    """The reachable agent path: digest 404s, so ask for a summary. That handler
+    reconstructs a parsed document from storage and rewrites it — over a raw
+    document it would write digest/brief/full and re-index it without its kind.
+    The web-capture branch next to it refuses the same class of rewrite."""
+    doc_id = _store(client).json()["doc_id"]
+
+    status = client.get(f"/doc/library/{doc_id}/summary").json()
+    assert status["kind"] == "raw"  # says so before the caller reaches for POST
+
+    resp = client.post(f"/doc/library/{doc_id}/summary")
+    assert resp.status_code == 409
+    assert "stored, not parsed" in resp.json()["detail"]
+    # Still what it was.
+    assert client.get(f"/doc/library/{doc_id}/manifest").json()["kind"] == "raw"
+    assert client.get(f"/doc/library/{doc_id}/full").status_code == 404
+
+
+def test_health_advertises_the_raw_formats_separately(client) -> None:
+    """The skill tells clients to check health before uploading. Without this a
+    client sees .md missing from supported_formats and never tries store_only —
+    and merging the two lists would tell HarnessServer they get parsed."""
+    body = client.get("/doc/health").json()
+
+    assert "md" in body["raw_formats"] and "png" in body["raw_formats"]
+    assert "md" not in body["supported_formats"]
+
+
 def test_full_text_search_skips_raw_documents(client, docs_dir) -> None:
     """Recorded rather than fixed: full-text search reads full.md and sections,
     and a raw document has neither. Making it searchable would mean parsing it.
@@ -356,6 +397,12 @@ def test_replacing_a_parsed_document_leaves_no_parse_products(client, docs_dir) 
     manifest = client.get("/doc/library/DOC-901/manifest").json()
     assert manifest["kind"] == "raw"
     assert client.get("/doc/library/DOC-901/full").status_code == 404
+    # The library-wide FTS row is part of the replaced document's state too.
+    # full.md and the lowercase caches are gone, so file-based search stops
+    # matching; the row would go on answering with the old body.
+    from mantisfetch_common.doc_index_store import read_fts
+
+    assert not read_fts(docs_dir, "DOC-901")
 
 
 def test_an_explicit_doc_id_that_exists_is_still_a_conflict(client, docs_dir) -> None:
@@ -488,3 +535,58 @@ def test_the_mcp_tool_can_store_a_raw_document_too(client, docs_dir, tmp_path, m
     )
     assert out["kind"] == "raw"
     assert asyncio.run(mm.doc_source(out["doc_id"]))["media_type"] == "text/markdown"
+
+
+def test_a_raw_write_is_held_against_the_other_writer(client, docs_dir) -> None:
+    """The deferred-summary writer is a plain thread and can never take the
+    per-doc asyncio lock the request holds; it rewrites the same directory, the
+    same .rollback/, the same products. Every other rewrite here goes through
+    _reversible_rewrite, which takes the cross-thread lock for exactly that
+    reason (#168) — the raw path does not go through it, so it takes the lock
+    itself.
+
+    Asserted from inside the other holder: while the lock is held, the raw write
+    must not have landed. The timing check below is only a sanity signal; this
+    one is the claim.
+    """
+    import threading
+
+    import mantisfetch_docreader as dr
+
+    holding = threading.Event()
+    release = threading.Event()
+    seen: dict[str, object] = {}
+    doc_dir = docs_dir / "General" / "DOC-920"
+
+    def _hold() -> None:
+        with dr._document_writer_lock(docs_dir, "DOC-920"):
+            holding.set()
+            release.wait(5)
+            # Still inside the lock: nothing else may have written here.
+            manifest = doc_dir / "manifest.json"
+            seen["landed"] = (
+                json.loads(manifest.read_text()).get("kind") if manifest.exists() else None
+            )
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert holding.wait(5)
+
+    done = threading.Event()
+    result: dict[str, object] = {}
+
+    def _store_it() -> None:
+        result["status"] = _store(client, doc_id="DOC-920").status_code
+        done.set()
+
+    writer = threading.Thread(target=_store_it)
+    writer.start()
+    assert not done.wait(0.4), "the raw write did not wait for the writer lock"
+
+    release.set()
+    holder.join(5)
+    assert done.wait(5)
+    writer.join(5)
+
+    assert seen["landed"] is None, "a raw document landed while another writer held the lock"
+    assert result["status"] == 200

@@ -124,13 +124,15 @@ Response example:
   "ok": true,
   "version": "1.0.0",
   "docs_dir": "~/.mantisfetch/docs",
-  "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"]
+  "supported_formats": ["pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "html", "htm", "txt", "text", "json", "jsonl", "xml"],
+  "raw_formats": ["md", "png", "jpg", "jpeg", "gif", "webp"]
 }
 ```
 
 Notes:
 - `docs_dir` shows a masked path (`~` replaces the home directory) — this is intentional for security
 - `supported_formats` includes PDF, Office, CSV, HTML, text, JSON, JSONL, and XML; `.doc` and `.ppt` are converted server-side to `.docx` / `.pptx` before parsing
+- `raw_formats` are the ones the parser cannot read at all — upload those with `store_only=true` (§4.19). The two lists never overlap
 - `.doc` / `.ppt` support requires LibreOffice/soffice on the server; the Docker image includes the conversion components by default
 - Document parsing powered by [MarkItDown](https://github.com/microsoft/markitdown) (Microsoft)
 
@@ -520,16 +522,21 @@ Markdown and images have no parser here, so they get a channel of their own:
 and that is all. Nothing is extracted, summarized or indexed for text — the
 model reads the original.
 
-- **Allowed**: `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. Nothing else, and
+- **Allowed**: `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp` — also served by
+  `GET /doc/health` as `raw_formats`, alongside the `supported_formats` that the
+  parse channel reads. Nothing else, and
   nothing that the parse channel accepts: a `.pdf` sent with `store_only=true`
   is a `422`, so the extension alone decides the channel.
 - **Ceilings**: markdown 2 MiB (2,097,152 bytes), images 8 MiB (8,388,608), from
   `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`. Over that is a `413`.
 - **Requires** `MANTISFETCH_STORE_SOURCE_FILES=true`; without it the request is a
   `422` rather than a document with neither products nor an original.
-- **A raw document has no digest, brief, full or sections** — those four
-  endpoints answer `404`, and `search_text` does not see it. Its manifest and
-  parse response say `kind: "raw"`.
+- **A raw document has no parse products.** `digest` / `brief` / `full` answer
+  `404`; `sections` answers `200` with `kind: "raw"` and an empty list (it is a
+  listing, and "none" is the true answer); `POST .../summary` answers `409` —
+  there is nothing to summarize, and the retry path would rewrite the document
+  as a parsed one. `search_text` does not see it. Its manifest, parse response,
+  search hit, sections listing and summary status all carry `kind`.
 - **Duplicate content is reported, not merged**: `dedup: "hit"` with
   `existing_doc_id` naming the other copy. The document you asked for is still
   created under the `doc_id` you asked for.
@@ -704,7 +711,7 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 
 | Error                                              | Cause                          | Solution                                                                   |
 | -------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------- |
-| `422 unsupported format`                           | Uploaded non-supported file    | Check file format against `/doc/health` `supported_formats`               |
+| `422 unsupported format`                           | Uploaded non-supported file    | Check the format against `/doc/health`: `supported_formats` parses, `raw_formats` needs `store_only=true` |
 | `409 doc_id already exists`                         | Explicit `doc_id` collides with an existing doc | Pass `replace=true` to overwrite, or omit `doc_id` for a fresh one         |
 | `422 <ext> is a parsed format; drop store_only`     | A parseable extension asked for the raw channel | Drop `store_only`; the extension decides the channel                      |
 | `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | The raw channel has nowhere to put the original | Turn source files on for this deployment                          |
