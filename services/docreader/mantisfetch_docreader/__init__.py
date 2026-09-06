@@ -2176,7 +2176,12 @@ def _safe_filename(title: str, max_len: int = 40) -> str:
 # ═══════════════════════════════════════════
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MANTISFETCH_MAX_UPLOAD_MB", "200")) * 1024 * 1024
-
+SEARCH_LIMIT_MAX = int(os.environ.get("MANTISFETCH_SEARCH_LIMIT_MAX", "200"))
+STORE_SOURCE_FILES = os.environ.get("MANTISFETCH_STORE_SOURCE_FILES", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 
 def _raw_max_bytes(suffix: str) -> int:
@@ -2199,12 +2204,7 @@ def _raw_max_bytes(suffix: str) -> int:
         logger.warning("%s is not an integer; using the default %s MiB", key, default)
         mib = int(default)
     return max(1, mib) * 1024 * 1024
-SEARCH_LIMIT_MAX = int(os.environ.get("MANTISFETCH_SEARCH_LIMIT_MAX", "200"))
-STORE_SOURCE_FILES = os.environ.get("MANTISFETCH_STORE_SOURCE_FILES", "true").lower() not in {
-    "0",
-    "false",
-    "no",
-}
+
 
 _TABLE_ID_RE = re.compile(r"^(table-)?\d+$")
 _IMAGE_ID_RE = re.compile(r"^(IMG-)?\d{1,6}$", re.IGNORECASE)
