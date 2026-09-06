@@ -11,6 +11,25 @@ from another host. Note that a request to the published port of a *container*
 arrives from the Docker bridge — a non-loopback peer — so it is denied (403)
 without a token even from the same machine. `/health` is always exempt.
 
+**Off-host means TLS.** The token is a bearer credential: over plain http it
+travels in the clear on every request, and anything on the path can replay it
+against a surface that drives a browser and reads files. Set
+`MANTISFETCH_TLS_CERTFILE` and `MANTISFETCH_TLS_KEYFILE` (both, or neither
+takes effect) so the listener serves https, or keep the hop inside a tunnel or
+an mTLS mesh. Loopback and same-host container traffic are not affected.
+
+The same token gates `/mcp` and the REST surface, but the two gates decide in a
+different order, which is worth knowing when a call is refused:
+
+| | token set | token unset |
+|---|---|---|
+| `/mcp` | every peer must present it, **loopback included** | loopback allowed; other peers 403 |
+| `/web` `/doc` `/deliverables` | **loopback allowed without it**; other peers must present it | loopback allowed; other peers 403 |
+
+So a same-host client configured with the *wrong* token sees REST succeed and
+MCP answer 401. Send the bearer on every call — it is the only configuration
+that is correct on both faces.
+
 ## Container hardening
 
 `docker-compose.yml` runs the service with:
