@@ -165,6 +165,7 @@ GET /doc/library/search?q=revenue&tags=financial&file_type=pdf&metadata.customer
 | `concurrency`         | int    | `3`        | OCR/摘要并发度 |
 | `tags`                | string | null       | 标签，支持 JSON 数组（`'["Q3","financial"]'`）或逗号分隔（`"Q3,financial"`） |
 | `metadata`            | string | null       | 自定义 metadata（JSON object）。会写入 manifest；浅层标量字段会进入索引。 |
+| `store_only`          | bool   | `false`    | 原件通道：只存原件、完全不解析。仅 `.md` 与 `.png/.jpg/.jpeg/.gif/.webp` 可用 —— 见 §4.19 |
 
 调用示例：
 
@@ -257,6 +258,7 @@ curl -X POST http://localhost:9898/doc/parse \
 - `metadata` 必须是 JSON object；嵌套对象会保留在 manifest 中，而浅层标量字段可用于 `/doc/library/search` 过滤
 - `source_ref` 指向文档目录内保存的上传原件，前提是 `MANTISFETCH_STORE_SOURCE_FILES=true`
 - 大文件（100+ 页 PDF）解析可能需要 30–60 秒，Agent 应设置更长的超时
+- 响应带 `kind`：有章节的一律 `"parsed"`，`store_only` 入库的是 `"raw"`。判别请读这个字段，别用 `section_count == 0` 推
 
 ### 4.3 搜索文档库
 
@@ -511,6 +513,46 @@ table_id 格式：`"01"` 或 `"table-01"`。
 {"doc_id": "DOC-010", "sections": [{"sid": "a3f8e1b902cd", "content": "# Executive Summary\n\n..."}], "missing": ["unknown_sid"]}
 ```
 
+### 4.19 原件通道 —— 只存原件、不解析
+
+Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /doc/parse` 带
+`store_only=true` 会把文件存下来、写一份 manifest，仅此而已。不抽取、不摘要、
+不进全文索引 —— 由模型直接读原件。
+
+- **允许集**：`.md`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`。别的都不行，解析
+  通道收的扩展名也不行：`.pdf` 带 `store_only=true` 会返回 `422` —— 于是「走哪条
+  通道」只由扩展名决定。
+- **上限**：markdown 2 MiB（2,097,152 字节），图片 8 MiB（8,388,608），来自
+  `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`。超了是 `413`。
+- **要求** `MANTISFETCH_STORE_SOURCE_FILES=true`；否则返回 `422`，而不是存出一个
+  既无产物又无原件的空文档。
+- **原件文档没有 digest / brief / full / sections** —— 这四个端点返回 `404`，
+  `search_text` 也看不到它。manifest 与解析响应里 `kind` 为 `"raw"`。
+- **内容重复只告知、不合并**：`dedup: "hit"` 并带 `existing_doc_id` 指出另一份。
+  你要的文档仍然按你给的 `doc_id` 建出来。
+- 删除与解析文档完全一致，原件一并删掉。
+
+读回来：
+
+- `GET /doc/library/{doc_id}/source` —— 原件字节，按入库时记录的 media type 返回。
+  运行时就是用它把附件送到模型面前（md 作文本、图片作 image part）。
+- `GET /doc/library/{doc_id}/source/info` —— 只返元数据：`doc_id`、`filename`、
+  `media_type`、`size_bytes`、`kind`。不返字节，图片不会以 base64 落进 Agent 上下文。
+- `GET /doc/library/{doc_id}/source/info?offset=0&limit=200` —— **文本**原件的行
+  窗口，用于分页读大 md。`offset` 是 0 起的行号（缺省 0），`limit` 不给则读到文件
+  末尾。单次窗口按 UTF-8 封顶 64 KiB 并在行边界截断；`truncated` 说明是否触顶，
+  `next_offset` 是续读位置（读完为 `null`）。单行超过窗口时会从行中间截断返回 ——
+  该行剩余部分不再分页。对图片要窗口是 `422`。
+
+```bash
+curl -X POST http://localhost:9898/doc/parse \
+  -F "file=@notes.md" -F "store_only=true"
+# {"doc_id":"DOC-042","kind":"raw","section_count":0,"source_ref":"source/notes.md", ...}
+
+curl http://localhost:9898/doc/library/DOC-042/source          # 原件字节
+curl "http://localhost:9898/doc/library/DOC-042/source/info?limit=200"   # 行窗口
+```
+
 ---
 
 ## 5. 文档库目录结构
@@ -653,6 +695,8 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | -------------------------------------------------- | ------------------------------ | -------- |
 | `422 unsupported format`                           | 上传了不支持的文件格式         | 通过 `/doc/health` 的 `supported_formats` 检查当前支持格式 |
 | `409 doc_id already exists`                         | 显式 `doc_id` 与已有文档冲突   | 传 `replace=true` 覆盖，或不传 `doc_id` 取新 id |
+| `422 <ext> is a parsed format; drop store_only`     | 可解析的扩展名要走原件通道     | 去掉 `store_only`；通道由扩展名决定 |
+| `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | 原件通道没地方放原件 | 该部署打开原件保存 |
 | `409 summary already running` / `attempt limit reached` | 并发/重复调用 `POST .../summary` | 改为轮询 `GET .../summary`；只有必须覆盖时才传 `force=true` |
 | `429 too many concurrent parse requests`           | 解析门在整个队列上限（默认 600s）内都没空出槽——服务器是真的饱和了，不是一时忙 | 按 `Retry-After` 给的秒数等待后重试。一般规模的突发会排队通过 |
 | `429 parse queue is holding N bytes`               | 排队中的上传占用的磁盘超过了队列允许的量 | 等待后重试；排队中的解析会一直把上传留在盘上，队列排空后自然恢复 |

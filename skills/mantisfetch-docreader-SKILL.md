@@ -165,6 +165,7 @@ Request parameters:
 | `concurrency`         | int    | `3`        | OCR/summary concurrency                                                                 |
 | `tags`                | string | null       | Tags — JSON array (`'["Q3","financial"]'`) or comma-separated (`"Q3,financial"`)        |
 | `metadata`            | string | null       | Custom metadata (JSON object). Stored in manifest; shallow scalar fields are indexed.   |
+| `store_only`          | bool   | `false`    | Raw channel: store the original file and run no parser. Only `.md` and `.png/.jpg/.jpeg/.gif/.webp` may use it — see §4.19 |
 
 Call example:
 
@@ -257,6 +258,7 @@ Response example:
 - `metadata` should be a JSON object; nested objects are preserved in manifest, while shallow scalar fields are available for filtering in `/doc/library/search`
 - `source_ref` points to the stored upload inside the document directory when `MANTISFETCH_STORE_SOURCE_FILES=true`
 - Large files (100+ page PDFs) may take 30–60 seconds to parse — Agents should set a longer timeout
+- The response carries `kind`: `"parsed"` for everything with sections, `"raw"` for a `store_only` ingest. Branch on that, not on `section_count == 0`
 
 ### 4.3 Search Document Library
 
@@ -511,6 +513,54 @@ Reads several sections in one request — fewer round-trips than repeated `/sect
 {"doc_id": "DOC-010", "sections": [{"sid": "a3f8e1b902cd", "content": "# Executive Summary\n\n..."}], "missing": ["unknown_sid"]}
 ```
 
+### 4.19 Raw Channel — Store the Original, Run No Parser
+
+Markdown and images have no parser here, so they get a channel of their own:
+`POST /doc/parse` with `store_only=true` stores the file and writes a manifest,
+and that is all. Nothing is extracted, summarized or indexed for text — the
+model reads the original.
+
+- **Allowed**: `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. Nothing else, and
+  nothing that the parse channel accepts: a `.pdf` sent with `store_only=true`
+  is a `422`, so the extension alone decides the channel.
+- **Ceilings**: markdown 2 MiB (2,097,152 bytes), images 8 MiB (8,388,608), from
+  `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`. Over that is a `413`.
+- **Requires** `MANTISFETCH_STORE_SOURCE_FILES=true`; without it the request is a
+  `422` rather than a document with neither products nor an original.
+- **A raw document has no digest, brief, full or sections** — those four
+  endpoints answer `404`, and `search_text` does not see it. Its manifest and
+  parse response say `kind: "raw"`.
+- **Duplicate content is reported, not merged**: `dedup: "hit"` with
+  `existing_doc_id` naming the other copy. The document you asked for is still
+  created under the `doc_id` you asked for.
+- Deleting works exactly as for a parsed document, original included.
+
+Reading it back:
+
+- `GET /doc/library/{doc_id}/source` — the bytes, served as the media type the
+  file was admitted as. This is how a runtime puts an attachment in front of a
+  model (markdown as text, an image as an image part).
+- `GET /doc/library/{doc_id}/source/info` — metadata only: `doc_id`, `filename`,
+  `media_type`, `size_bytes`, `kind`. No bytes, so an image cannot land in an
+  agent's context as base64.
+- `GET /doc/library/{doc_id}/source/info?offset=0&limit=200` — a line window of
+  a **text** original, for paging a markdown file too large to read at once.
+  `offset` is a 0-based line index (default 0), `limit` runs to the end of the
+  file. Each window is capped at 64 KiB of UTF-8 and cut at a line boundary;
+  `truncated` says whether the cap bit, and `next_offset` is where to continue
+  (`null` at the end). A single line longer than the window comes back cut
+  mid-line — the remainder of that line is not paged. Asking for a window of an
+  image is a `422`.
+
+```bash
+curl -X POST http://localhost:9898/doc/parse \
+  -F "file=@notes.md" -F "store_only=true"
+# {"doc_id":"DOC-042","kind":"raw","section_count":0,"source_ref":"source/notes.md", ...}
+
+curl http://localhost:9898/doc/library/DOC-042/source          # the bytes
+curl "http://localhost:9898/doc/library/DOC-042/source/info?limit=200"   # a window
+```
+
 ---
 
 ## 5. Document Library Structure
@@ -653,6 +703,8 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | -------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------- |
 | `422 unsupported format`                           | Uploaded non-supported file    | Check file format against `/doc/health` `supported_formats`               |
 | `409 doc_id already exists`                         | Explicit `doc_id` collides with an existing doc | Pass `replace=true` to overwrite, or omit `doc_id` for a fresh one         |
+| `422 <ext> is a parsed format; drop store_only`     | A parseable extension asked for the raw channel | Drop `store_only`; the extension decides the channel                      |
+| `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | The raw channel has nowhere to put the original | Turn source files on for this deployment                          |
 | `409 summary already running` / `attempt limit reached` | Concurrent / repeated `POST .../summary` | Poll `GET .../summary` instead; pass `force=true` only if you must override |
 | `429 too many concurrent parse requests`           | The parse gate stayed full for the whole queue ceiling (default 600s) — the server is saturated, not merely busy | Wait the seconds in `Retry-After`, then retry. Ordinary bursts queue and succeed |
 | `429 parse queue is holding N bytes`               | Queued uploads are holding more disk than the queue may | Wait and retry; a queued parse keeps its upload staged, so this clears as the queue drains |

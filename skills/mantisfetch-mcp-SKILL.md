@@ -184,7 +184,11 @@ Notes:
 | `doc_table` | Read one extracted table (with numeric column stats). | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`) |
 | `doc_chunks` | Retrieval-friendly chunks for downstream RAG. | `doc_id`, `include_text=false` |
 | `doc_manifest` | Provenance manifest (source, hash, timestamps). | `doc_id` |
+| `doc_source` | The stored original file of a `kind: "raw"` document (markdown / image stored without parsing) — metadata only, never the bytes. Pass `offset`/`limit` to page a text original: 0-based lines, 64 KiB per window, `next_offset` to continue. A window of an image is an error. | `doc_id`, `offset?`, `limit?` |
 | `doc_summary` | The document's three-tier generated summary / status. | `doc_id` |
+
+A document whose manifest says `kind: "raw"` has no digest, brief, sections or full
+text — `doc_source` is its only reader, and `doc_search_text` does not see it.
 
 For parse parameters, OCR strategy, the categorized library layout, and search filters,
 see the [docreader skill](./mantisfetch-docreader-SKILL.md). `doc_table` with `fmt="json"`
