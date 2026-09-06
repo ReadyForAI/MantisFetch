@@ -292,7 +292,7 @@ def _allowed_doc_roots() -> list[Path]:
     return roots
 
 
-def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
+def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[str, bytes]:
     """Resolve a path relative to an allowlist root, canonicalize, and enforce
     containment. Returns (filename, bytes). Raises ToolError on escape / missing
     root. The relative arg means the model can never express an absolute host path;
@@ -319,10 +319,9 @@ def _resolve_local_doc(rel_path: str) -> tuple[str, bytes]:
             # huge resource file can't spike memory ahead of the docreader's own
             # streaming size enforcement.
             size = candidate.stat().st_size
-            if size > _doc_mod.MAX_UPLOAD_BYTES:
-                raise ToolError(
-                    f"document too large: {size} bytes (max {_doc_mod.MAX_UPLOAD_BYTES})"
-                )
+            cap = max_bytes or _doc_mod.MAX_UPLOAD_BYTES
+            if size > cap:
+                raise ToolError(f"document too large: {size} bytes (max {cap})")
             return candidate.name, candidate.read_bytes()
     # Split "resolved inside an allowed root but the file is absent" from "escaped
     # every root". The former is the expected shape when a chat attachment has
@@ -682,14 +681,24 @@ async def doc_parse(
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
 
+    # The raw channel's ceilings are per-type and far below the parse one, and
+    # /parse enforces them on the stream. Applying them here too is not a second
+    # copy of the numbers — it calls the same function — it just means a
+    # store_only file between the two caps is refused by a stat() instead of
+    # being read whole into this process and then 413'd.
+    raw_cap = (
+        _doc_mod._raw_max_bytes(Path(rel_path or filename or "").suffix.lower())
+        if store_only
+        else None
+    )
     if rel_path:
-        name, data = _resolve_local_doc(rel_path)
+        name, data = _resolve_local_doc(rel_path, max_bytes=raw_cap)
     else:
         try:
             data = base64.b64decode(content_b64 or "", validate=True)
         except Exception as e:
             raise ToolError(f"content_b64 is not valid base64: {e}") from e
-        if len(data) > _MAX_INLINE_DOC_BYTES:
+        if len(data) > (raw_cap or _MAX_INLINE_DOC_BYTES):
             raise ToolError(f"inline document too large: {len(data)} bytes")
         if not filename:
             raise ToolError("filename is required with content_b64 (for the extension)")

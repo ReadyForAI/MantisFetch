@@ -5732,7 +5732,19 @@ async def get_source_bytes(doc_id: str):
     # but this also serves a parsed document's stored source, which can be the
     # whole MANTISFETCH_MAX_UPLOAD_MB. Buffering that on the event loop would
     # stall every other request on the worker.
-    return FileResponse(path, media_type=media_type)
+    return FileResponse(
+        path,
+        media_type=media_type,
+        # Same two headers the deliverables byte face sets, for the same reason:
+        # this surface is loopback-open, and a parsed document's stored original
+        # can be .html — a browser pointed at this URL would otherwise run
+        # uploaded markup in the API's own origin. Programmatic readers key off
+        # Content-Type and do not notice either header.
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'attachment; filename="{_safe_source_filename(path.name)}"',
+        },
+    )
 
 
 @app.get("/library/{doc_id}/source/info")

@@ -624,3 +624,48 @@ def test_a_raw_write_is_held_against_the_other_writer(client, docs_dir) -> None:
 
     assert seen["landed"] is None, "a raw document landed while another writer held the lock"
     assert result["status"] == 200
+
+
+def test_the_byte_face_refuses_to_be_rendered(client, docs_dir) -> None:
+    """This surface is loopback-open and the same handler serves a parsed
+    document's stored original, which can be .html — a browser pointed here
+    would otherwise run an uploaded page in the API's own origin. The two
+    headers match the deliverables byte face."""
+    doc_id = _store(client, content=PNG, name="shot.png").json()["doc_id"]
+
+    headers = client.get(f"/doc/library/{doc_id}/source").headers
+    assert headers["x-content-type-options"] == "nosniff"
+    assert "attachment" in headers["content-disposition"]
+    assert headers["content-type"].startswith("image/png")
+
+
+def test_the_mcp_tool_applies_the_raw_ceiling_before_reading(monkeypatch, tmp_path) -> None:
+    """A store_only file between the raw ceiling and the parse cap used to be
+    read whole into the MCP process and only then 413'd by /parse."""
+    import base64
+
+    import mantisfetch_mcp as mm
+
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(tmp_path))
+    big = tmp_path / "huge.md"
+    big.write_bytes(b"#" * (3 * 1024 * 1024))  # over md's 2 MiB, under the 200 MiB parse cap
+
+    # "Before reading" is the claim, and /parse would refuse this anyway — so
+    # the test has to fail if the bytes ever reach the wire, not merely if the
+    # call raises.
+    async def _never(*a, **kw):
+        raise AssertionError("posted the file instead of refusing it on its size")
+
+    monkeypatch.setattr(mm._doc_client, "post", _never)
+
+    with pytest.raises(Exception, match="too large"):
+        asyncio.run(mm.doc_parse(rel_path="huge.md", store_only=True))
+
+    with pytest.raises(Exception, match="too large"):
+        asyncio.run(
+            mm.doc_parse(
+                content_b64=base64.b64encode(b"#" * (3 * 1024 * 1024)).decode(),
+                filename="huge.md",
+                store_only=True,
+            )
+        )
