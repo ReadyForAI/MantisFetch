@@ -25,6 +25,14 @@ class SentinelBoundary(LLMProvider):
         # and diagnostics without re-declaring every field.
         return getattr(self._inner, name)
 
+    def check_configuration(self) -> None:
+        """Delegate, do not inherit — see ``ocr_fingerprint`` below for what
+        happens when a base-class default silently answers for the wrapper."""
+        self._inner.check_configuration()
+
+    def describe_model(self, role: str = "summary") -> str:
+        return self._inner.describe_model(role)
+
     def ocr_fingerprint(self) -> str:
         """Delegate, do not inherit.
 

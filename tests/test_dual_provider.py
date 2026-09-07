@@ -453,11 +453,22 @@ def test_invalid_role_raises():
 # ── Legacy fallthrough + caching ──────────────────────────────────────────────
 
 def test_legacy_mode_when_default_slot_absent(monkeypatch):
-    """No MANTISFETCH_LLM_DEFAULT → legacy single-provider path (gemini default)."""
+    """No MANTISFETCH_LLM_DEFAULT → legacy single-provider path (gemini)."""
     from providers.gemini import GeminiProvider
 
+    # The model is explicit because nothing invents one: the legacy path used to
+    # fall back to a hardcoded gemini model that Google later stopped serving.
+    monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "test-model")
     p = get_provider("ocr")  # role ignored in legacy mode
     assert isinstance(unwrap_provider(p), GeminiProvider)
+
+
+def test_legacy_mode_without_a_model_says_which_key_to_set(monkeypatch):
+    monkeypatch.delenv("MANTISFETCH_LLM_MODEL", raising=False)
+    monkeypatch.delenv("MANTISFETCH_OCR_MODEL", raising=False)
+
+    with pytest.raises(RuntimeError, match="MANTISFETCH_LLM_MODEL"):
+        get_provider("ocr")
 
 
 def test_reset_clears_per_role_cache(monkeypatch):

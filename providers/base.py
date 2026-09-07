@@ -53,6 +53,20 @@ class LLMProvider(ABC):
             The generated summary string.
         """
 
+    def check_configuration(self) -> None:
+        """Raise if this provider cannot run as configured. Never touches the network.
+
+        Construction proves the *model* resolved; it does not prove a key was
+        supplied, because every backend opens its client lazily. So a role could
+        report healthy at boot and 401 on the first document. This is the hook
+        that answers "would a call work" using only what is already in hand.
+        """
+        return None
+
+    def describe_model(self, role: str = "summary") -> str:
+        """Model this provider would use for ``role`` — for /health and logs."""
+        return type(self).__name__
+
     def ocr_fingerprint(self) -> str:
         """What identifies this backend's OCR output, for cache validity.
 

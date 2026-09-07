@@ -207,6 +207,9 @@ def _factory_fingerprint(monkeypatch, **env):
         "GOOGLE_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
+    # A model is required now — nothing invents one — and these tests are about
+    # the fingerprint, not about that.
+    monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "text-model")
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     providers.reset_provider()
