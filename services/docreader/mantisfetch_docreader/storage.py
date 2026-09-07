@@ -186,9 +186,11 @@ def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
     try:
         from mantisfetch_common import doc_index_store as dis
 
-        docs = dis.list_documents(docs_dir)
-        if docs:
-            return docs
+        # An empty result is an answer, not a miss: the database is the index of
+        # record, and "no documents" is what an empty library looks like. Reading
+        # the JSON export instead would resurrect whatever the last delete
+        # removed on any run where the export did not get written.
+        return dis.list_documents(docs_dir)
     except Exception:
         pass
     index_path = docs_dir / "doc-index.json"

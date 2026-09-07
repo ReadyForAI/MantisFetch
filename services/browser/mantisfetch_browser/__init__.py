@@ -2562,9 +2562,8 @@ def _load_doc_index(docs_dir: Path) -> dict[str, Any] | None:
     try:
         from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-        docs = dis.list_documents(docs_dir)
-        if docs:
-            return {"version": 2, "documents": docs}
+        # An empty result is an answer, not a miss — see docreader's loader.
+        return {"version": 2, "documents": dis.list_documents(docs_dir)}
     except Exception:  # noqa: BLE001 - fall through to the JSON export
         pass
     index_path = docs_dir / "doc-index.json"

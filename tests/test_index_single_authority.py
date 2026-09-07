@@ -293,3 +293,27 @@ def test_a_summary_claim_that_cannot_be_recorded_is_given_back(docs, monkeypatch
     status = web._resolve_cached_summary(entry, docs, "General", "defer")
     assert status != "pending", "a claim nobody is working on must not read as in flight"
     assert web._read_web_summary_status(docs / "General" / "WEB-5") == "failed"
+
+
+def test_an_empty_database_is_an_answer_not_a_miss(docs, monkeypatch) -> None:
+    """Both loaders used to fall back to JSON on an empty SQLite result. With
+    the export best-effort, deleting the last document and losing the export
+    brought it back — the loader read "the database has nothing to say" where
+    the database was saying "the library is empty"."""
+    import mantisfetch_browser as web
+    from mantisfetch_docreader.storage import _delete_doc, _load_doc_index, _update_doc_index
+
+    import mantisfetch_common.doc_index_store as dis
+
+    _update_doc_index(docs, _meta(1), "d1")
+    doc_dir = docs / "General" / "DOC-1"
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    (doc_dir / "manifest.json").write_text("{}")
+
+    monkeypatch.setattr(
+        dis, "export_json", lambda d, **kw: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    assert _delete_doc(docs, "DOC-1") is True
+
+    assert _load_doc_index(docs) == []
+    assert (web._load_doc_index(docs) or {}).get("documents") == []
