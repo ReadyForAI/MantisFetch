@@ -126,12 +126,19 @@ class GeminiProvider(LLMProvider):
             except ProviderError:
                 raise
             except Exception as exc:
+                # Classify here rather than only on the last attempt: an SDK 4xx
+                # fails the same way every time, and the two retries in between
+                # were sending the same rejected request twice more.
+                typed = classify_provider_error(exc)
+                if not typed.retryable:
+                    logger.warning("Gemini summarize rejected (not retrying): %s", exc)
+                    raise typed from exc
                 if attempt < max_retries:
                     logger.warning("Gemini summarize retry (%d/%d): %s", attempt + 1, max_retries, exc)
                     time.sleep(2**attempt)
                 else:
                     logger.error("Gemini summarize failed after %d retries: %s", max_retries, exc)
-                    raise classify_provider_error(exc) from exc
+                    raise typed from exc
         raise classify_provider_error(RuntimeError("Gemini summarize exhausted retries"))
 
     def ocr(
@@ -187,12 +194,18 @@ class GeminiProvider(LLMProvider):
             except ProviderError:
                 raise
             except Exception as exc:
+                typed = classify_provider_error(exc)
+                if not typed.retryable:
+                    logger.warning(
+                        "Gemini OCR rejected for page %d (not retrying): %s", page_num, exc
+                    )
+                    raise typed from exc
                 if attempt < max_retries:
                     logger.warning("Gemini OCR retry (%d/%d) for page %d: %s", attempt + 1, max_retries, page_num, exc)
                     time.sleep(2**attempt)
                 else:
                     logger.warning("Gemini OCR failed for page %d after %d retries: %s", page_num, max_retries, exc)
-                    raise classify_provider_error(exc) from exc
+                    raise typed from exc
         raise classify_provider_error(
             RuntimeError(f"Gemini OCR exhausted retries for page {page_num}")
         )

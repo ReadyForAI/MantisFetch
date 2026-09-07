@@ -82,7 +82,33 @@ def classify_provider_error(exc: BaseException) -> ProviderError:
     return ProviderUnavailable(msg)
 
 
+def _genai_status_code(exc: BaseException) -> int | None:
+    """The HTTP status of a Google GenAI SDK error, or None if it is not one.
+
+    That SDK does not use the attribute names the others do: the HTTP status is
+    ``code``, and ``status`` holds a string like ``INVALID_ARGUMENT``. Without
+    this, every Gemini 4xx fell through to the default and was treated as a
+    retryable outage — so a bad argument or a content refusal failed over to the
+    peer provider, which is exactly what "4xx does not fail over" forbids.
+
+    Matched by type rather than by reading ``code`` off anything that has one:
+    an errno, a subprocess return code and a JSON error code are all integers in
+    the same range and none of them is an HTTP status.
+    """
+    try:
+        from google.genai.errors import APIError  # noqa: PLC0415 - optional dep
+    except Exception:  # pragma: no cover - SDK not installed
+        return None
+    if not isinstance(exc, APIError):
+        return None
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, int) else None
+
+
 def _status_code(exc: BaseException) -> int | None:
+    sdk_status = _genai_status_code(exc)
+    if sdk_status is not None:
+        return sdk_status
     for attr in ("status_code", "status"):
         val = getattr(exc, attr, None)
         if isinstance(val, int):
