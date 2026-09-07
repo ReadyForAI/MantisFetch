@@ -726,7 +726,7 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | Parsing takes too long                             | 文件较大且包含 OCR             | 先用 `generate_summary=false` 做快速提取，再单独生成摘要 |
 | Table is empty                                     | PDF 中的表格是图片或版式复杂   | 先确认正文 OCR 是否已入库；如关键表格缺失，再只对相关页使用 `ocr_pages` 或在明确接受成本时使用 `force_ocr=true` |
 | OCR 结果出现 `No image provided` 一类内容          | 视觉模型或图片输入模式不匹配   | 先检查当前 OCR 模型、vendor profile 和 OCR 图片输入模式，再决定是否重试 |
-| XLSX/CSV truncated warning in metadata             | 文件超过 `MAX_PARSE_ROWS`      | 正常现象，为安全起见大表会被截断；可检查 `metadata.truncated` |
+| XLSX 的 `metadata.large_output`                    | 转换后的表格超过 `MANTISFETCH_MAX_PARSE_ROWS × 100` 字符 | 只是提示，**没有截断任何内容** —— `metadata.output_chars` 给出实际大小。按 section 读，别直接要全文 |
 
 ---
 
