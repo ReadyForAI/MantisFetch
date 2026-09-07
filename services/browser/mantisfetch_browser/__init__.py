@@ -3864,6 +3864,9 @@ async def _capture_impl(
         if negotiate.fast_path_enabled() and not req.extract_tables:
             existing = await asyncio.to_thread(_find_capture_by_requested_url, docs_dir, req.url)
             if existing is None:
+                # Counted here so the hit counter has a denominator: a hit rate
+                # needs to know how often the ladder was climbed at all.
+                metrics.incr("capture_negotiated_attempts")
                 fast = await _capture_negotiated(req, content_type, docs_dir)
                 if fast is not None:
                     return fast

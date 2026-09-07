@@ -21,6 +21,11 @@ _counts: dict[str, int] = {
     "capture_cache_hits": 0,
     "capture_cache_misses": 0,
     "capture_content_hash_hits": 0,
+    # The markdown fast path: how often the browser was skipped entirely, and
+    # how often it was tried. incr() ignores an unknown name, so a call site
+    # without an entry here increments nothing and reads as "never happened".
+    "capture_negotiated_attempts": 0,
+    "capture_negotiated_hits": 0,
     # OCR
     "ocr_pages": 0,
     "ocr_cache_hits": 0,

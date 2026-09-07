@@ -175,8 +175,13 @@ def find_llms_link(body: str, base_url: str, target: str) -> str | None:
     return None
 
 
-async def _fetch(client, url: str, timeout_s: float) -> tuple[int, str, str] | None:
-    """GET ``url``, returning (status, content_type, body) or None if unreachable.
+async def _fetch(client, url: str, timeout_s: float) -> tuple[int, str, str, str] | None:
+    """GET ``url``, returning (status, content_type, body, final_url), or None.
+
+    ``final_url`` is where the body actually came from. Redirects are followed
+    here rather than by httpx, so it is the only place that knows: the caller
+    was recording the URL it asked for, which named a page that had redirected
+    away as the source of a body served from somewhere else.
 
     The SSRF check runs on every URL here — the requested one and each redirect
     hop — because this path does not go through the browser context's route
@@ -222,7 +227,12 @@ async def _fetch(client, url: str, timeout_s: float) -> tuple[int, str, str] | N
                 body = b"".join(chunks).decode(
                     response.encoding or "utf-8", errors="replace"
                 )
-                return response.status_code, _content_type(dict(response.headers)), body
+                return (
+                    response.status_code,
+                    _content_type(dict(response.headers)),
+                    body,
+                    url,
+                )
         except Exception:
             return None
     return None
@@ -233,8 +243,8 @@ async def _url_allowed_async(url: str) -> bool:
 
 
 def _classify(
-    result: tuple[int, str, str] | None, url: str, *, refuse_on_5xx: bool = False
-) -> tuple[str, str | None, int]:
+    result: tuple[int, str, str, str] | None, url: str, *, refuse_on_5xx: bool = False
+) -> tuple[str, str | None, int, str]:
     """('hit', body, status) | ('miss', None, status) | raises for a refused 5xx.
 
     The status travels with the body: a 201 or 203 is a hit, and reporting it as
@@ -247,19 +257,19 @@ def _classify(
     browser into a failed capture.
     """
     if result is None:
-        return "miss", None, 0
-    status, content_type, body = result
+        return "miss", None, 0, url
+    status, content_type, body, final_url = result
     if status >= 500:
         if refuse_on_5xx:
             raise NegotiationRefused(status, url)
-        return "miss", None, status
+        return "miss", None, status, final_url
     if status >= 400:
-        return "miss", None, status
+        return "miss", None, status, final_url
     if not _is_markdownish(content_type):
-        return "miss", None, status
+        return "miss", None, status, final_url
     if not body.strip():
-        return "miss", None, status
-    return "hit", body, status
+        return "miss", None, status, final_url
+    return "hit", body, status, final_url
 
 
 # The requested URL gets the caller's budget; speculative probes get this. A
@@ -276,18 +286,20 @@ async def try_fetch_markdown(url: str, *, timeout_ms: int = 10_000) -> Negotiate
     probe_s = min(_PROBE_TIMEOUT_S, timeout_s)
     async with _sem, httpx.AsyncClient() as client:
         # 1. content negotiation on the URL as given
-        outcome, body, status = _classify(
+        outcome, body, status, final_url = _classify(
             await _fetch(client, url, timeout_s), url, refuse_on_5xx=True
         )
         if outcome == "hit" and body:
-            return NegotiatedDoc(body, url, status, "negotiated")
+            return NegotiatedDoc(body, final_url, status, "negotiated")
 
         # 2. the .md path variant
         variant = md_path_variant(url)
         if variant:
-            outcome, body, status = _classify(await _fetch(client, variant, probe_s), variant)
+            outcome, body, status, final_url = _classify(
+                await _fetch(client, variant, probe_s), variant
+            )
             if outcome == "hit" and body:
-                return NegotiatedDoc(body, variant, status, "md-path")
+                return NegotiatedDoc(body, final_url, status, "md-path")
 
         # 3. llms.txt from the nearest ancestors, all probed together: a full
         #    miss is the common case, and probing them in sequence would only
@@ -308,7 +320,7 @@ async def try_fetch_markdown(url: str, *, timeout_ms: int = 10_000) -> Negotiate
         for candidate, result in zip(candidates, results, strict=True):
             if isinstance(result, BaseException):
                 continue
-            outcome, index_body, _ = _classify(result, candidate)
+            outcome, index_body, _, _index_url = _classify(result, candidate)
             if outcome != "hit" or not index_body:
                 continue
             link = find_llms_link(index_body, candidate, url)
@@ -316,8 +328,10 @@ async def try_fetch_markdown(url: str, *, timeout_ms: int = 10_000) -> Negotiate
                 continue
             # The index named this URL, which does not make it trusted: _fetch
             # runs the SSRF check on it like any other.
-            outcome, body, status = _classify(await _fetch(client, link, probe_s), link)
+            outcome, body, status, final_url = _classify(
+                await _fetch(client, link, probe_s), link
+            )
             if outcome == "hit" and body:
-                return NegotiatedDoc(body, link, status, "llms-index")
+                return NegotiatedDoc(body, final_url, status, "llms-index")
 
     return None

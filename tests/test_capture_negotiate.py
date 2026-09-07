@@ -199,34 +199,42 @@ def test_both_paths_agree_on_content_identity() -> None:
 def test_html_with_a_200_is_a_miss_not_a_hit() -> None:
     """Accept is a request header a server may ignore, and an SPA's not-found
     page is 200 + HTML. Treating it as a hit would store an error page."""
-    outcome, body, status = negotiate._classify(
-        (200, "text/html", "<html>Not found</html>"), "https://e.com/x"
+    outcome, body, status, _ = negotiate._classify(
+        (200, "text/html", "<html>Not found</html>", "https://e.com/x"), "https://e.com/x"
     )
     assert outcome == "miss" and body is None and status == 200
 
 
 @pytest.mark.parametrize("content_type", ["text/markdown", "text/x-markdown", "text/plain"])
 def test_markdown_content_types_are_hits(content_type: str) -> None:
-    outcome, body, _ = negotiate._classify((200, content_type, "# T\n\nbody"), "https://e.com/x")
+    outcome, body, _, _url = negotiate._classify(
+        (200, content_type, "# T\n\nbody", "https://e.com/x"), "https://e.com/x"
+    )
     assert outcome == "hit" and body
 
 
 def test_an_empty_body_is_a_miss() -> None:
-    outcome, _, _ = negotiate._classify((200, "text/markdown", "   \n"), "https://e.com/x")
+    outcome, _, _, _url = negotiate._classify(
+        (200, "text/markdown", "   \n", "https://e.com/x"), "https://e.com/x"
+    )
     assert outcome == "miss"
 
 
 def test_a_5xx_on_the_requested_url_refuses() -> None:
     with pytest.raises(negotiate.NegotiationRefused):
-        negotiate._classify((503, "text/markdown", "x"), "https://e.com/x", refuse_on_5xx=True)
+        negotiate._classify(
+            (503, "text/markdown", "x", "https://e.com/x"),
+            "https://e.com/x",
+            refuse_on_5xx=True,
+        )
 
 
 def test_a_5xx_on_a_speculative_probe_is_only_a_miss() -> None:
     """A .md variant or an llms.txt that does not exist gets 500/503 from plenty
     of hosts instead of 404. Refusing on those would turn a page that reads fine
     in a browser into a failed capture."""
-    outcome, body, status = negotiate._classify(
-        (503, "text/html", "gateway"), "https://e.com/x.md"
+    outcome, body, status, _ = negotiate._classify(
+        (503, "text/html", "gateway", "https://e.com/x.md"), "https://e.com/x.md"
     )
     assert outcome == "miss" and body is None and status == 503
 
@@ -267,7 +275,8 @@ async def test_llms_full_is_never_used_as_a_pages_body() -> None:
 
     async def fake_fetch(client, url, timeout_s):
         fetched.append(url)
-        return served.get(url)
+        hit = served.get(url)
+        return (*hit, url) if hit else None
 
     with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
         assert await negotiate.try_fetch_markdown("https://e.com/docs/page") is None
@@ -289,7 +298,8 @@ async def test_an_llms_index_link_is_followed() -> None:
     }
 
     async def fake_fetch(client, url, timeout_s):
-        return served.get(url)
+        hit = served.get(url)
+        return (*hit, url) if hit else None
 
     with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
         doc = await negotiate.try_fetch_markdown("https://e.com/docs/page")
@@ -303,7 +313,7 @@ async def test_a_5xx_probe_does_not_abort_the_ladder() -> None:
     falls through to the browser rather than failing the capture."""
     async def fake_fetch(client, url, timeout_s):
         if url.endswith(".md"):
-            return (503, "text/html", "gateway")
+            return (503, "text/html", "gateway", url)
         return None
 
     with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
@@ -312,7 +322,9 @@ async def test_a_5xx_probe_does_not_abort_the_ladder() -> None:
 
 async def test_a_5xx_on_the_requested_url_aborts_the_ladder() -> None:
     async def fake_fetch(client, url, timeout_s):
-        return (503, "text/html", "down") if url == "https://e.com/docs/page" else None
+        return (
+            (503, "text/html", "down", url) if url == "https://e.com/docs/page" else None
+        )
 
     with patch("mantisfetch_browser.negotiate._fetch", new=fake_fetch):
         with pytest.raises(negotiate.NegotiationRefused):
