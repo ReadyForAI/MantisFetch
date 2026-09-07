@@ -137,6 +137,28 @@ def delete_document(docs_dir: Path, doc_id: str) -> None:
     conn.commit()
 
 
+def get_document(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:
+    """One document's index entry, by primary key.
+
+    The table has always had `id` as its primary key and nothing used it: every
+    single-document lookup went through `list_documents` and scanned the result
+    in Python, which is how one library-wide search came to decode a million
+    rows (see `_resolve_doc_dir`).
+    """
+    ensure_migrated_from_json(docs_dir)
+    conn = _connect(docs_dir)
+    row = conn.execute(
+        "SELECT entry_json FROM documents WHERE id = ?", (doc_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        entry = json.loads(row["entry_json"])
+    except ValueError:
+        return None
+    return entry if isinstance(entry, dict) else None
+
+
 def list_documents(docs_dir: Path) -> list[dict[str, Any]]:
     ensure_migrated_from_json(docs_dir)
     conn = _connect(docs_dir)
