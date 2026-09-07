@@ -1,5 +1,6 @@
 """Abstract base class for LLM providers."""
 
+import hashlib
 from abc import ABC, abstractmethod
 
 # Shared OCR prompts — identical across providers; keep one source of truth so an
@@ -20,6 +21,16 @@ OCR_PROOFREAD_PROMPT = (
     "Return only the corrected page text.\n\n"
     "OCR draft:\n{draft}"
 )
+
+
+def _short_digest(value: str) -> str:
+    """A stable, credential-free stand-in for a string in a fingerprint.
+
+    Fingerprints end up in cache filenames, so anything that might carry a key —
+    a base_url with a token in its query, a request body — goes in hashed rather
+    than verbatim, while still making two different values two different keys.
+    """
+    return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:8]
 
 
 class LLMProvider(ABC):

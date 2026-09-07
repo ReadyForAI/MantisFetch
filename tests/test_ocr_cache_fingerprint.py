@@ -85,6 +85,7 @@ def test_a_provider_reports_its_ocr_identity() -> None:
     provider._ocr_model = "glm-4.6v"
     provider._ocr_proofread = True
     provider._base_url = "https://open.bigmodel.cn/api/paas/v4"
+    provider._ocr_extra_body = None
     provider._vendor = type("V", (), {"name": "zhipu"})()
 
     fingerprint = provider.ocr_fingerprint()
@@ -189,8 +190,9 @@ def test_the_same_model_still_reads_its_own_cache(scanned_pdf, tmp_path, monkeyp
 def _factory_fingerprint(monkeypatch, **env):
     """The fingerprint the pipeline actually gets: whatever `get_provider("ocr")`
     returns, wrappers included."""
-    import providers
     from mantisfetch_docreader.ocr import engines
+
+    import providers
 
     for key in (
         "MANTISFETCH_LLM_PROVIDER",
@@ -255,3 +257,36 @@ def test_the_fingerprint_carries_no_credentials(monkeypatch) -> None:
     )
     assert "sk-secret-do-not-leak" not in fingerprint
     assert "also-secret" not in fingerprint
+
+
+def test_two_deployment_paths_on_one_host_are_different(monkeypatch) -> None:
+    """`/deployment-a/v1` and `/deployment-b/v1` are different backends."""
+    base = dict(
+        MANTISFETCH_LLM_PROVIDER="openai",
+        MANTISFETCH_LLM_API_KEY="test-key",
+        MANTISFETCH_OCR_MODEL="vision",
+    )
+    a = _factory_fingerprint(
+        monkeypatch, **base, MANTISFETCH_LLM_BASE_URL="http://box:8000/deployment-a/v1"
+    )
+    b = _factory_fingerprint(
+        monkeypatch, **base, MANTISFETCH_LLM_BASE_URL="http://box:8000/deployment-b/v1"
+    )
+    assert a != b
+
+
+def test_the_request_body_is_part_of_the_identity(monkeypatch) -> None:
+    """Raising max_tokens after a truncated transcription has to re-run the
+    page, not hand back the truncated text."""
+    base = dict(
+        MANTISFETCH_LLM_PROVIDER="openai",
+        MANTISFETCH_LLM_API_KEY="test-key",
+        MANTISFETCH_OCR_MODEL="vision",
+    )
+    a = _factory_fingerprint(
+        monkeypatch, **base, MANTISFETCH_OCR_EXTRA_BODY_JSON='{"max_tokens": 16}'
+    )
+    b = _factory_fingerprint(
+        monkeypatch, **base, MANTISFETCH_OCR_EXTRA_BODY_JSON='{"max_tokens": 4096}'
+    )
+    assert a != b
