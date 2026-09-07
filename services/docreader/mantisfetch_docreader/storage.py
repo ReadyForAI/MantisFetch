@@ -30,7 +30,6 @@ from typing import Any
 from fastapi import HTTPException
 
 from i18n import t
-from mantisfetch_common.atomic import _write_json
 from mantisfetch_common.storage import (
     CONTENT_TYPE_DIRS,
     _doc_index_lock,
@@ -94,22 +93,17 @@ def _update_doc_index(
     storage_path: str | None = None,
     kind: str | None = None,
 ):
-    """Update doc-index.json with threading lock and atomic write."""
-    with _doc_index_lock:
-        index_path = docs_dir / "doc-index.json"
-        if index_path.exists():
-            try:
-                with open(index_path, encoding="utf-8") as f:
-                    index = json.load(f)
-            except (OSError, ValueError):
-                index = {"version": 2, "documents": []}
-        else:
-            index = {"version": 2, "documents": []}
+    """Commit one document to the index.
 
-        index["version"] = 2
-        if not isinstance(index.get("documents"), list):
-            index["documents"] = []
-        index["documents"] = [d for d in index["documents"] if d.get("id") != meta["doc_id"]]
+    SQLite is the commit point and ``doc-index.json`` is its export. Both are
+    written here, in that order, because the export is a full rewrite from the
+    database: a record that reaches JSON but not SQLite is erased by the next
+    successful write, and a delete that reaches only JSON is undone the same way.
+    So a write that cannot commit raises rather than leaving one behind — the
+    callers on this path (parse, capture) all roll their files back and record
+    the failure, which a silently-unindexed document on disk cannot be.
+    """
+    with _doc_index_lock:
         normalized_content_type = _normalize_content_type(
             content_type or meta.get("content_type") or "General"
         )
@@ -157,19 +151,12 @@ def _update_doc_index(
             entry["summary_status"] = summary_meta.get("status")
             entry["summary_error_code"] = summary_meta.get("error_code")
 
-        index["documents"].append(entry)
-        index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # B3: SQLite is the working index; JSON remains a compatibility export.
-        # Always write JSON first so a SQLite failure cannot lose the entry;
-        # then upsert SQLite (which migrates-from-JSON once if needed).
-        _write_json(index_path, index)
-        try:
-            from mantisfetch_common import doc_index_store as dis
+        from mantisfetch_common import doc_index_store as dis
 
-            dis.upsert_document(docs_dir, entry)
-            dis.export_json(docs_dir, last_updated=index["last_updated"])
-        except Exception:
-            pass
+        dis.upsert_document(docs_dir, entry)
+        dis.export_json(
+            docs_dir, last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
 
 
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
@@ -239,42 +226,31 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
                 shutil.rmtree(candidate)  # raise on real failure -> caller retries
                 removed = True
 
-        # Drop the index entry only after products are gone. SQLite is authoritative
-        # when available; JSON is rewritten from SQLite so they cannot diverge.
-        index_path = docs_dir / "doc-index.json"
-        had_index_entry = entry is not None
-        try:
-            from mantisfetch_common import doc_index_store as dis
+        # Drop the index entry only after products are gone. SQLite is the commit
+        # point; JSON is rewritten from it. There is no JSON-only fallback: a
+        # delete recorded in JSON alone is undone by the next export, which
+        # rebuilds JSON from a database that still holds the row — the caller
+        # would have been told the document was gone and then found it back.
+        from mantisfetch_common import doc_index_store as dis
 
-            # entry was looked up pre-delete; if missing from SQLite, check list.
-            if not had_index_entry:
-                had_index_entry = any(
-                    d.get("id") == doc_id for d in dis.list_documents(docs_dir)
-                )
-            dis.delete_document(docs_dir, doc_id)
-            dis.export_json(
-                docs_dir,
-                last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        had_index_entry = entry is not None
+        # entry was looked up pre-delete; if missing from SQLite, check list.
+        # Both of those go through list_documents, which is what migrates a
+        # legacy JSON-only library into the database. Keep them before the
+        # delete: dis.delete_document does not migrate, so on a library that has
+        # never been migrated it would remove nothing and the export below —
+        # which does migrate — would import the row straight back.
+        if not had_index_entry:
+            had_index_entry = any(
+                d.get("id") == doc_id for d in dis.list_documents(docs_dir)
             )
-            if had_index_entry:
-                removed = True
-        except Exception:
-            # Legacy JSON-only path if SQLite is completely unavailable.
-            if index_path.exists():
-                try:
-                    index = json.loads(index_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    index = None
-                if isinstance(index, dict) and isinstance(index.get("documents"), list):
-                    kept = [d for d in index["documents"] if d.get("id") != doc_id]
-                    if len(kept) != len(index["documents"]):
-                        index["documents"] = kept
-                        index["version"] = 2
-                        index["last_updated"] = datetime.now(UTC).strftime(
-                            "%Y-%m-%dT%H:%M:%SZ"
-                        )
-                        _write_json(index_path, index)
-                        removed = True
+        dis.delete_document(docs_dir, doc_id)
+        dis.export_json(
+            docs_dir,
+            last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        if had_index_entry:
+            removed = True
         return removed
 
 

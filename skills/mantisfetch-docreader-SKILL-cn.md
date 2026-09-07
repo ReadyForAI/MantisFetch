@@ -573,7 +573,9 @@ curl "http://localhost:9898/doc/library/DOC-042/source/info?limit=200"   # 行�
 
 ```text
 docs/
-  ├─ doc-index.json              ← 全局索引（v2 格式，与 MantisFetch Browser 共享）
+  ├─ doc-index.json              ← 全局索引，v2（与 MantisFetch Browser 共享）。
+  │                                只读不写：索引的真相源是 .doc-index.sqlite，
+  │                                这个文件在每次变更时从库里导出，手改会被覆盖。
   │
   ├─ General/
   │   └─ DOC-001/                ← 默认分类下的解析结果

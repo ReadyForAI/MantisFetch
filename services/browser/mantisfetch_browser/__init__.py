@@ -21,7 +21,6 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from i18n import t
 from mantisfetch_common import __version__
 from mantisfetch_common import metrics as metrics
-from mantisfetch_common.atomic import _write_json
 from mantisfetch_common.atomic import _write_text as _write_text_atomic
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
@@ -2321,21 +2320,7 @@ def _persist_web_capture(
             os.replace(staging_dir, final_dir)
             staging_dir = None  # published; don't cleanup in finally
 
-            # doc-index.json (v2, shared with docreader)
-            index_path = docs_dir / "doc-index.json"
-            if index_path.exists():
-                try:
-                    with open(index_path, encoding="utf-8") as f:
-                        index: dict[str, Any] = json.load(f)
-                except (OSError, ValueError):
-                    index = {"version": 2, "documents": []}
-            else:
-                index = {"version": 2, "documents": []}
-
-            index["version"] = 2
-            if not isinstance(index.get("documents"), list):
-                index["documents"] = []
-            index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
+            # The library index (v2, shared with docreader)
             index_entry: dict[str, Any] = (
                 {"summary_mode": "defer", "summary_status": "pending"}
                 if summary_mode == "defer"
@@ -2365,15 +2350,14 @@ def _persist_web_capture(
                     "metadata": _indexable_metadata(metadata or {}),
                 }
             )
-            index["documents"].append(index_entry)
-            index["last_updated"] = now_str
-            try:
-                from mantisfetch_common import doc_index_store as dis
+            # SQLite is the commit point and JSON its export (see docreader's
+            # _update_doc_index). The old fallback wrote JSON alone when the
+            # database refused, and the next successful write — anywhere in the
+            # library — erased that record on its way out.
+            from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-                dis.upsert_document(docs_dir, index_entry)
-                dis.export_json(docs_dir, last_updated=now_str)
-            except Exception:
-                _write_json(index_path, index)
+            dis.upsert_document(docs_dir, index_entry)
+            dis.export_json(docs_dir, last_updated=now_str)
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -2414,39 +2398,23 @@ def _update_web_index_summary(
     captures the same way they report uploaded docs (which carry summary_mode /
     summary_status in the index)."""
     with _doc_index_lock:
-        index_path = docs_dir / "doc-index.json"
-        try:
-            from mantisfetch_common import doc_index_store as dis
+        # Commit to SQLite, export JSON. The old JSON-only fallback below this
+        # was worse than doing nothing: the next export rebuilt JSON from the
+        # database and dropped the status this had just recorded.
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-            docs = dis.list_documents(docs_dir)
-            if not docs and index_path.exists():
-                index = json.loads(index_path.read_text(encoding="utf-8"))
-                docs = index.get("documents") if isinstance(index, dict) else []
-            for entry in docs or []:
-                if entry.get("id") == doc_id:
-                    entry["summary_mode"] = "defer"
-                    entry["summary_status"] = status
-                    if digest is not None:
-                        entry["digest"] = digest[:200]
-                    dis.upsert_document(docs_dir, entry)
-                    dis.export_json(
-                        docs_dir,
-                        last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    )
-                    return
-        except Exception:
-            pass
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        for entry in index.get("documents", []):
+        index = _load_doc_index(docs_dir) or {}
+        for entry in index.get("documents") or []:
             if entry.get("id") == doc_id:
                 entry["summary_mode"] = "defer"
                 entry["summary_status"] = status
                 if digest is not None:
                     entry["digest"] = digest[:200]
-                _write_json(index_path, index)
+                dis.upsert_document(docs_dir, entry)
+                dis.export_json(
+                    docs_dir,
+                    last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
                 return
 
 
@@ -2551,6 +2519,22 @@ async def _optional_capture_lock(key: str | None) -> AsyncGenerator[None, None]:
 
 
 def _load_doc_index(docs_dir: Path) -> dict[str, Any] | None:
+    """The library index, read from the same place docreader writes it.
+
+    This used to read ``doc-index.json`` alone while docreader preferred SQLite,
+    which made the two services disagree about which documents exist whenever
+    the export was behind. The JSON read stays as the fallback for a library
+    whose database cannot be opened at all — the shape callers expect is the
+    v2 index document either way.
+    """
+    try:
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+        docs = dis.list_documents(docs_dir)
+        if docs:
+            return {"version": 2, "documents": docs}
+    except Exception:  # noqa: BLE001 - fall through to the JSON export
+        pass
     index_path = docs_dir / "doc-index.json"
     if not index_path.exists():
         return None
@@ -2678,10 +2662,11 @@ def _merge_capture_tags_metadata(
         return entry
 
     with _doc_index_lock:
-        index_path = docs_dir / "doc-index.json"
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Read from the index of record, not from its JSON export: merging into
+        # a stale export and writing it back put the merge somewhere the next
+        # export would overwrite.
+        index = _load_doc_index(docs_dir)
+        if index is None:
             return entry
         docs = index.get("documents")
         if not isinstance(docs, list):
@@ -2721,14 +2706,10 @@ def _merge_capture_tags_metadata(
         target["metadata"] = merged_index_meta
 
         index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_json(index_path, index)
-        try:
-            from mantisfetch_common import doc_index_store as dis
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-            dis.upsert_document(docs_dir, target)
-            dis.export_json(docs_dir, last_updated=index["last_updated"])
-        except Exception:
-            pass
+        dis.upsert_document(docs_dir, target)
+        dis.export_json(docs_dir, last_updated=index["last_updated"])
 
         # Keep manifest in sync when the product tree is still present.
         # Manifest stores full metadata (including nested values); index is filtered.
