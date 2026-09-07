@@ -1996,7 +1996,14 @@ def _write_output_extract_only_impl(
         except Exception:  # noqa: BLE001
             pass
 
-    placeholder = summary_placeholder or _summary_placeholder_text("pending", locale=output_locale)
+    # The status the document actually recorded, not a guess: an ingest with
+    # generate_summary=false writes `disabled`, and a placeholder that says
+    # "pending" would have the file contradict the manifest beside it.
+    summary_meta = parsed.metadata.get("summary") if isinstance(parsed.metadata, dict) else None
+    recorded_status = summary_meta.get("status") if isinstance(summary_meta, dict) else None
+    placeholder = summary_placeholder or _summary_placeholder_text(
+        recorded_status or "pending", locale=output_locale
+    )
     _write_text(
         doc_dir / "digest.md",
         f"{tmpl_for_locale(output_locale, 'digest_title', doc_id=doc_id, filename=parsed.filename)}\n\n{placeholder}\n",
@@ -2431,6 +2438,9 @@ class SearchResult(BaseModel):
 class SearchResponse(BaseModel):
     results: list[SearchResult]
     total: int
+    # Set only when a search returned nothing and the reason is likely to be the
+    # endpoint rather than the library. Absent on every hit.
+    hint: str | None = None
     # Documents a library-wide scan could not read. Defaults to 0, so a caller
     # that ignores it is unaffected — but a search that quietly returns less than
     # it should is worse than one that says how much it skipped.
@@ -4989,6 +4999,17 @@ async def library_search(
         documents = documents[:limit]
         scores = {}
 
+    hint: str | None = None
+    if q and total == 0:
+        # This endpoint reads filenames, digests, tags and metadata — never the
+        # body. A term that appears only in the text returns zero here, which
+        # reads exactly like "not in the library" and is the wrong conclusion.
+        hint = (
+            "no metadata match; this endpoint does not read document bodies — "
+            "try /library/search_text (doc_search_text) for a word that appears "
+            "only in the text"
+        )
+
     results = [
         SearchResult(
             doc_id=d.get("id", ""),
@@ -5012,7 +5033,7 @@ async def library_search(
         )
         for d in documents
     ]
-    return SearchResponse(results=results, total=total)
+    return SearchResponse(results=results, total=total, hint=hint)
 
 
 @app.get("/library/search_text", response_model=SearchResponse)

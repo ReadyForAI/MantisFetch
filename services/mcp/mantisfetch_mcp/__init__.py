@@ -677,7 +677,11 @@ async def doc_parse(
     that may still be running.
 
     Report the timeout and what the probe showed, and let the user decide."""
-    sources = [s for s in (rel_path, content_b64) if s]
+    # `is not None`, not truthiness: an empty content_b64 is an empty *file*,
+    # and reporting it as "you gave me no source" sends the caller looking for a
+    # bug in its own arguments instead of at the file it just read. Empty bytes
+    # reach /parse and come back as the 422 that says so.
+    sources = [s for s in (rel_path, content_b64) if s is not None]
     if len(sources) != 1:
         raise ToolError("provide exactly one of: rel_path, content_b64")
 

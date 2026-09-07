@@ -157,7 +157,7 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_section` | Section 级：按 sid 读取单个 section 全文。 | `doc_id`、`sid` |
 | `doc_sections_batch` | 一次调用按 sid 读取多个 section（比反复 `doc_section` 少往返）；返回找到的 + 缺失的 sid。 | `doc_id`、`sids[]` |
 | `doc_full` | 全文 —— 昂贵；优先用上面的层级。 | `doc_id` |
-| `doc_search` | 跨库搜 **metadata**——文件名、digest、tags、自定义 metadata。**不看正文**。 | `q`、`tags?`、`limit=20` |
+| `doc_search` | 跨库搜 **metadata**——文件名、digest、tags、自定义 metadata。**不看正文**：只出现在正文里的词在这里返回 `total: 0`，那**不等于**「库里没有」。零结果会带一条 `hint` 说明。 | `q`、`tags?`、`limit=20` |
 | `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
 | `doc_search_sections` | 在单个文档的 sections 内搜索；返回 sid/页码 provenance。 | `doc_id`、`q`、`include_content=false` |
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
