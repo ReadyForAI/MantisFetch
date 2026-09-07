@@ -2294,6 +2294,12 @@ def _persist_web_capture(
                 "source_url": url,
                 "created_at": now_str,
                 "content_hash": content_hash,
+                # What a deferred summary checks before it writes back. Every
+                # capture of this id gets a new one — created_at is in it — so a
+                # re-capture, a replacement through /doc/parse, or a delete and
+                # recreate all invalidate a summary that is still in the LLM.
+                # Same field and same purpose as docreader's (#212).
+                "generation": _new_web_generation(),
                 # Status the final URL was served with. Always written, so null
                 # (the navigation reported no response, e.g. same-document) stays
                 # distinguishable from a capture made before this was recorded,
@@ -2378,6 +2384,47 @@ def _persist_web_capture(
             shutil.rmtree(staging_dir, ignore_errors=True)
 
 
+def _new_web_generation() -> str:
+    """A fresh per-capture identity for a web document.
+
+    Random rather than derived from the capture: a token built from doc_id,
+    content hash and created_at collides when the same page is captured twice
+    inside one second, and it is exactly then — a re-capture racing a summary —
+    that the token has to differ.
+    """
+    return "web:" + secrets.token_hex(16)
+
+
+def _web_doc_generation(doc_dir: Path) -> str | None:
+    """The generation recorded in a document's manifest, or None if it has none
+    (a capture written before this existed) or cannot be read."""
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    provenance = manifest.get("provenance")
+    value = provenance.get("generation") if isinstance(provenance, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _web_summary_target_intact(doc_dir: Path, generation: str | None) -> bool:
+    """Whether the document this summary was started for is still the one on disk.
+
+    Existence is not the question — /doc/parse accepts a WEB-* doc_id with
+    replace=true, and a delete plus a fresh capture reuses the id too. Both leave
+    a manifest in place, and writing a digest generated from the old body over
+    either of them is how a document ends up with its text from one source and
+    its summary from another.
+
+    A capture with no generation predates the token; it can only be the document
+    that was there when this started, because anything that has replaced it since
+    writes one.
+    """
+    if not (doc_dir / "manifest.json").exists():
+        return False
+    return _web_doc_generation(doc_dir) == generation
+
+
 def _set_web_summary_status(
     doc_dir: Path, status: str, *, error: str | None = None, add_brief_path: bool = False
 ) -> None:
@@ -2452,21 +2499,29 @@ def _defer_web_summary(
     from mantisfetch_docreader import (  # noqa: PLC0415
         ParsedDocument,
         Section,
+        _document_writer_lock,
         generate_summaries,
     )
 
     doc_dir = docs_dir / _doc_storage_rel_path(doc_id, _normalize_content_type(content_type))
     with _web_summary_sem:
-        if not (doc_dir / "manifest.json").exists():
-            logger.info("web capture summary skipped (doc deleted): %s", doc_id)
-            return
-        _set_web_summary_status(doc_dir, "running")
-        try:
-            _update_web_index_summary(docs_dir, doc_id, status="running")
-        except Exception as exc:  # noqa: BLE001 - same as the claim above
-            logger.warning("web summary start for %s not recorded: %s", doc_id, exc)
-            _set_web_summary_status(doc_dir, "failed", error=str(exc))
-            return
+        # The generation this summary belongs to. Everything below re-checks it
+        # under the cross-thread document lock — the same one docreader's writers
+        # take (#168) — because the LLM call in between is long enough for a
+        # replacement to land, and this thread cannot take the request's asyncio
+        # lock.
+        generation = _web_doc_generation(doc_dir)
+        with _document_writer_lock(docs_dir, doc_id):
+            if not _web_summary_target_intact(doc_dir, generation):
+                logger.info("web capture summary skipped (doc gone or replaced): %s", doc_id)
+                return
+            _set_web_summary_status(doc_dir, "running")
+            try:
+                _update_web_index_summary(docs_dir, doc_id, status="running")
+            except Exception as exc:  # noqa: BLE001 - same as the claim above
+                logger.warning("web summary start for %s not recorded: %s", doc_id, exc)
+                _set_web_summary_status(doc_dir, "failed", error=str(exc))
+                return
         text_sections = [s for s in sections if s.get("type") != "table"]
         parsed = ParsedDocument(
             filename=title or url,
@@ -2486,22 +2541,30 @@ def _defer_web_summary(
             ],
         )
         try:
+            # Outside the lock: this is the long part, and holding a document
+            # lock across an LLM round trip would block deletes and replacements
+            # for as long as the provider takes.
             digest_text, brief_text, _ = generate_summaries(parsed, _WEB_SUMMARY_CONCURRENCY, False)
-            # Re-check before writeback: DELETE may have raced with the LLM call.
-            if not (doc_dir / "manifest.json").exists():
-                logger.info("web capture summary discarded (doc deleted): %s", doc_id)
-                return
-            _write_text_atomic(doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest_text}\n")
-            _write_text_atomic(doc_dir / "brief.md", f"{brief_text}\n")
-            _update_web_index_summary(docs_dir, doc_id, status="completed", digest=digest_text)
-            # Flip status last so "completed" means every artifact is already on disk.
-            _set_web_summary_status(doc_dir, "completed", add_brief_path=True)
+            with _document_writer_lock(docs_dir, doc_id):
+                if not _web_summary_target_intact(doc_dir, generation):
+                    logger.info(
+                        "web capture summary discarded (doc gone or replaced): %s", doc_id
+                    )
+                    return
+                _write_text_atomic(
+                    doc_dir / "digest.md", f"# {doc_id}: {title or url}\n\n{digest_text}\n"
+                )
+                _write_text_atomic(doc_dir / "brief.md", f"{brief_text}\n")
+                _update_web_index_summary(docs_dir, doc_id, status="completed", digest=digest_text)
+                # Flip status last so "completed" means every artifact is already on disk.
+                _set_web_summary_status(doc_dir, "completed", add_brief_path=True)
             logger.info("web capture summary complete: %s", doc_id)
         except Exception as exc:  # noqa: BLE001 - status recorded; the thread must not crash
             logger.warning("web capture summary failed for %s: %s", doc_id, exc)
-            if (doc_dir / "manifest.json").exists():
-                _set_web_summary_status(doc_dir, "failed", error=str(exc))
-                _update_web_index_summary(docs_dir, doc_id, status="failed")
+            with _document_writer_lock(docs_dir, doc_id):
+                if _web_summary_target_intact(doc_dir, generation):
+                    _set_web_summary_status(doc_dir, "failed", error=str(exc))
+                    _update_web_index_summary(docs_dir, doc_id, status="failed")
 
 
 # Per-capture-key locks serialize *cache misses* for the same (url, content_type,
