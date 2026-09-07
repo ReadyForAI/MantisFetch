@@ -1116,7 +1116,62 @@ WORD_IMAGE_OCR_MAX_IMAGES = max(
 )
 
 
+#: How many documents may be *waiting* for a summary slot.
+#:
+#: The concurrency above bounds how many summaries run; nothing bounded how many
+#: were queued behind them, and each one waits as a thread holding its whole
+#: ParsedDocument. One MantisFetch serves several NodalOS instances and every
+#: agent on them, and every MCP ingest defers its summary (the tool always
+#: declares a budget, and a declared budget defers) — so the arrival rate is a
+#: fan-in while the drain rate is this one process making section-by-section LLM
+#: calls. A stalled provider takes the drain rate to zero without slowing the
+#: arrivals at all.
+#:
+#: 64 queued documents is ~21 MiB of retained text at the measured ~333 KiB per
+#: 100-page document. Past that a caller is told so instead of joining a queue
+#: nobody can see.
+DEFERRED_SUMMARY_MAX_QUEUED = max(
+    1,
+    int(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_MAX_QUEUED", "64")),
+)
+
 _deferred_summary_sem = threading.BoundedSemaphore(DEFERRED_SUMMARY_MAX_CONCURRENT)
+_deferred_summary_waiting = 0
+_deferred_summary_waiting_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _deferred_summary_slot():
+    """Take a summary slot, or say the queue is full.
+
+    Yields True once the slot is held and False when the wait was refused. The
+    slot is *not* released here: the timeout path hands ownership to the worker
+    thread that is still inside the LLM call, which is what keeps a hung backend
+    from piling up more work than the concurrency allows.
+    """
+    global _deferred_summary_waiting
+
+    if _deferred_summary_sem.acquire(blocking=False):
+        yield True
+        return
+    with _deferred_summary_waiting_lock:
+        admitted = _deferred_summary_waiting < DEFERRED_SUMMARY_MAX_QUEUED
+        if admitted:
+            _deferred_summary_waiting += 1
+    if not admitted:
+        # Outside the lock: what the caller does with a refusal is a full
+        # extraction rewrite under document locks, and holding the admission
+        # lock across it would park every other arrival *outside* the counted
+        # queue — still holding its ParsedDocument, which is the memory this
+        # bound exists to cap.
+        yield False
+        return
+    try:
+        _deferred_summary_sem.acquire()
+    finally:
+        with _deferred_summary_waiting_lock:
+            _deferred_summary_waiting -= 1
+    yield True
 DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC = float(
     os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC", "30")
 )
@@ -2046,7 +2101,41 @@ def _generate_deferred_summary(
                 DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC,
             )
             _local_ocr_worker_ready.wait(timeout=DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC)
-        _deferred_summary_sem.acquire()
+        with _deferred_summary_slot() as got_slot:
+            if not got_slot:
+                # The extraction is on disk and correct; only the summary did not
+                # happen. Saying so beats joining an unbounded queue, where the
+                # caller reads "pending" from a document nobody is working on —
+                # and, after a restart, forever.
+                logger.warning(
+                    "Deferred summary not queued for %s: %d already waiting",
+                    doc_id,
+                    DEFERRED_SUMMARY_MAX_QUEUED,
+                )
+                _set_summary_metadata(
+                    parsed,
+                    mode="defer",
+                    status="not_queued",
+                    error=f"summary queue is full ({DEFERRED_SUMMARY_MAX_QUEUED} waiting)",
+                    error_code="summary_not_queued",
+                    attempts=attempts - 1,
+                )
+                write_output_extract_only(
+                    doc_id,
+                    parsed,
+                    output_dir,
+                    tags=tags,
+                    source="upload",
+                    metadata=metadata,
+                    source_record=source_record,
+                    content_type=content_type,
+                    preserve_extracted=preserve_extracted,
+                    summary_placeholder=_summary_placeholder_text(
+                        "pending", locale=_parsed_document_locale(parsed)
+                    ),
+                    guard_stale_generation=True,
+                )
+                return
         acquired = True
         _set_summary_metadata(parsed, mode="defer", status="running", attempts=attempts)
         write_output_extract_only(
@@ -2380,6 +2469,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     at startup, after the module has fully loaded."""
     await _startup_prewarm_local_ocr()
     await _startup_backfill_manifest_tags()
+    await _startup_reset_interrupted_summaries()
     yield
 
 
@@ -2401,6 +2491,77 @@ async def _startup_prewarm_local_ocr() -> None:
         logger.info("Local OCR worker prewarmed")
     except Exception as exc:
         logger.warning("Local OCR worker prewarm skipped: %s", exc)
+
+
+def _reset_interrupted_summaries(docs_dir: Path) -> int:
+    """Turn every `running` summary back into `pending`, and say how many.
+
+    A deferred summary lives in a daemon thread, so a restart takes every
+    in-flight one with it while `running` stays on disk. Nothing swept it: the
+    document said a summary was in progress for as long as it existed, and the
+    status face an agent polls (IRP 20260801) had no way to tell that apart from
+    one that really was running.
+
+    `pending` rather than `failed`: it is the state the retry endpoint already
+    treats as retryable, and it is the truth — the summary was asked for and has
+    not happened. Nothing is re-enqueued here. With several NodalOS instances
+    behind one MantisFetch, a restart that re-queued everything it found would
+    refill the queue this release just bounded, at the worst possible moment.
+    """
+    reset = 0
+    for entry in _load_doc_index(docs_dir):
+        if entry.get("summary_status") != "running":
+            continue
+        doc_id = entry.get("id")
+        if not isinstance(doc_id, str):
+            continue
+        try:
+            doc_dir = _resolve_doc_dir(docs_dir, doc_id, entry=entry)
+            with _document_writer_lock(docs_dir, doc_id):
+                manifest_path = doc_dir / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                summary = manifest.setdefault("parse_metadata", {}).setdefault("summary", {})
+                if summary.get("status") != "running":
+                    continue
+                # Uploads and captures have different retry routes, so the
+                # honest terminal state differs. `POST /library/{id}/summary`
+                # treats `pending` as retryable but refuses web captures
+                # outright; a capture is re-scheduled instead by the next cache
+                # hit, and that only happens for a status outside
+                # {pending, running, completed}. Resetting a capture to
+                # `pending` would therefore strand it in a state neither route
+                # picks up.
+                is_capture = (manifest.get("file_type") or entry.get("file_type")) == "web_capture"
+                summary["status"] = "failed" if is_capture else "pending"
+                summary["error"] = "interrupted by a restart"
+                summary["error_code"] = "summary_interrupted"
+                _write_json(manifest_path, manifest)
+                entry["summary_status"] = summary["status"]
+                from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+                dis.upsert_document(docs_dir, entry)
+            reset += 1
+        except Exception as exc:  # noqa: BLE001 - one bad document must not stop the sweep
+            logger.warning("Could not reset the interrupted summary for %s: %s", doc_id, exc)
+    if reset:
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+        with contextlib.suppress(Exception):
+            dis.export_json(docs_dir)
+    return reset
+
+
+async def _startup_reset_interrupted_summaries() -> None:
+    try:
+        reset = await asyncio.to_thread(_reset_interrupted_summaries, _get_docs_dir())
+    except Exception as exc:  # noqa: BLE001 - never block startup on this
+        logger.warning("Interrupted-summary sweep skipped: %s", exc)
+        return
+    if reset:
+        logger.info(
+            "Reset %d summary/summaries left running by a previous process to pending",
+            reset,
+        )
 
 
 async def _startup_backfill_manifest_tags() -> None:

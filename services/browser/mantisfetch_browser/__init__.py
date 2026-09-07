@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -2017,6 +2018,15 @@ _WEB_SUMMARY_MAX_CONCURRENT = max(
 )
 _WEB_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("MANTISFETCH_SUMMARY_BATCH_CONCURRENCY", "1")))
 _web_summary_sem = threading.BoundedSemaphore(_WEB_SUMMARY_MAX_CONCURRENT)
+# And bound how many may wait for it, for the reason docreader's queue is
+# bounded: this process is shared by every NodalOS behind it, the drain is one
+# LLM call at a time, and a waiting job is a thread holding the capture's
+# sections. Same key, so one number covers both paths.
+_WEB_SUMMARY_MAX_QUEUED = max(
+    1, int(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_MAX_QUEUED", "64"))
+)
+_web_summary_waiting = 0
+_web_summary_waiting_lock = threading.Lock()
 # Serializes the "read status → claim pending → enqueue" step for cache hits so
 # concurrent hits on the same cached doc can't enqueue duplicate LLM jobs.
 _web_summary_claim_lock = threading.Lock()
@@ -2424,9 +2434,20 @@ def _web_summary_target_intact(doc_dir: Path, generation: str | None) -> bool:
     that was there when this started, because anything that has replaced it since
     writes one.
     """
-    if not (doc_dir / "manifest.json").exists():
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    return _web_doc_generation(doc_dir) == generation
+    # Still a capture at all. The generation catches a replacement that happened
+    # while this summary held a token from before it; this catches one that had
+    # already happened — a /doc/parse replacement writes its own generation, so
+    # a check made *after* it lands would otherwise compare that value with
+    # itself and agree.
+    if manifest.get("file_type") != "web_capture":
+        return False
+    provenance = manifest.get("provenance")
+    current = provenance.get("generation") if isinstance(provenance, dict) else None
+    return (current if isinstance(current, str) and current else None) == generation
 
 
 def _set_web_summary_status(
@@ -2497,8 +2518,10 @@ def _defer_web_summary(
     and lets tests patch ``mantisfetch_docreader.generate_summaries``. The LLM
     client's own request timeouts bound the call; the thread is a daemon.
 
-    Delete guard: web captures are not re-parsed under the same id, so existence of
-    ``manifest.json`` is enough — if the doc was deleted mid-LLM, skip writeback.
+    Every write here — the claim, the refusal, the result, the failure — happens
+    under the document writer lock and behind a generation check, because
+    ``/doc/parse`` accepts a WEB-* doc_id with replace=true and this thread can
+    outlive the document it started on.
     """
     from mantisfetch_docreader import (  # noqa: PLC0415
         ParsedDocument,
@@ -2507,8 +2530,46 @@ def _defer_web_summary(
         generate_summaries,
     )
 
+    global _web_summary_waiting
+
     doc_dir = docs_dir / _doc_storage_rel_path(doc_id, _normalize_content_type(content_type))
-    with _web_summary_sem:
+    if not _web_summary_sem.acquire(blocking=False):
+        with _web_summary_waiting_lock:
+            admitted = _web_summary_waiting < _WEB_SUMMARY_MAX_QUEUED
+            if admitted:
+                _web_summary_waiting += 1
+        if not admitted:
+            # The capture itself is stored and readable; only its summary is not
+            # happening. Saying so beats a "pending" nobody is working on — and
+            # a cache hit on this document will offer to schedule it again,
+            # which is the retry.
+            #
+            # Written under the document lock and behind the same generation
+            # check as every other status write here: _set_web_summary_status
+            # rewrites the whole manifest, so a replacement landing in between
+            # would get this capture's metadata written over it. Outside the
+            # admission lock, so a slow disk here cannot park later arrivals
+            # where the queue bound cannot see them.
+            logger.warning(
+                "web capture summary not queued for %s: %d already waiting",
+                doc_id,
+                _WEB_SUMMARY_MAX_QUEUED,
+            )
+            generation = _web_doc_generation(doc_dir)
+            with _document_writer_lock(docs_dir, doc_id):
+                if _web_summary_target_intact(doc_dir, generation):
+                    _set_web_summary_status(
+                        doc_dir, "not_queued", error="summary queue is full"
+                    )
+                    with contextlib.suppress(Exception):
+                        _update_web_index_summary(docs_dir, doc_id, status="not_queued")
+            return
+        try:
+            _web_summary_sem.acquire()
+        finally:
+            with _web_summary_waiting_lock:
+                _web_summary_waiting -= 1
+    try:
         # The generation this summary belongs to. Everything below re-checks it
         # under the cross-thread document lock — the same one docreader's writers
         # take (#168) — because the LLM call in between is long enough for a
@@ -2569,6 +2630,11 @@ def _defer_web_summary(
                 if _web_summary_target_intact(doc_dir, generation):
                     _set_web_summary_status(doc_dir, "failed", error=str(exc))
                     _update_web_index_summary(docs_dir, doc_id, status="failed")
+    finally:
+        # The slot was taken by hand above (the queue bound needs the
+        # non-blocking attempt first), so it is released by hand here.
+        with contextlib.suppress(ValueError):
+            _web_summary_sem.release()
 
 
 # Per-capture-key locks serialize *cache misses* for the same (url, content_type,
