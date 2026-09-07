@@ -1,5 +1,6 @@
 """Abstract base class for LLM providers."""
 
+import hashlib
 from abc import ABC, abstractmethod
 
 # Shared OCR prompts — identical across providers; keep one source of truth so an
@@ -22,6 +23,16 @@ OCR_PROOFREAD_PROMPT = (
 )
 
 
+def _short_digest(value: str) -> str:
+    """A stable, credential-free stand-in for a string in a fingerprint.
+
+    Fingerprints end up in cache filenames, so anything that might carry a key —
+    a base_url with a token in its query, a request body — goes in hashed rather
+    than verbatim, while still making two different values two different keys.
+    """
+    return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:8]
+
+
 class LLMProvider(ABC):
     """Unified interface for LLM backends (summarisation + OCR).
 
@@ -41,6 +52,19 @@ class LLMProvider(ABC):
         Returns:
             The generated summary string.
         """
+
+    def ocr_fingerprint(self) -> str:
+        """What identifies this backend's OCR output, for cache validity.
+
+        Two runs that share a fingerprint are expected to produce the same text
+        for the same image; anything that would change the text — the vendor,
+        the model, the proofread setting — belongs in here. Credentials never
+        do: the string is written into a filename.
+
+        The default names only the class, which is the conservative answer for
+        a backend that has not said more: it changes when the backend does.
+        """
+        return type(self).__name__
 
     @abstractmethod
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:

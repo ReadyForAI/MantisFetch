@@ -17,8 +17,14 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urlparse
 
-from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
+from providers.base import (
+    OCR_PROOFREAD_PROMPT,
+    OCR_TRANSCRIBE_PROMPT,
+    LLMProvider,
+    _short_digest,
+)
 from providers.errors import (
     ProviderError,
     ProviderRejected,
@@ -279,6 +285,28 @@ class OpenAICompatProvider(LLMProvider):
             # expect "[summary generation failed]".
             logger.error("OpenAI-compat summarize failed: %s", exc)
             raise classify_provider_error(exc) from exc
+
+    def ocr_fingerprint(self) -> str:
+        # Everything that changes what comes back for the same image. The
+        # endpoint counts twice over: two servers behind one vendor profile and
+        # model alias serve different weights, and so do two deployment paths on
+        # one host. It is carried as host plus a digest of the whole URL —
+        # readable enough to recognise, and a base_url can hold a key in its
+        # path or query, while this string is written into a filename.
+        parsed = urlparse(self._base_url)
+        host = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else "endpoint"
+        endpoint = f"{host}#{_short_digest(self._base_url)}"
+        # The request body is part of it too: raising max_tokens after a
+        # truncated transcription has to re-run the page, not hand back the
+        # truncated text.
+        params = _short_digest(
+            json.dumps(self._ocr_extra_body or {}, sort_keys=True, default=str)
+        )
+        vendor = getattr(self._vendor, "name", None) or "openai-compat"
+        return (
+            f"{vendor}@{endpoint}/{self._ocr_model}"
+            f"/proofread={self._ocr_proofread}/params={params}"
+        )
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """OCR a page image via the OpenAI vision endpoint (base64-encoded)."""

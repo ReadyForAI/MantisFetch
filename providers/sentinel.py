@@ -25,6 +25,17 @@ class SentinelBoundary(LLMProvider):
         # and diagnostics without re-declaring every field.
         return getattr(self._inner, name)
 
+    def ocr_fingerprint(self) -> str:
+        """Delegate, do not inherit.
+
+        `__getattr__` only fires for attributes this class does not have, and
+        `LLMProvider` gives every subclass a default `ocr_fingerprint`. So the
+        wrapper answered with its own class name for every configuration — which
+        made the OCR cache key constant again and quietly undid the thing it was
+        added for.
+        """
+        return self._inner.ocr_fingerprint()
+
     def summarize(self, text: str, prompt: str, max_retries: int = 2) -> str:
         try:
             return self._inner.summarize(text, prompt, max_retries=max_retries)

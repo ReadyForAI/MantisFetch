@@ -102,6 +102,51 @@ def _ocr_cache_key(image_bytes: bytes) -> str:
     return hashlib.sha1(image_bytes).hexdigest()[:16]
 
 
+def _ocr_provider_fingerprint() -> str:
+    """What the active OCR backend says identifies its output."""
+    from providers import get_provider  # noqa: PLC0415
+
+    try:
+        provider = get_provider("ocr")
+    except Exception as exc:  # noqa: BLE001 - no provider configured yet
+        logger.debug("OCR provider unavailable for fingerprinting: %s", exc)
+        return "unconfigured"
+    fingerprint = getattr(provider, "ocr_fingerprint", None)
+    return fingerprint() if callable(fingerprint) else type(provider).__name__
+
+
+def llm_ocr_cache_key(*, proofread: bool | None) -> str:
+    """The part of an LLM OCR cache path that says *how* the text was produced.
+
+    The key used to be the rendered image's hash alone, so the cache answered
+    for a page no matter which model, prompt or proofread setting had produced
+    the text in it. Switching to a better vision model and re-parsing returned
+    the old model's output and never called the new one.
+
+    Everything that changes the text goes in: the backend's own fingerprint
+    (vendor, model, its proofread default), the caller's proofread override when
+    it gave one, and the prompts themselves — an edit to those changes what the
+    same model returns for the same image. Read at call time rather than at
+    import so a test or a redeploy that changes any of them is seen.
+
+    Hashed, because the result is a filename component and a model name can
+    contain a slash or a colon. Existing entries simply miss: their filenames
+    were written under the old scheme, and text produced by an unknown
+    configuration is exactly what should not be reused.
+    """
+    from providers import base as provider_base  # noqa: PLC0415
+
+    payload = "\x00".join(
+        [
+            _ocr_provider_fingerprint(),
+            f"proofread_override={proofread}",
+            provider_base.OCR_TRANSCRIBE_PROMPT,
+            provider_base.OCR_PROOFREAD_PROMPT,
+        ]
+    )
+    return "llm-" + hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
 
 def _local_ocr_worker_command() -> list[str]:
     raw = os.environ.get("MANTISFETCH_LOCAL_OCR_WORKER_CMD", "").strip()
