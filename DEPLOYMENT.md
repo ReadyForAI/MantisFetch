@@ -30,6 +30,26 @@ So a same-host client configured with the *wrong* token sees REST succeed and
 MCP answer 401. Send the bearer on every call — it is the only configuration
 that is correct on both faces.
 
+## Two provider slots, and when the second one is used
+
+With `MANTISFETCH_LLM_DEFAULT` / `MANTISFETCH_LLM_EXTRA` configured, a failure
+on the primary falls over to the secondary when — and only when — the other
+vendor might plausibly do better:
+
+| failure | retried here | falls over |
+|---|---|---|
+| 429, 5xx, timeout, connection | yes | yes |
+| **401 / 403 / 404** — expired key, revoked permission, retired model | no | **yes** |
+| 400 / 422 / content policy | no | no |
+
+The middle row is the reason to configure a second slot at all: none of those
+say anything about whether the peer can serve the call, and retrying the same
+vendor is pointless. A malformed request is different — the peer would reject
+it too, and failing it over only spends a second vendor's quota.
+
+Single-slot deployments are unaffected: with nothing to fall over to, all three
+rows end the same way, with the error recorded on the document.
+
 ## Summarisation is process-wide
 
 `MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT` (default 1) and

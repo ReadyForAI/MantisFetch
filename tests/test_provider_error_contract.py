@@ -153,3 +153,108 @@ def test_gemini_does_not_re_send_a_rejected_request(monkeypatch) -> None:
         provider.summarize("text", "prompt", max_retries=2)
 
     assert calls["n"] == 1
+
+
+# ── "will a retry work" and "will the other vendor work" are two questions ───────
+def test_a_retired_model_is_not_the_requests_fault() -> None:
+    """404 is this vendor's model list, not the caller's input. Folding it in
+    with a malformed request left a configured fallback unused exactly when it
+    was needed — the case the second slot exists for."""
+    from providers.errors import ProviderUnusable
+
+    result = classify_provider_error(_genai_error("ClientError", 404, "NOT_FOUND"))
+
+    assert isinstance(result, ProviderUnusable)
+    assert result.retryable is False, "asking the same vendor again is pointless"
+    assert result.failover is True, "asking the other vendor is not"
+
+
+@pytest.mark.parametrize(("code", "status"), [(401, "UNAUTHENTICATED"), (403, "PERMISSION_DENIED")])
+def test_this_deployments_credentials_are_not_the_requests_fault(code, status) -> None:
+    from providers.errors import ProviderUnusable
+
+    result = classify_provider_error(_genai_error("ClientError", code, status))
+    assert isinstance(result, ProviderUnusable)
+    assert (result.retryable, result.failover) == (False, True)
+
+
+def test_a_malformed_request_still_goes_nowhere() -> None:
+    """The other half: a bad request is bad everywhere, and failing it over
+    only spends a second vendor's quota to be told the same thing."""
+    result = classify_provider_error(_genai_error("ClientError", 400, "INVALID_ARGUMENT"))
+
+    assert isinstance(result, ProviderRejected)
+    assert (result.retryable, result.failover) == (False, False)
+
+
+def test_the_retryable_ones_still_fail_over() -> None:
+    for exc, expected in (
+        (_genai_error("ClientError", 429, "RESOURCE_EXHAUSTED"), ProviderRateLimited),
+        (_genai_error("ServerError", 503, "UNAVAILABLE"), ProviderUnavailable),
+    ):
+        result = classify_provider_error(exc)
+        assert isinstance(result, expected)
+        assert result.failover is True
+
+
+class _Fixed:
+    def __init__(self, exc=None, text="ok"):
+        self.exc, self.text, self.calls = exc, text, 0
+
+    def summarize(self, text, prompt, max_retries=2):
+        self.calls += 1
+        if self.exc:
+            raise self.exc
+        return self.text
+
+    def ocr(self, image_bytes, page_num, proofread=None):
+        self.calls += 1
+        if self.exc:
+            raise self.exc
+        return self.text
+
+
+def test_the_second_slot_is_used_when_the_first_vendor_cannot_serve() -> None:
+    from providers.errors import ProviderUnusable
+    from providers.failover import FailoverProvider
+
+    primary = _Fixed(ProviderUnusable("404 model retired"))
+    fallback = _Fixed(text="summary from the peer")
+    pair = FailoverProvider(primary, fallback, role="summary")
+
+    assert pair.summarize("text", "prompt") == "summary from the peer"
+    assert (primary.calls, fallback.calls) == (1, 1)
+
+
+def test_the_second_slot_is_used_for_ocr_too() -> None:
+    from providers.errors import ProviderUnusable
+    from providers.failover import FailoverProvider
+
+    primary = _Fixed(ProviderUnusable("401 expired key"))
+    fallback = _Fixed(text="page text from the peer")
+    pair = FailoverProvider(primary, fallback, role="ocr")
+
+    assert pair.ocr(b"png", 1) == "page text from the peer"
+    assert (primary.calls, fallback.calls) == (1, 1)
+
+
+def test_the_second_slot_is_not_spent_on_a_bad_request() -> None:
+    from providers.failover import FailoverProvider
+
+    primary = _Fixed(ProviderRejected("400 malformed"))
+    fallback = _Fixed(text="never reached")
+    pair = FailoverProvider(primary, fallback, role="summary")
+
+    with pytest.raises(ProviderRejected):
+        pair.summarize("text", "prompt")
+    assert fallback.calls == 0
+
+
+def test_an_unusable_vendor_is_still_only_called_once(monkeypatch) -> None:
+    """Not retryable means not retried, even though it does fail over."""
+    provider = _openai_provider(monkeypatch, _genai_error("ClientError", 404, "NOT_FOUND"))
+
+    with pytest.raises(Exception):
+        provider._chat([{"role": "user", "content": "x"}], max_retries=2)
+
+    assert provider._client.calls == 1

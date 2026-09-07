@@ -1,9 +1,15 @@
 """Typed LLM provider failures for precise failover.
 
 Concrete providers raise these after exhausting their own retries (instead of
-only collapsing every failure into a sentinel string). FailoverProvider then
-retries the fallback only for *retryable* errors (rate limit / unavailable),
-and does not spend a second paid call on permanent rejections (4xx / policy).
+only collapsing every failure into a sentinel string). Two questions get asked
+of every failure, and they are not the same question:
+
+  retryable — will the *same call to the same provider* behave differently?
+  failover  — might *another provider* succeed where this one did not?
+
+A 429 is both. A malformed request is neither. And a retired model or an
+expired key is the pair that used to be missing: asking this vendor again is
+pointless, asking the other one is exactly what the second slot is for.
 
 Callers that still expect the historical sentinel strings use
 ``SentinelBoundary`` (wired by ``get_provider``) which folds remaining
@@ -18,11 +24,19 @@ class ProviderError(Exception):
     """Base class for classified provider failures."""
 
     retryable: bool = True
+    #: Whether the *other* provider is worth trying. Defaults to ``retryable``
+    #: because that was the only distinction for a long time; a subclass says
+    #: otherwise when the failure is about this vendor rather than the request.
+    _failover: bool | None = None
 
     def __init__(self, message: str = "", *, retryable: bool | None = None) -> None:
         super().__init__(message)
         if retryable is not None:
             self.retryable = retryable
+
+    @property
+    def failover(self) -> bool:
+        return self.retryable if self._failover is None else self._failover
 
 
 class ProviderRateLimited(ProviderError):
@@ -38,9 +52,32 @@ class ProviderUnavailable(ProviderError):
 
 
 class ProviderRejected(ProviderError):
-    """HTTP 4xx (except 429) / content policy — same input will fail on peers too."""
+    """A bad request — 400/422, content policy. The peer would reject it too."""
 
     retryable = False
+    _failover = False
+
+
+class ProviderUnusable(ProviderError):
+    """This vendor cannot serve the call at all — 401, 403, 404.
+
+    Retrying is pointless: an expired key, a revoked permission and a retired
+    model all fail identically on the next attempt. Failing over is not
+    pointless, and this is the case the second slot exists for — the peer has
+    its own credentials and its own models. Reading "4xx" as "the request is
+    bad, so nobody can serve it" folded these in with the malformed ones and
+    left a configured fallback unused exactly when it was needed.
+    """
+
+    retryable = False
+    _failover = True
+
+
+#: 4xx codes that describe the vendor rather than the request. 401 and 403 are
+#: this deployment's credentials for *this* provider; 404 is a model or endpoint
+#: this provider no longer serves. None of them says anything about whether the
+#: peer can do it.
+_VENDOR_SCOPED_STATUS = frozenset({401, 403, 404})
 
 
 def classify_provider_error(exc: BaseException) -> ProviderError:
@@ -58,6 +95,8 @@ def classify_provider_error(exc: BaseException) -> ProviderError:
 
     if status == 429:
         return ProviderRateLimited(msg)
+    if status in _VENDOR_SCOPED_STATUS:
+        return ProviderUnusable(msg)
     if status is not None and 400 <= status < 500:
         return ProviderRejected(msg)
     if status is not None and status >= 500:

@@ -4,10 +4,13 @@ Concrete providers raise typed ``ProviderError`` subclasses after retries, or
 (for older/stub paths) still return the historical failure sentinel strings.
 This wrapper:
 
-* fails over on **retryable** errors (``ProviderRateLimited``,
-  ``ProviderUnavailable``, unknown exceptions, and failure sentinels);
-* does **not** fail over on ``ProviderRejected`` (4xx / content policy) — the
-  same request is unlikely to succeed on another vendor and would waste quota;
+* fails over on every error whose ``failover`` is true — the retryable ones
+  (``ProviderRateLimited``, ``ProviderUnavailable``, unknown exceptions,
+  failure sentinels) and ``ProviderUnusable``, which is not retryable *here*
+  but is exactly what the second slot exists for: an expired key, a revoked
+  permission or a retired model on the primary says nothing about the peer;
+* does **not** fail over on ``ProviderRejected`` (400/422 / content policy) —
+  that request is bad, and the peer would reject it too;
 * treats blank OCR text as success (not a failure), matching
   ``_is_ocr_failed_text``.
 
@@ -57,7 +60,7 @@ class FailoverProvider(LLMProvider):
         try:
             result = self._primary.summarize(text, prompt, max_retries=max_retries)
         except ProviderError as exc:
-            if not exc.retryable:
+            if not exc.failover:
                 logger.warning(
                     "summary primary rejected request (not failing over): %s",
                     exc,
@@ -98,7 +101,7 @@ class FailoverProvider(LLMProvider):
         try:
             result = self._primary.ocr(image_bytes, page_num, proofread=proofread)
         except ProviderError as exc:
-            if not exc.retryable:
+            if not exc.failover:
                 logger.warning(
                     "OCR primary rejected page %d (not failing over): %s",
                     page_num,
