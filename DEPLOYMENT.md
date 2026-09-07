@@ -30,6 +30,32 @@ So a same-host client configured with the *wrong* token sees REST succeed and
 MCP answer 401. Send the bearer on every call — it is the only configuration
 that is correct on both faces.
 
+## Summarisation is process-wide
+
+`MANTISFETCH_DEFERRED_SUMMARY_MAX_CONCURRENT` (default 1) and
+`MANTISFETCH_DEFERRED_SUMMARY_MAX_QUEUED` (default 64) bound **the whole
+process**, not one caller. One MantisFetch typically serves several NodalOS
+instances and every agent on them, and every MCP ingest defers its summary — the
+tool always declares a budget, and a declared budget defers. So arrivals are a
+fan-in while the drain is this process making one section-by-section pass at a
+time.
+
+Past the queue bound a document is stored with `summary_status: not_queued`:
+the extraction is on disk and readable, only the summary did not happen, and
+`POST /doc/library/{doc_id}/summary` retries it. That is deliberately louder
+than an unbounded queue, where a caller reads `pending` from a document nobody
+is working on.
+
+Raising `MAX_CONCURRENT` raises the drain rate and the parallel load on the LLM
+provider together; pick it against that provider's rate limit. A summary costs
+one call per section plus two, so a 100-section document is ~102 calls.
+
+A restart cannot carry deferred summaries with it (they live in daemon
+threads). On startup every `running` summary is reset to `pending` so the status
+face stops claiming work that no longer exists; nothing is re-queued
+automatically, because with fan-in that would refill the queue at the worst
+moment. Retry the ones you care about.
+
 ## Request size
 
 `/web` and `/doc` stop reading a request body once it passes

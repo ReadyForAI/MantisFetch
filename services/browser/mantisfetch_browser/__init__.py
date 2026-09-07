@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -2017,6 +2018,15 @@ _WEB_SUMMARY_MAX_CONCURRENT = max(
 )
 _WEB_SUMMARY_CONCURRENCY = max(1, int(os.environ.get("MANTISFETCH_SUMMARY_BATCH_CONCURRENCY", "1")))
 _web_summary_sem = threading.BoundedSemaphore(_WEB_SUMMARY_MAX_CONCURRENT)
+# And bound how many may wait for it, for the reason docreader's queue is
+# bounded: this process is shared by every NodalOS behind it, the drain is one
+# LLM call at a time, and a waiting job is a thread holding the capture's
+# sections. Same key, so one number covers both paths.
+_WEB_SUMMARY_MAX_QUEUED = max(
+    1, int(os.environ.get("MANTISFETCH_DEFERRED_SUMMARY_MAX_QUEUED", "64"))
+)
+_web_summary_waiting = 0
+_web_summary_waiting_lock = threading.Lock()
 # Serializes the "read status → claim pending → enqueue" step for cache hits so
 # concurrent hits on the same cached doc can't enqueue duplicate LLM jobs.
 _web_summary_claim_lock = threading.Lock()
@@ -2507,8 +2517,34 @@ def _defer_web_summary(
         generate_summaries,
     )
 
+    global _web_summary_waiting
+
     doc_dir = docs_dir / _doc_storage_rel_path(doc_id, _normalize_content_type(content_type))
-    with _web_summary_sem:
+    if not _web_summary_sem.acquire(blocking=False):
+        with _web_summary_waiting_lock:
+            if _web_summary_waiting >= _WEB_SUMMARY_MAX_QUEUED:
+                # The capture itself is stored and readable; only its summary is
+                # not happening. Saying so beats a "pending" nobody is working
+                # on — and a cache hit on this document will offer to schedule
+                # it again, which is the retry.
+                logger.warning(
+                    "web capture summary not queued for %s: %d already waiting",
+                    doc_id,
+                    _WEB_SUMMARY_MAX_QUEUED,
+                )
+                _set_web_summary_status(
+                    doc_dir, "not_queued", error="summary queue is full"
+                )
+                with contextlib.suppress(Exception):
+                    _update_web_index_summary(docs_dir, doc_id, status="not_queued")
+                return
+            _web_summary_waiting += 1
+        try:
+            _web_summary_sem.acquire()
+        finally:
+            with _web_summary_waiting_lock:
+                _web_summary_waiting -= 1
+    try:
         # The generation this summary belongs to. Everything below re-checks it
         # under the cross-thread document lock — the same one docreader's writers
         # take (#168) — because the LLM call in between is long enough for a
@@ -2569,6 +2605,11 @@ def _defer_web_summary(
                 if _web_summary_target_intact(doc_dir, generation):
                     _set_web_summary_status(doc_dir, "failed", error=str(exc))
                     _update_web_index_summary(docs_dir, doc_id, status="failed")
+    finally:
+        # The slot was taken by hand above (the queue bound needs the
+        # non-blocking attempt first), so it is released by hand here.
+        with contextlib.suppress(ValueError):
+            _web_summary_sem.release()
 
 
 # Per-capture-key locks serialize *cache misses* for the same (url, content_type,
