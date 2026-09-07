@@ -64,12 +64,8 @@ class OpenAICompatProvider(LLMProvider):
     ) -> None:
         from openai import OpenAI
 
-        base_url_in = (
-            os.environ.get("MANTISFETCH_LLM_BASE_URL") if base_url is _UNSET else base_url
-        )
-        vendor_in = (
-            os.environ.get("MANTISFETCH_LLM_VENDOR") if vendor is _UNSET else vendor
-        )
+        base_url_in = os.environ.get("MANTISFETCH_LLM_BASE_URL") if base_url is _UNSET else base_url
+        vendor_in = os.environ.get("MANTISFETCH_LLM_VENDOR") if vendor is _UNSET else vendor
         self._vendor = get_vendor_profile(vendor_in, fallback_base_url=base_url_in)
         self._api_key = (
             os.environ.get("MANTISFETCH_LLM_API_KEY", "") if api_key is _UNSET else api_key
@@ -82,14 +78,8 @@ class OpenAICompatProvider(LLMProvider):
                 f"vendor {self._vendor.name!r} has no default model; "
                 "set MANTISFETCH_LLM_MODEL to the model name to use."
             )
-        ocr_model_in = (
-            os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
-        )
-        self._ocr_model = (
-            ocr_model_in
-            or self._vendor.default_ocr_model
-            or self._model
-        )
+        ocr_model_in = os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
+        self._ocr_model = ocr_model_in or self._vendor.default_ocr_model or self._model
         self._ocr_image_input_mode = self._resolve_image_input_mode(
             os.environ.get("MANTISFETCH_OCR_IMAGE_INPUT_MODE") or self._vendor.image_input_mode
         )
@@ -103,7 +93,9 @@ class OpenAICompatProvider(LLMProvider):
             os.environ.get("MANTISFETCH_OCR_EXTRA_BODY_JSON"),
             env_name="MANTISFETCH_OCR_EXTRA_BODY_JSON",
         )
-        self._ocr_proofread = os.environ.get("MANTISFETCH_OCR_PROOFREAD", "true").strip().lower() not in {
+        self._ocr_proofread = os.environ.get(
+            "MANTISFETCH_OCR_PROOFREAD", "true"
+        ).strip().lower() not in {
             "0",
             "false",
             "no",
@@ -112,8 +104,7 @@ class OpenAICompatProvider(LLMProvider):
 
         if not self._api_key:
             raise RuntimeError(
-                "MANTISFETCH_LLM_API_KEY is not set. "
-                "Export it before starting the service."
+                "MANTISFETCH_LLM_API_KEY is not set. Export it before starting the service."
             )
 
         self._client = OpenAI(
@@ -122,6 +113,12 @@ class OpenAICompatProvider(LLMProvider):
             max_retries=0,
             timeout=120,
         )
+
+    def describe_model(self, role: str = "summary") -> str:
+        # No check_configuration override: __init__ already raises when either
+        # the model or MANTISFETCH_LLM_API_KEY is missing, so construction here
+        # does prove the role can run.
+        return self._ocr_model if role == "ocr" else self._model
 
     @staticmethod
     def _resolve_image_input_mode(raw_mode: str | None) -> str:
@@ -299,13 +296,10 @@ class OpenAICompatProvider(LLMProvider):
         # The request body is part of it too: raising max_tokens after a
         # truncated transcription has to re-run the page, not hand back the
         # truncated text.
-        params = _short_digest(
-            json.dumps(self._ocr_extra_body or {}, sort_keys=True, default=str)
-        )
+        params = _short_digest(json.dumps(self._ocr_extra_body or {}, sort_keys=True, default=str))
         vendor = getattr(self._vendor, "name", None) or "openai-compat"
         return (
-            f"{vendor}@{endpoint}/{self._ocr_model}"
-            f"/proofread={self._ocr_proofread}/params={params}"
+            f"{vendor}@{endpoint}/{self._ocr_model}/proofread={self._ocr_proofread}/params={params}"
         )
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:

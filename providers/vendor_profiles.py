@@ -52,9 +52,7 @@ _VENDOR_PROFILES: dict[str, VendorProfile] = {
 }
 
 
-def get_vendor_profile(
-    name: str | None, *, fallback_base_url: str | None = None
-) -> VendorProfile:
+def get_vendor_profile(name: str | None, *, fallback_base_url: str | None = None) -> VendorProfile:
     """Return a vendor profile. Defaults to OpenAI only when unset.
 
     An unknown vendor name raises rather than silently sending requests to
@@ -71,6 +69,4 @@ def get_vendor_profile(
     if fallback_base_url:
         return VendorProfile(name=key, base_url=fallback_base_url.rstrip("/"))
     allowed = ", ".join(sorted(_VENDOR_PROFILES))
-    raise RuntimeError(
-        f"unknown MANTISFETCH_LLM_VENDOR {name!r}; must be one of: {allowed}"
-    )
+    raise RuntimeError(f"unknown MANTISFETCH_LLM_VENDOR {name!r}; must be one of: {allowed}")

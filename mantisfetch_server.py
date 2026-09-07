@@ -51,14 +51,15 @@ def _warn_unconfigured_llm() -> None:
 
     Deliberately a warning rather than a refusal to start: parsing, capture and
     local OCR are complete features that need no LLM at all, and a deployment
-    using only those must keep working. Constructing the provider costs no
-    network, so this is just the same error, surfaced at boot.
+    using only those must keep working. Building the provider and asking it
+    ``check_configuration()`` costs no network, so this is just the same error,
+    surfaced at boot.
     """
     from providers import get_provider  # noqa: PLC0415
 
     for role in ("summary", "ocr"):
         try:
-            get_provider(role)
+            get_provider(role).check_configuration()
         except Exception as exc:  # noqa: BLE001 - report, never block startup
             logger.warning(
                 "LLM role %r is not usable: %s — %s features will fail until this "
@@ -116,12 +117,11 @@ def _llm_role_status() -> dict[str, str]:
     for role in ("summary", "ocr"):
         try:
             provider = get_provider(role)
+            provider.check_configuration()
         except Exception as exc:  # noqa: BLE001 - health must not raise
             status[role] = f"unconfigured: {exc}"
             continue
-        inner = getattr(provider, "_inner", provider)
-        attr = "_ocr_model" if role == "ocr" else "_model"
-        status[role] = str(getattr(inner, attr, None) or type(inner).__name__)
+        status[role] = provider.describe_model(role)
     return status
 
 
@@ -212,10 +212,13 @@ class _RestAuthGate:
             denied = self._deny(scope)
             if denied is not None:
                 status, body = denied
-                await send({
-                    "type": "http.response.start", "status": status,
-                    "headers": [(b"content-type", b"application/json")],
-                })
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": status,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
                 await send({"type": "http.response.body", "body": body})
                 return
         await self.app(scope, receive, send)
@@ -289,16 +292,17 @@ class _BodyCeiling:
 
     @staticmethod
     async def _refuse(send: object, limit: int) -> None:
-        body = (
-            f'{{"detail":"request body exceeds the {limit}-byte ceiling"}}'
-        ).encode()
-        await send({
-            "type": "http.response.start", "status": 413,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode()),
-            ],
-        })
+        body = (f'{{"detail":"request body exceeds the {limit}-byte ceiling"}}').encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": body})
 
     async def __call__(self, scope: dict, receive: object, send: object) -> None:

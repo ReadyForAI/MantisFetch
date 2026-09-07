@@ -108,8 +108,11 @@ def _legacy_single_provider(monkeypatch) -> None:
 
     magika loads the developer's .env at import time, so the dual-slot keys can
     be present here and would put the process in per-role mode — a different
-    resolution path from the one under test.
+    resolution path from the one under test. The same .env can also select the
+    openai-compatible backend, which validates its key in ``__init__``; these
+    tests are about the gemini path, so pin it.
     """
+    monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "gemini")
     for key in (
         "MANTISFETCH_LLM_DEFAULT",
         "MANTISFETCH_LLM_EXTRA",
@@ -119,6 +122,7 @@ def _legacy_single_provider(monkeypatch) -> None:
         "MANTISFETCH_OCR_MODEL_FALLBACK",
         "MANTISFETCH_OCR_MODEL",
         "MANTISFETCH_LLM_MODEL",
+        "MANTISFETCH_LLM_API_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -149,3 +153,117 @@ def test_health_says_why_a_role_cannot_run(client, monkeypatch) -> None:
     assert llm["summary"].startswith("unconfigured:")
     assert "MANTISFETCH_LLM_MODEL" in llm["summary"]
     providers.reset_provider()
+
+
+# ── the diagnostic has to be right about the configurations we support ──────────
+
+
+def _dual_slot(monkeypatch, **extra: str) -> None:
+    """Two gemini slots with per-role models, i.e. credential scheme C."""
+    _legacy_single_provider(monkeypatch)
+    monkeypatch.setenv("MANTISFETCH_LLM_DEFAULT", "gemini")
+    monkeypatch.setenv("MANTISFETCH_LLM_DEFAULT_API_KEY", "test-key")
+    monkeypatch.setenv("MANTISFETCH_SUM_MODEL_DEFAULT", "gemini/primary-model")
+    monkeypatch.setenv("MANTISFETCH_OCR_MODEL_DEFAULT", "gemini/vision-model")
+    for key, value in extra.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_health_names_both_models_when_a_role_can_fail_over(client, monkeypatch) -> None:
+    """A configured fallback wraps the role in FailoverProvider, which holds no
+    ``_model`` of its own — so reading the attribute off the provider answered
+    with the wrapper's class name and told the operator nothing."""
+    import providers
+
+    _dual_slot(
+        monkeypatch,
+        MANTISFETCH_SUM_MODEL_FALLBACK="gemini/backup-model",
+        MANTISFETCH_OCR_MODEL_FALLBACK="gemini/vision-backup",
+    )
+    providers.reset_provider()
+
+    llm = client.get("/health").json()["llm"]
+    assert llm["summary"] == "primary-model -> backup-model"
+    assert llm["ocr"] == "vision-model -> vision-backup"
+    providers.reset_provider()
+
+
+def test_a_failover_pair_survives_one_broken_half(monkeypatch) -> None:
+    """Degraded is not unconfigured: the call still lands. It is not silent
+    either — the half that cannot run is named."""
+    from providers.failover import FailoverProvider
+    from providers.gemini import GeminiProvider
+
+    # Keys pinned per provider, not via the environment: a provider with no
+    # explicit key reads the environment at check time, and this test is about
+    # one half being broken while the other is not.
+    healthy = GeminiProvider(api_key="test-key", model="primary-model")
+    broken = GeminiProvider(api_key="", model="backup-model")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    pair = FailoverProvider(healthy, broken, role="summary")
+    pair.check_configuration()  # does not raise
+    assert "primary-model" in pair.describe_model("summary")
+    assert "GEMINI_API_KEY" in pair.describe_model("summary")
+
+    both_broken = FailoverProvider(broken, broken, role="summary")
+    with pytest.raises(RuntimeError, match="primary:.*fallback:"):
+        both_broken.check_configuration()
+
+
+def test_a_missing_key_is_not_a_configured_role(client, monkeypatch) -> None:
+    """A model resolves without proving a key exists — every backend opens its
+    client lazily, so construction alone said "healthy" for a role that would
+    401 on the first document."""
+    import providers
+
+    _legacy_single_provider(monkeypatch)
+    monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "some-model")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    providers.reset_provider()
+
+    llm = client.get("/health").json()["llm"]
+    assert llm["summary"].startswith("unconfigured:")
+    assert "GEMINI_API_KEY" in llm["summary"]
+    providers.reset_provider()
+
+
+def test_startup_reports_a_missing_key_too(monkeypatch, caplog) -> None:
+    import logging
+
+    import providers
+
+    _legacy_single_provider(monkeypatch)
+    monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "some-model")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    providers.reset_provider()
+
+    import mantisfetch_server
+
+    with caplog.at_level(logging.WARNING):
+        mantisfetch_server._warn_unconfigured_llm()
+    assert "GEMINI_API_KEY" in caplog.text
+    providers.reset_provider()
+
+
+def test_the_sentinel_wrapper_delegates_both_hooks(monkeypatch) -> None:
+    """``LLMProvider`` gives every subclass a default for these, and
+    ``__getattr__`` only fires for attributes the wrapper does *not* have — so a
+    wrapper that forgets to delegate answers with its own class name and looks
+    fine. That is exactly how ``ocr_fingerprint`` was quietly neutered once."""
+    from providers.gemini import GeminiProvider
+    from providers.sentinel import SentinelBoundary
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    wrapped = SentinelBoundary(GeminiProvider(model="text-model", ocr_model="vision-model"))
+
+    assert wrapped.describe_model("summary") == "text-model"
+    assert wrapped.describe_model("ocr") == "vision-model"
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+        wrapped.check_configuration()

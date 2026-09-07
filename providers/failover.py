@@ -48,6 +48,19 @@ def _ocr_failed(text: str | None) -> bool:
     return text.strip().startswith(("[OCR failed", "[OCR 失败"))
 
 
+def _describe(provider: LLMProvider, role: str) -> str:
+    """A half's model, or why that half could not run.
+
+    Checked, not just read: a model name resolves whether or not the slot has a
+    key, so naming it alone would report a dead half as healthy.
+    """
+    try:
+        provider.check_configuration()
+        return provider.describe_model(role)
+    except Exception as exc:  # noqa: BLE001 - a half that cannot answer is the answer
+        return f"unusable: {exc}"
+
+
 class FailoverProvider(LLMProvider):
     """Try ``primary``; on retryable failure, retry once on ``fallback``."""
 
@@ -87,6 +100,25 @@ class FailoverProvider(LLMProvider):
         )
         metrics.incr("failover_summary")
         return self._fallback.summarize(text, prompt, max_retries=max_retries)
+
+    def check_configuration(self) -> None:
+        """Usable while *either* half is: that is what the pair is for.
+
+        A single broken half is not an outage — the call fails over — so it must
+        not read as "unconfigured". It is not silent either: ``describe_model``
+        names it, and that string is what /health shows.
+        """
+        errors = []
+        for label, provider in (("primary", self._primary), ("fallback", self._fallback)):
+            try:
+                provider.check_configuration()
+            except Exception as exc:  # noqa: BLE001 - collected, then re-raised as one
+                errors.append(f"{label}: {exc}")
+        if len(errors) == 2:
+            raise RuntimeError("; ".join(errors))
+
+    def describe_model(self, role: str = "summary") -> str:
+        return f"{_describe(self._primary, role)} -> {_describe(self._fallback, role)}"
 
     def ocr_fingerprint(self) -> str:
         """Both halves: a cached page may have come from either, so an entry

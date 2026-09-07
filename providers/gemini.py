@@ -47,9 +47,7 @@ def _gemini_empty_text_error(response: object, what: str) -> ProviderError:
             reason_bits.append(f"finish_reason={fr}")
             fr_s = str(fr).upper()
             if any(tok in fr_s for tok in ("SAFETY", "BLOCK", "PROHIBITED", "RECITATION")):
-                return ProviderRejected(
-                    f"Gemini {what} blocked ({', '.join(reason_bits)})"
-                )
+                return ProviderRejected(f"Gemini {what} blocked ({', '.join(reason_bits)})")
     if block:
         return ProviderRejected(f"Gemini {what} blocked ({', '.join(reason_bits)})")
     detail = ", ".join(reason_bits) if reason_bits else "no text parts"
@@ -83,17 +81,34 @@ class GeminiProvider(LLMProvider):
                 "gemini has no default model; set MANTISFETCH_LLM_MODEL to the "
                 "model name to use (e.g. the one Google's docs list as current)."
             )
-        ocr_model_in = (
-            os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
-        )
+        ocr_model_in = os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
         self._ocr_model = ocr_model_in or self._model
         self._api_key_override = None if api_key is _UNSET else (api_key or None)
-        self._ocr_proofread = os.environ.get("MANTISFETCH_OCR_PROOFREAD", "true").strip().lower() not in {
+        self._ocr_proofread = os.environ.get(
+            "MANTISFETCH_OCR_PROOFREAD", "true"
+        ).strip().lower() not in {
             "0",
             "false",
             "no",
             "off",
         }
+
+    def _resolve_api_key(self) -> str:
+        """The key this provider would use, or raise saying which env var to set."""
+        api_key = (
+            self._api_key_override
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+        )
+        if not api_key:
+            raise RuntimeError("Gemini API key not set. Export GEMINI_API_KEY or GOOGLE_API_KEY.")
+        return api_key
+
+    def check_configuration(self) -> None:
+        self._resolve_api_key()
+
+    def describe_model(self, role: str = "summary") -> str:
+        return self._ocr_model if role == "ocr" else self._model
 
     def _init(self) -> None:
         """Lazy-initialise the Gemini client on first use."""
@@ -107,15 +122,7 @@ class GeminiProvider(LLMProvider):
                 "google-genai is not installed. Run: pip install google-genai"
             ) from exc
 
-        api_key = (
-            self._api_key_override
-            or os.environ.get("GEMINI_API_KEY")
-            or os.environ.get("GOOGLE_API_KEY")
-        )
-        if not api_key:
-            raise RuntimeError(
-                "Gemini API key not set. Export GEMINI_API_KEY or GOOGLE_API_KEY."
-            )
+        api_key = self._resolve_api_key()
 
         self._client = genai.Client(api_key=api_key)
 
@@ -146,7 +153,9 @@ class GeminiProvider(LLMProvider):
                     logger.warning("Gemini summarize rejected (not retrying): %s", exc)
                     raise typed from exc
                 if attempt < max_retries:
-                    logger.warning("Gemini summarize retry (%d/%d): %s", attempt + 1, max_retries, exc)
+                    logger.warning(
+                        "Gemini summarize retry (%d/%d): %s", attempt + 1, max_retries, exc
+                    )
                     time.sleep(2**attempt)
                 else:
                     logger.error("Gemini summarize failed after %d retries: %s", max_retries, exc)
@@ -185,8 +194,10 @@ class GeminiProvider(LLMProvider):
                 # attempt == 0 skipped it for any page that needed a retry.
                 # Only the explicit OCR failure sentinel counts — not any text
                 # that happens to start with '[' (e.g. "[1] footnote …").
-                if do_proofread and result and not result.strip().startswith(
-                    ("[OCR failed", "[OCR 失败")
+                if (
+                    do_proofread
+                    and result
+                    and not result.strip().startswith(("[OCR failed", "[OCR 失败"))
                 ):
                     try:
                         review = self._client.models.generate_content(
@@ -216,10 +227,21 @@ class GeminiProvider(LLMProvider):
                     )
                     raise typed from exc
                 if attempt < max_retries:
-                    logger.warning("Gemini OCR retry (%d/%d) for page %d: %s", attempt + 1, max_retries, page_num, exc)
+                    logger.warning(
+                        "Gemini OCR retry (%d/%d) for page %d: %s",
+                        attempt + 1,
+                        max_retries,
+                        page_num,
+                        exc,
+                    )
                     time.sleep(2**attempt)
                 else:
-                    logger.warning("Gemini OCR failed for page %d after %d retries: %s", page_num, max_retries, exc)
+                    logger.warning(
+                        "Gemini OCR failed for page %d after %d retries: %s",
+                        page_num,
+                        max_retries,
+                        exc,
+                    )
                     raise typed from exc
         raise classify_provider_error(
             RuntimeError(f"Gemini OCR exhausted retries for page {page_num}")

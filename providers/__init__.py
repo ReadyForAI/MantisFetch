@@ -94,6 +94,7 @@ def unwrap_provider(provider: LLMProvider) -> LLMProvider:
 
 # ── Legacy single-provider path ───────────────────────────────────────────────
 
+
 def _build_legacy() -> LLMProvider:
     name = os.environ.get("MANTISFETCH_LLM_PROVIDER", "gemini").lower().strip()
     if name == "gemini":
@@ -105,12 +106,12 @@ def _build_legacy() -> LLMProvider:
 
         return OpenAICompatProvider()
     raise ValueError(
-        f"Unknown MANTISFETCH_LLM_PROVIDER={name!r}. "
-        "Supported values: 'gemini', 'openai'."
+        f"Unknown MANTISFETCH_LLM_PROVIDER={name!r}. Supported values: 'gemini', 'openai'."
     )
 
 
 # ── Dual-slot per-role path ───────────────────────────────────────────────────
+
 
 class _Slot:
     __slots__ = ("label", "base_url", "api_key")
@@ -134,9 +135,7 @@ def _load_slots() -> dict[str, _Slot]:
             api_key=os.environ.get(f"MANTISFETCH_LLM_{label}_API_KEY", "").strip(),
         )
     if not slots:
-        raise RuntimeError(
-            "MANTISFETCH_LLM_DEFAULT is set but resolves to no provider slot."
-        )
+        raise RuntimeError("MANTISFETCH_LLM_DEFAULT is set but resolves to no provider slot.")
     return slots
 
 
@@ -144,9 +143,7 @@ def _build_slot_provider(spec: str, slots: dict[str, _Slot]) -> LLMProvider:
     """Build a concrete provider from a ``<vendor>/<model>`` spec + slot creds."""
     spec = spec.strip()
     if "/" not in spec:
-        raise RuntimeError(
-            f"model spec {spec!r} must be '<vendor>/<model>' (e.g. zhipu/glm-4.6v)."
-        )
+        raise RuntimeError(f"model spec {spec!r} must be '<vendor>/<model>' (e.g. zhipu/glm-4.6v).")
     vendor, _, model = spec.partition("/")
     vendor = vendor.strip().lower()
     model = model.strip()
@@ -166,8 +163,7 @@ def _build_slot_provider(spec: str, slots: dict[str, _Slot]) -> LLMProvider:
         # keyless gemini fallback fail to build → discarded like any other bad
         # fallback, instead of raising only at first use.
         raise RuntimeError(
-            f"slot for vendor {vendor!r} has no API key; "
-            f"set MANTISFETCH_LLM_{slot.label}_API_KEY."
+            f"slot for vendor {vendor!r} has no API key; set MANTISFETCH_LLM_{slot.label}_API_KEY."
         )
 
     if vendor == "gemini":
@@ -209,8 +205,7 @@ def _build_dual(role: str) -> LLMProvider:
     primary_spec = os.environ.get(f"MANTISFETCH_{prefix}_MODEL_DEFAULT", "").strip()
     if not primary_spec:
         raise RuntimeError(
-            f"MANTISFETCH_{prefix}_MODEL_DEFAULT is required when "
-            "MANTISFETCH_LLM_DEFAULT is set."
+            f"MANTISFETCH_{prefix}_MODEL_DEFAULT is required when MANTISFETCH_LLM_DEFAULT is set."
         )
     primary = _build_slot_provider(primary_spec, slots)
 
@@ -224,8 +219,7 @@ def _build_dual(role: str) -> LLMProvider:
         # A misconfigured *backup* must not take down the working primary; a
         # broken fallback degrades to no-failover with a loud log, not a crash.
         logger.error(
-            "%s fallback model %r could not be built (%s); "
-            "continuing without failover.",
+            "%s fallback model %r could not be built (%s); continuing without failover.",
             role,
             fallback_spec,
             exc,
