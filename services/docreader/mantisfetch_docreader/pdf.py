@@ -40,8 +40,8 @@ from .ocr.engines import (
     LOCAL_OCR_ENABLED,
     _is_ocr_failed_text,
     _ocr_cache_key,
-    _ocr_cache_path,
     _ocr_cache_variant_path,
+    llm_ocr_cache_key,
 )
 from .ocr_text import (
     _cleanup_ocr_text,
@@ -260,6 +260,12 @@ def parse_pdf(
             "pages_skipped": [],
         }
 
+        # Resolved once per document rather than per page: it asks the provider
+        # registry which backend is active, and that does not change mid-parse.
+        llm_cache_key = (
+            llm_ocr_cache_key(proofread=ocr_plan["proofread"]) if llm_ocr_set else "llm"
+        )
+
         for page in doc:
             page_num = page.number + 1
             if page_num not in local_ocr_set and page_num not in llm_ocr_set:
@@ -267,7 +273,7 @@ def parse_pdf(
             if page_num in llm_ocr_set:
                 requested_scale = processing_policy.llm_ocr_render_scale
                 max_pixels = processing_policy.max_llm_ocr_pixels
-                cache_key = "llm"
+                cache_key = llm_cache_key
             else:
                 requested_scale = processing_policy.local_ocr_render_scale
                 max_pixels = processing_policy.max_local_ocr_pixels
@@ -325,14 +331,14 @@ def parse_pdf(
 
             if cache_dir:
                 ck = _ocr_cache_key(img_bytes)
-                if page_num in llm_ocr_set:
-                    cp = _ocr_cache_path(cache_dir, page_num)
-                    ck_path = cp.with_suffix(f".{ck}.txt")
-                else:
-                    ck_path = _ocr_cache_variant_path(
-                        cache_dir,
-                        f"ocr_p{page_num:04d}.{cache_key}.{ck}.txt",
-                    )
+                # Both backends key on how the text was produced as well as on
+                # the image. The LLM path used to key on the image alone, so a
+                # page cached under one model was served for every model after
+                # it (F07).
+                ck_path = _ocr_cache_variant_path(
+                    cache_dir,
+                    f"ocr_p{page_num:04d}.{cache_key}.{ck}.txt",
+                )
                 if ck_path.exists():
                     cached = ck_path.read_text(encoding="utf-8")
                     if _is_ocr_failed_text(cached):
@@ -418,8 +424,11 @@ def parse_pdf(
                     img_b = png_path.read_bytes()
                     result = gemini_ocr(img_b, pn, proofread=ocr_plan["proofread"])
                     if cache_dir and not _is_ocr_failed_text(result):
-                        _ocr_cache_path(cache_dir, pn).with_suffix(
-                            f".{_ocr_cache_key(img_b)}.txt"
+                        # Written under the same fingerprinted name the read
+                        # above looks for, or every page would miss forever.
+                        _ocr_cache_variant_path(
+                            cache_dir,
+                            f"ocr_p{pn:04d}.{llm_cache_key}.{_ocr_cache_key(img_b)}.txt",
                         ).write_text(result, encoding="utf-8")
                     return pn, result
                 finally:

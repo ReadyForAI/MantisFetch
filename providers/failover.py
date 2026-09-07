@@ -85,6 +85,15 @@ class FailoverProvider(LLMProvider):
         metrics.incr("failover_summary")
         return self._fallback.summarize(text, prompt, max_retries=max_retries)
 
+    def ocr_fingerprint(self) -> str:
+        """Both halves: a cached page may have come from either, so an entry
+        written under this pair is only valid for this pair."""
+        primary = getattr(self._primary, "ocr_fingerprint", lambda: type(self._primary).__name__)()
+        fallback = getattr(
+            self._fallback, "ocr_fingerprint", lambda: type(self._fallback).__name__
+        )()
+        return f"failover({primary}|{fallback})"
+
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         try:
             result = self._primary.ocr(image_bytes, page_num, proofread=proofread)

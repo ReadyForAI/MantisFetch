@@ -42,6 +42,19 @@ class LLMProvider(ABC):
             The generated summary string.
         """
 
+    def ocr_fingerprint(self) -> str:
+        """What identifies this backend's OCR output, for cache validity.
+
+        Two runs that share a fingerprint are expected to produce the same text
+        for the same image; anything that would change the text — the vendor,
+        the model, the proofread setting — belongs in here. Credentials never
+        do: the string is written into a filename.
+
+        The default names only the class, which is the conservative answer for
+        a backend that has not said more: it changes when the backend does.
+        """
+        return type(self).__name__
+
     @abstractmethod
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """Extract text from a page image via vision.

@@ -280,6 +280,10 @@ class OpenAICompatProvider(LLMProvider):
             logger.error("OpenAI-compat summarize failed: %s", exc)
             raise classify_provider_error(exc) from exc
 
+    def ocr_fingerprint(self) -> str:
+        vendor = getattr(self._vendor, "name", None) or "openai-compat"
+        return f"{vendor}/{self._ocr_model}/proofread={self._ocr_proofread}"
+
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """OCR a page image via the OpenAI vision endpoint (base64-encoded)."""
         image_part = self._build_ocr_image_part(image_bytes)

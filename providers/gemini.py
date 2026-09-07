@@ -141,6 +141,9 @@ class GeminiProvider(LLMProvider):
                     raise typed from exc
         raise classify_provider_error(RuntimeError("Gemini summarize exhausted retries"))
 
+    def ocr_fingerprint(self) -> str:
+        return f"gemini/{self._ocr_model}/proofread={getattr(self, '_ocr_proofread', None)}"
+
     def ocr(
         self,
         image_bytes: bytes,
