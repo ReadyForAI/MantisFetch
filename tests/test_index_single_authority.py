@@ -201,8 +201,9 @@ def test_a_failed_export_does_not_undo_a_committed_write(docs, monkeypatch) -> N
     its files back around a row that was already committed — a replacement would
     end up with the old document on disk and the new one's metadata in the
     index, which is worse than a stale JSON file."""
-    import mantisfetch_common.doc_index_store as dis
     from mantisfetch_docreader.storage import _load_doc_index, _update_doc_index
+
+    import mantisfetch_common.doc_index_store as dis
 
     _update_doc_index(docs, _meta(1), "d1")
     monkeypatch.setattr(
