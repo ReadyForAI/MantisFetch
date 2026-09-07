@@ -18,6 +18,8 @@ import logging
 import os
 import time
 
+from urllib.parse import urlparse
+
 from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvider
 from providers.errors import (
     ProviderError,
@@ -281,8 +283,14 @@ class OpenAICompatProvider(LLMProvider):
             raise classify_provider_error(exc) from exc
 
     def ocr_fingerprint(self) -> str:
+        # The endpoint is part of the identity: two local servers behind the
+        # same vendor profile and the same model alias serve different weights,
+        # and without this they would share cache entries. Only scheme, host and
+        # port — a base_url can carry a key in its path or query.
+        parsed = urlparse(self._base_url)
+        endpoint = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else self._base_url
         vendor = getattr(self._vendor, "name", None) or "openai-compat"
-        return f"{vendor}/{self._ocr_model}/proofread={self._ocr_proofread}"
+        return f"{vendor}@{endpoint}/{self._ocr_model}/proofread={self._ocr_proofread}"
 
     def ocr(self, image_bytes: bytes, page_num: int, proofread: bool | None = None) -> str:
         """OCR a page image via the OpenAI vision endpoint (base64-encoded)."""

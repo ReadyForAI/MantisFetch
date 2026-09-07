@@ -84,6 +84,7 @@ def test_a_provider_reports_its_ocr_identity() -> None:
     provider = oc.OpenAICompatProvider.__new__(oc.OpenAICompatProvider)
     provider._ocr_model = "glm-4.6v"
     provider._ocr_proofread = True
+    provider._base_url = "https://open.bigmodel.cn/api/paas/v4"
     provider._vendor = type("V", (), {"name": "zhipu"})()
 
     fingerprint = provider.ocr_fingerprint()
@@ -182,3 +183,75 @@ def test_the_same_model_still_reads_its_own_cache(scanned_pdf, tmp_path, monkeyp
 
     assert calls["n"] == 1, "the second parse re-ran OCR it had already paid for"
     assert "THE ONE MODEL" in second.pages[0].text
+
+
+# ── through the real factory, not a patched seam (local Codex review of #260) ────
+def _factory_fingerprint(monkeypatch, **env):
+    """The fingerprint the pipeline actually gets: whatever `get_provider("ocr")`
+    returns, wrappers included."""
+    import providers
+    from mantisfetch_docreader.ocr import engines
+
+    for key in (
+        "MANTISFETCH_LLM_PROVIDER",
+        "MANTISFETCH_LLM_VENDOR",
+        "MANTISFETCH_LLM_API_KEY",
+        "MANTISFETCH_LLM_BASE_URL",
+        "MANTISFETCH_LLM_MODEL",
+        "MANTISFETCH_OCR_MODEL",
+        "MANTISFETCH_LLM_DEFAULT",
+        "MANTISFETCH_LLM_EXTRA",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    providers.reset_provider()
+    return engines._ocr_provider_fingerprint()
+
+
+def test_the_wrapper_the_factory_returns_reports_the_real_provider(monkeypatch) -> None:
+    """Every provider is handed out wrapped in a SentinelBoundary, and
+    `__getattr__` does not fire for a method the base class already defines. So
+    the wrapper answered with its own class name for every configuration and the
+    cache key went back to being constant — with the unit tests above still
+    green, because they patched the very seam that was broken."""
+    base = dict(
+        MANTISFETCH_LLM_PROVIDER="openai",
+        MANTISFETCH_LLM_VENDOR="zhipu",
+        MANTISFETCH_LLM_API_KEY="test-key",
+    )
+    a = _factory_fingerprint(monkeypatch, **base, MANTISFETCH_OCR_MODEL="model-a")
+    b = _factory_fingerprint(monkeypatch, **base, MANTISFETCH_OCR_MODEL="model-b")
+
+    assert "SentinelBoundary" not in a, a
+    assert "model-a" in a and "model-b" in b
+    assert a != b
+
+
+def test_the_endpoint_is_part_of_the_identity(monkeypatch) -> None:
+    """Two local servers behind the same vendor profile and model alias serve
+    different weights."""
+    base = dict(
+        MANTISFETCH_LLM_PROVIDER="openai",
+        MANTISFETCH_LLM_API_KEY="test-key",
+        MANTISFETCH_OCR_MODEL="vision",
+    )
+    a = _factory_fingerprint(monkeypatch, **base, MANTISFETCH_LLM_BASE_URL="http://box-a:8000/v1")
+    b = _factory_fingerprint(monkeypatch, **base, MANTISFETCH_LLM_BASE_URL="http://box-b:8000/v1")
+
+    assert a != b
+
+
+def test_the_fingerprint_carries_no_credentials(monkeypatch) -> None:
+    """It is written into a filename."""
+    fingerprint = _factory_fingerprint(
+        monkeypatch,
+        MANTISFETCH_LLM_PROVIDER="openai",
+        MANTISFETCH_LLM_API_KEY="sk-secret-do-not-leak",
+        MANTISFETCH_LLM_BASE_URL="http://box/v1?token=also-secret",
+        MANTISFETCH_OCR_MODEL="vision",
+    )
+    assert "sk-secret-do-not-leak" not in fingerprint
+    assert "also-secret" not in fingerprint
