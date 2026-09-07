@@ -36,6 +36,20 @@ def _hermetic_mcp_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_llm_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin MANTISFETCH_LLM_MODEL per test — the other half of the .env leak above.
+
+    No provider invents a model name any more, so constructing one without a
+    model raises. Whether it does depended on the developer's ``.env``: locally
+    magika leaks a model in and every provider test passed, while CI has no
+    ``.env`` and the same tests failed. Pinning it here makes the environment the
+    same in both places. Tests about a *missing* model delenv it via their own
+    monkeypatch (same instance), which wins over this setenv.
+    """
+    monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "test-model")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _hermetic_docs_dir_session(tmp_path_factory: pytest.TempPathFactory):
     """Redirect the library before anything session-scoped can touch it.
