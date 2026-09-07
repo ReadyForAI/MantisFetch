@@ -21,7 +21,6 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from i18n import t
 from mantisfetch_common import __version__
 from mantisfetch_common import metrics as metrics
-from mantisfetch_common.atomic import _write_json
 from mantisfetch_common.atomic import _write_text as _write_text_atomic
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
@@ -2316,26 +2315,20 @@ def _persist_web_capture(
 
         with _doc_index_lock:
             final_dir.parent.mkdir(parents=True, exist_ok=True)
-            if final_dir.exists():
-                shutil.rmtree(final_dir)
+            # Publish, but keep a way back: the index commit below can fail, and
+            # a published directory with no index row is a document nothing can
+            # find and nothing will clean up. Any previous version moves aside
+            # rather than being deleted, so a failed re-capture restores it
+            # instead of destroying both.
+            rollback_dir = final_dir.with_name(final_dir.name + ".rollback-capture")
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+            had_previous = final_dir.exists()
+            if had_previous:
+                os.replace(final_dir, rollback_dir)
             os.replace(staging_dir, final_dir)
             staging_dir = None  # published; don't cleanup in finally
 
-            # doc-index.json (v2, shared with docreader)
-            index_path = docs_dir / "doc-index.json"
-            if index_path.exists():
-                try:
-                    with open(index_path, encoding="utf-8") as f:
-                        index: dict[str, Any] = json.load(f)
-                except (OSError, ValueError):
-                    index = {"version": 2, "documents": []}
-            else:
-                index = {"version": 2, "documents": []}
-
-            index["version"] = 2
-            if not isinstance(index.get("documents"), list):
-                index["documents"] = []
-            index["documents"] = [d for d in index["documents"] if d.get("id") != doc_id]
+            # The library index (v2, shared with docreader)
             index_entry: dict[str, Any] = (
                 {"summary_mode": "defer", "summary_status": "pending"}
                 if summary_mode == "defer"
@@ -2365,15 +2358,21 @@ def _persist_web_capture(
                     "metadata": _indexable_metadata(metadata or {}),
                 }
             )
-            index["documents"].append(index_entry)
-            index["last_updated"] = now_str
-            try:
-                from mantisfetch_common import doc_index_store as dis
+            # SQLite is the commit point and JSON its export (see docreader's
+            # _update_doc_index). The old fallback wrote JSON alone when the
+            # database refused, and the next successful write — anywhere in the
+            # library — erased that record on its way out.
+            from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
+            try:
                 dis.upsert_document(docs_dir, index_entry)
-                dis.export_json(docs_dir, last_updated=now_str)
             except Exception:
-                _write_json(index_path, index)
+                shutil.rmtree(final_dir, ignore_errors=True)
+                if had_previous:
+                    os.replace(rollback_dir, final_dir)
+                raise
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+            _export_index_json(docs_dir, now_str)
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -2414,39 +2413,22 @@ def _update_web_index_summary(
     captures the same way they report uploaded docs (which carry summary_mode /
     summary_status in the index)."""
     with _doc_index_lock:
-        index_path = docs_dir / "doc-index.json"
-        try:
-            from mantisfetch_common import doc_index_store as dis
+        # Commit to SQLite, export JSON. The old JSON-only fallback below this
+        # was worse than doing nothing: the next export rebuilt JSON from the
+        # database and dropped the status this had just recorded.
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-            docs = dis.list_documents(docs_dir)
-            if not docs and index_path.exists():
-                index = json.loads(index_path.read_text(encoding="utf-8"))
-                docs = index.get("documents") if isinstance(index, dict) else []
-            for entry in docs or []:
-                if entry.get("id") == doc_id:
-                    entry["summary_mode"] = "defer"
-                    entry["summary_status"] = status
-                    if digest is not None:
-                        entry["digest"] = digest[:200]
-                    dis.upsert_document(docs_dir, entry)
-                    dis.export_json(
-                        docs_dir,
-                        last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    )
-                    return
-        except Exception:
-            pass
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        for entry in index.get("documents", []):
+        index = _load_doc_index(docs_dir) or {}
+        for entry in index.get("documents") or []:
             if entry.get("id") == doc_id:
                 entry["summary_mode"] = "defer"
                 entry["summary_status"] = status
                 if digest is not None:
                     entry["digest"] = digest[:200]
-                _write_json(index_path, index)
+                dis.upsert_document(docs_dir, entry)
+                _export_index_json(
+                    docs_dir, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
                 return
 
 
@@ -2479,7 +2461,12 @@ def _defer_web_summary(
             logger.info("web capture summary skipped (doc deleted): %s", doc_id)
             return
         _set_web_summary_status(doc_dir, "running")
-        _update_web_index_summary(docs_dir, doc_id, status="running")
+        try:
+            _update_web_index_summary(docs_dir, doc_id, status="running")
+        except Exception as exc:  # noqa: BLE001 - same as the claim above
+            logger.warning("web summary start for %s not recorded: %s", doc_id, exc)
+            _set_web_summary_status(doc_dir, "failed", error=str(exc))
+            return
         text_sections = [s for s in sections if s.get("type") != "table"]
         parsed = ParsedDocument(
             filename=title or url,
@@ -2550,7 +2537,35 @@ async def _optional_capture_lock(key: str | None) -> AsyncGenerator[None, None]:
         yield
 
 
+def _export_index_json(docs_dir: Path, last_updated: str) -> None:
+    """Refresh doc-index.json from the database, best effort — same contract as
+    docreader's helper of this name: the commit already happened, this file is a
+    derived view, and a failure here leaves it stale rather than the library
+    wrong."""
+    from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+    try:
+        dis.export_json(docs_dir, last_updated=last_updated)
+    except Exception as exc:  # noqa: BLE001 - the index is committed either way
+        logger.warning("doc-index.json export failed (index is committed): %s", exc)
+
+
 def _load_doc_index(docs_dir: Path) -> dict[str, Any] | None:
+    """The library index, read from the same place docreader writes it.
+
+    This used to read ``doc-index.json`` alone while docreader preferred SQLite,
+    which made the two services disagree about which documents exist whenever
+    the export was behind. The JSON read stays as the fallback for a library
+    whose database cannot be opened at all — the shape callers expect is the
+    v2 index document either way.
+    """
+    try:
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+        # An empty result is an answer, not a miss — see docreader's loader.
+        return {"version": 2, "documents": dis.list_documents(docs_dir)}
+    except Exception:  # noqa: BLE001 - fall through to the JSON export
+        pass
     index_path = docs_dir / "doc-index.json"
     if not index_path.exists():
         return None
@@ -2678,10 +2693,11 @@ def _merge_capture_tags_metadata(
         return entry
 
     with _doc_index_lock:
-        index_path = docs_dir / "doc-index.json"
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        # Read from the index of record, not from its JSON export: merging into
+        # a stale export and writing it back put the merge somewhere the next
+        # export would overwrite.
+        index = _load_doc_index(docs_dir)
+        if index is None:
             return entry
         docs = index.get("documents")
         if not isinstance(docs, list):
@@ -2721,14 +2737,10 @@ def _merge_capture_tags_metadata(
         target["metadata"] = merged_index_meta
 
         index["last_updated"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_json(index_path, index)
-        try:
-            from mantisfetch_common import doc_index_store as dis
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-            dis.upsert_document(docs_dir, target)
-            dis.export_json(docs_dir, last_updated=index["last_updated"])
-        except Exception:
-            pass
+        dis.upsert_document(docs_dir, target)
+        _export_index_json(docs_dir, index["last_updated"])
 
         # Keep manifest in sync when the product tree is still present.
         # Manifest stores full metadata (including nested values); index is filtered.
@@ -2793,7 +2805,16 @@ def _resolve_cached_summary(
         if not sections:
             return status
         _set_web_summary_status(doc_dir, "pending")
-        _update_web_index_summary(docs_dir, doc_id, status="pending")
+        try:
+            _update_web_index_summary(docs_dir, doc_id, status="pending")
+        except Exception as exc:  # noqa: BLE001 - give the claim back
+            # The claim is what stops a second cache hit from enqueueing a
+            # duplicate job, so a claim that fails to record must be released:
+            # left at "pending" with no worker behind it, every later request
+            # reads "one is already in flight" and none ever starts.
+            logger.warning("web summary claim for %s not recorded: %s", doc_id, exc)
+            _set_web_summary_status(doc_dir, "failed", error=str(exc))
+            return "failed"
     threading.Thread(
         target=_defer_web_summary,
         args=(

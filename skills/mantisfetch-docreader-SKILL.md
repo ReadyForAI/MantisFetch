@@ -584,7 +584,10 @@ All parsed results are stored under `DOCS_DIR`:
 
 ```text
 docs/
-  ├─ doc-index.json              ← Global index (v2 format, shared with MantisFetch Browser)
+  ├─ doc-index.json              ← Global index, v2 (shared with MantisFetch Browser).
+  │                                Read it, don't write it: the index of record is
+  │                                .doc-index.sqlite and this file is exported from it
+  │                                on every change, so an edit here is overwritten.
   │
   ├─ General/
   │   └─ DOC-001/                ← Default categorized parsed results
