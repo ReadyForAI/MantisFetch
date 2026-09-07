@@ -111,3 +111,79 @@ def test_the_ceiling_is_derived_from_the_upload_limit(monkeypatch) -> None:
 
     assert server._max_request_bytes() > dr.MAX_UPLOAD_BYTES
     assert server._max_request_bytes() < dr.MAX_UPLOAD_BYTES * 2
+
+
+def test_a_refused_chunked_upload_closes_what_it_spooled(monkeypatch) -> None:
+    """Bounding the read is not enough if the temp files stay open.
+
+    Starlette's multipart parser closes the files it has spooled when the stream
+    raises MultiPartException or OSError, and for nothing else — a disconnect or
+    a truncated body leaves them open until the garbage collector runs, which is
+    the disk this ceiling exists to bound.
+
+    Driven at the ASGI layer rather than through TestClient: the leak needs the
+    body to arrive in several chunks, so that the parser has opened a spool
+    before the ceiling is crossed, and TestClient hands the whole body over at
+    once.
+    """
+    import asyncio
+    import tempfile
+
+    import mantisfetch_server as server
+
+    monkeypatch.setattr(server, "_max_request_bytes", lambda: 4096)
+
+    opened: list = []
+    real_init = tempfile.SpooledTemporaryFile.__init__
+
+    def tracking_init(self, *a, **kw):
+        real_init(self, *a, **kw)
+        opened.append(self)
+
+    monkeypatch.setattr(tempfile.SpooledTemporaryFile, "__init__", tracking_init)
+
+    boundary = "----ceiling"
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="b.txt"\r\n'
+        f"Content-Type: text/plain\r\n\r\n"
+    ).encode()
+    chunks = [head] + [b"x" * 3000 for _ in range(6)] + [f"\r\n--{boundary}--\r\n".encode()]
+
+    async def drive():
+        it = iter(chunks)
+
+        async def receive():
+            try:
+                return {"type": "http.request", "body": next(it), "more_body": True}
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        sent: list = []
+
+        async def send(message):
+            sent.append(message)
+
+        await server.app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/doc/parse",
+                "raw_path": b"/doc/parse",
+                "query_string": b"",
+                "root_path": "",
+                "client": ("127.0.0.1", 50000),
+                "headers": [
+                    (b"content-type", f"multipart/form-data; boundary={boundary}".encode())
+                ],
+            },
+            receive,
+            send,
+        )
+        return sent
+
+    sent = asyncio.run(drive())
+
+    assert next(m["status"] for m in sent if m["type"] == "http.response.start") == 413
+    assert opened, "the probe never saw a spool file"
+    assert not any(not f.closed for f in opened), "a spooled file was left open"

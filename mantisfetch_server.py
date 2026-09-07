@@ -186,6 +186,18 @@ def _max_request_bytes() -> int:
     return MAX_UPLOAD_BYTES + 1024 * 1024
 
 
+class _BodyTooLarge(OSError):
+    """Raised into the body stream once a request passes the ceiling.
+
+    An OSError on purpose: Starlette's multipart parser closes the files it has
+    spooled when the stream raises MultiPartException or OSError, and leaves
+    them open for anything else.
+    """
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"request body exceeds the {limit}-byte ceiling")
+
+
 class _BodyCeiling:
     """Stop reading a request body once it passes the ceiling, and answer 413.
 
@@ -251,9 +263,14 @@ class _BodyCeiling:
                 received += len(message.get("body", b""))
                 if received > limit:
                     refused = True
-                    # Ends the body the handler is reading. It sees a truncated
-                    # request; the 413 below is what the client is told.
-                    return {"type": "http.disconnect"}
+                    # Raised rather than returned, and an OSError specifically.
+                    # Starlette's multipart parser closes the spool files it has
+                    # opened when the stream raises MultiPartException or
+                    # OSError — and nothing else. A disconnect (ClientDisconnect)
+                    # or a truncated body leaves them open until the garbage
+                    # collector runs, which is exactly the disk this ceiling
+                    # exists to bound. The sentinel is caught below.
+                    raise _BodyTooLarge(limit)
             return message
 
         async def guarded_send(message: dict) -> None:
@@ -264,7 +281,12 @@ class _BodyCeiling:
                 return
             await send(message)
 
-        await self.app(scope, counting_receive, guarded_send)
+        try:
+            await self.app(scope, counting_receive, guarded_send)
+        except _BodyTooLarge:
+            # The parser has closed its spool files on the way out; nothing has
+            # been sent yet, so the 413 is this response.
+            await self._refuse(send, limit)
         if refused and received:
             logger.warning(
                 "refused a request body over the %d-byte ceiling after %d bytes",
