@@ -397,15 +397,35 @@ def _resolve_index_storage_path(docs_dir: Path, storage_path: Any) -> Path | Non
 
 
 def _find_doc_index_entry(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:
-    for entry in _load_doc_index(docs_dir):
-        if entry.get("id") == doc_id:
-            return entry
-    return None
+    """One entry, by primary key — not by loading and scanning the whole index."""
+    try:
+        from mantisfetch_common import doc_index_store as dis
+
+        return dis.get_document(docs_dir, doc_id)
+    except Exception:
+        # Same fallback as _load_doc_index: a database that cannot be opened at
+        # all is read from the JSON export instead.
+        for entry in _load_doc_index(docs_dir):
+            if entry.get("id") == doc_id:
+                return entry
+        return None
 
 
-def _resolve_doc_dir(docs_dir: Path, doc_id: str) -> Path:
+def _resolve_doc_dir(
+    docs_dir: Path, doc_id: str, entry: dict[str, Any] | None = None
+) -> Path:
+    """The document's directory on disk.
+
+    ``entry`` is the caller's already-loaded index row, passed in to avoid a
+    lookup — a library-wide scan has one per document, and reloading the index
+    inside each of them is what made searching a 1,000-document library take
+    2.7 seconds. It is a *hint*: everything below still verifies the manifest is
+    actually there and still falls through to the layout scan when it is not,
+    so a stale row costs a scan rather than a wrong answer.
+    """
     _validate_doc_id(doc_id)
-    entry = _find_doc_index_entry(docs_dir, doc_id)
+    if entry is None:
+        entry = _find_doc_index_entry(docs_dir, doc_id)
     if entry:
         indexed_path = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
         if indexed_path and (indexed_path / "manifest.json").exists():

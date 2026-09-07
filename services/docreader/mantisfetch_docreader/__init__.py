@@ -4912,7 +4912,10 @@ async def library_search_text(
             if not isinstance(current_doc_id, str) or not _DOC_ID_RE.match(current_doc_id):
                 continue
             try:
-                doc_dir = _resolve_doc_dir(docs_dir, current_doc_id)
+                # `d` is this document's index row, already in hand from the
+                # scan above. Without it every iteration reloaded and decoded
+                # the entire index to find the row it was standing on.
+                doc_dir = _resolve_doc_dir(docs_dir, current_doc_id, entry=d)
             except HTTPException:
                 continue
             manifest_path = doc_dir / "manifest.json"
