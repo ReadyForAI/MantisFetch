@@ -171,10 +171,114 @@ class _RestAuthGate:
         await self.app(scope, receive, send)
 
 
+def _max_request_bytes() -> int:
+    """The largest request body the upload surface will read.
+
+    Derived from the per-file limit rather than configured separately, so there
+    is one number to raise. The slack covers the multipart envelope — boundaries
+    and the other form fields — around a file that is itself at the limit.
+
+    Read per call, like the other tunables, so a test or a redeploy that changes
+    MANTISFETCH_MAX_UPLOAD_MB is seen.
+    """
+    from mantisfetch_docreader import MAX_UPLOAD_BYTES  # noqa: PLC0415
+
+    return MAX_UPLOAD_BYTES + 1024 * 1024
+
+
+class _BodyCeiling:
+    """Stop reading a request body once it passes the ceiling, and answer 413.
+
+    The per-file limits run inside the handlers, which is *after* Starlette has
+    parsed the multipart body and spooled every byte of it: they bound what the
+    service keeps, never what a caller can make it receive. Measured, a 4 KiB
+    body against a 16-byte limit landed in full before the 413.
+
+    This sits in front of the form parser instead. A declared Content-Length
+    over the ceiling is refused without reading anything; a chunked body is
+    counted as it arrives and abandoned at the first chunk that crosses. It does
+    not try to drain what the client is still sending — the connection ends.
+
+    Deliberately not in front of ``/mcp``: that surface has its own body limit,
+    derived from the inline-document cap, and the SDK's transport reads the body
+    itself. A second counter there would be a second thing to keep in step.
+
+    The per-request limits stay where they are. MAX_UPLOAD_BYTES and the raw
+    channel's per-type ceilings both need the filename to decide, which is only
+    known once the form is parsed — so this is the outer bound, not a
+    replacement for either.
+    """
+
+    def __init__(self, app: object) -> None:
+        self.app = app
+
+    @staticmethod
+    async def _refuse(send: object, limit: int) -> None:
+        body = (
+            f'{{"detail":"request body exceeds the {limit}-byte ceiling"}}'
+        ).encode()
+        await send({
+            "type": "http.response.start", "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope: dict, receive: object, send: object) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = _max_request_bytes()
+        headers = dict(scope.get("headers") or [])
+        declared = headers.get(b"content-length")
+        if declared is not None:
+            try:
+                if int(declared) > limit:
+                    await self._refuse(send, limit)
+                    return
+            except ValueError:
+                pass
+
+        received = 0
+        refused = False
+
+        async def counting_receive() -> dict:
+            nonlocal received, refused
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    refused = True
+                    # Ends the body the handler is reading. It sees a truncated
+                    # request; the 413 below is what the client is told.
+                    return {"type": "http.disconnect"}
+            return message
+
+        async def guarded_send(message: dict) -> None:
+            if refused and message["type"] == "http.response.start":
+                await self._refuse(send, limit)
+                return
+            if refused and message["type"] == "http.response.body":
+                return
+            await send(message)
+
+        await self.app(scope, counting_receive, guarded_send)
+        if refused and received:
+            logger.warning(
+                "refused a request body over the %d-byte ceiling after %d bytes",
+                limit,
+                received,
+            )
+
+
 # Browser / docreader routes are clean (no /web /doc prefix internally) — mount
 # directly, behind the REST Bearer gate (loopback-open; token-gated off-host).
-app.mount("/web", _RestAuthGate(browser_app))
-app.mount("/doc", _RestAuthGate(doc_app))
+# The body ceiling wraps the gate: an oversized body should not be read even to
+# find out whether the caller is authorised.
+app.mount("/web", _BodyCeiling(_RestAuthGate(browser_app)))
+app.mount("/doc", _BodyCeiling(_RestAuthGate(doc_app)))
 
 # Read-only deliverable byte face (IRP 20260711): serves agent deliverables from
 # under MANTISFETCH_DELIVERABLES_ROOT for AULO's BFF to proxy. Same Bearer gate as

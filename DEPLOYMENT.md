@@ -30,6 +30,23 @@ So a same-host client configured with the *wrong* token sees REST succeed and
 MCP answer 401. Send the bearer on every call — it is the only configuration
 that is correct on both faces.
 
+## Request size
+
+`/web` and `/doc` stop reading a request body once it passes
+`MANTISFETCH_MAX_UPLOAD_MB + 1 MiB` and answer `413`. The slack is the multipart
+envelope around a file that is itself at the limit; there is no separate key,
+so raising the upload limit raises this with it.
+
+This is the outer bound. The per-file limits still run inside the handlers —
+`MANTISFETCH_MAX_UPLOAD_MB` for the parse channel and
+`MANTISFETCH_RAW_MAX_{MD,IMAGE}_MB` for `store_only` — because both need the
+filename, which is only known once the form has been parsed. So a 100 MiB `.md`
+is read up to the outer ceiling before its 2 MiB per-type refusal; a 300 MiB one
+is cut off at the ceiling.
+
+`/mcp` is not behind this. It has its own body limit derived from the inline
+document cap, and its transport reads the body itself.
+
 ## Container hardening
 
 `docker-compose.yml` runs the service with:
