@@ -207,8 +207,26 @@ def _prune_node(node: Any) -> None:
         node.decompose()
 
 
+#: Tags whose whitespace *is* content. Everything else is prose, where a line
+#: break in the source is a rendering detail and collapsing it is right.
+_VERBATIM_TAGS = frozenset({"pre"})
+
+
 def _clean_text(node: Any) -> str:
-    """Node text with runs of whitespace collapsed."""
+    """Node text: collapsed for prose, verbatim inside a code block.
+
+    A paragraph broken across source lines is one sentence and should read as
+    one. A code block is the opposite: its newlines and indentation are what it
+    means, and Python, YAML and a shell transcript all stop being themselves
+    without them. The damage is permanent — it happens at capture, and no reader
+    downstream can put the line breaks back.
+
+    Inside a verbatim block the separator is empty rather than a space, because
+    a highlighter's ``<span>`` per token would otherwise insert a gap between
+    every one of them.
+    """
+    if node.name in _VERBATIM_TAGS:
+        return node.get_text("").strip("\n").rstrip()
     return " ".join(node.get_text(" ", strip=True).split())
 
 

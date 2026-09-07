@@ -1141,7 +1141,7 @@ def _blocks_to_sections_stable(
         nonlocal cur_h, cur
         if not cur:
             return
-        txt = _normalize("\n\n".join(cur))
+        txt = "\n\n".join(cur).strip()
         if not txt:
             cur = []
             return
@@ -1158,7 +1158,11 @@ def _blocks_to_sections_stable(
             flush()
             cur_h = text[:120]
             continue
-        cur.append(text)
+        # Per block, because _normalize collapses runs of spaces and tabs — the
+        # right thing for a paragraph, and the second place a code block used to
+        # lose its indentation after the extractor had carefully kept it. A
+        # verbatim block is already exactly what it should be.
+        cur.append(text if tag == "pre" else _normalize(text))
         if len(cur) > 40:
             flush()
             cur_h = None
