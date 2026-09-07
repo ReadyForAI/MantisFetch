@@ -187,3 +187,16 @@ def test_a_refused_chunked_upload_closes_what_it_spooled(monkeypatch) -> None:
     assert next(m["status"] for m in sent if m["type"] == "http.response.start") == 413
     assert opened, "the probe never saw a spool file"
     assert not any(not f.closed for f in opened), "a spooled file was left open"
+
+
+def test_the_abort_is_a_type_every_supported_parser_cleans_up_after() -> None:
+    """Which exceptions trigger the parser's spool cleanup depends on the
+    Starlette version: current releases catch MultiPartException and OSError,
+    older ones in our supported range catch MultiPartException alone. The
+    sentinel is both, so the cleanup runs on either."""
+    from starlette.formparsers import MultiPartException
+
+    import mantisfetch_server as server
+
+    assert issubclass(server._BodyTooLarge, MultiPartException)
+    assert issubclass(server._BodyTooLarge, OSError)

@@ -186,13 +186,26 @@ def _max_request_bytes() -> int:
     return MAX_UPLOAD_BYTES + 1024 * 1024
 
 
-class _BodyTooLarge(OSError):
-    """Raised into the body stream once a request passes the ceiling.
+def _body_too_large_bases() -> tuple[type[BaseException], ...]:
+    """What the ceiling's sentinel must be, for the parser to clean up after it.
 
-    An OSError on purpose: Starlette's multipart parser closes the files it has
-    spooled when the stream raises MultiPartException or OSError, and leaves
-    them open for anything else.
+    Starlette's multipart parser closes the files it has already spooled only
+    for the exception types its own `except` names, and which those are depends
+    on the version: current releases catch `MultiPartException` and `OSError`,
+    older ones in our supported range catch `MultiPartException` alone. Being
+    both means the cleanup runs either way rather than only on the version that
+    happens to be installed here.
     """
+    try:
+        from starlette.formparsers import MultiPartException  # noqa: PLC0415
+
+        return (MultiPartException, OSError)
+    except Exception:  # pragma: no cover - Starlette moved it
+        return (OSError,)
+
+
+class _BodyTooLarge(*_body_too_large_bases()):  # type: ignore[misc]
+    """Raised into the body stream once a request passes the ceiling."""
 
     def __init__(self, limit: int) -> None:
         super().__init__(f"request body exceeds the {limit}-byte ceiling")
