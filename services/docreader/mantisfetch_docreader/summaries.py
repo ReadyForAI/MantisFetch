@@ -436,6 +436,22 @@ def _summary_placeholder_text(
                 return f"(摘要生成失败: {error})"
             return f"(Summary failed: {error})"
         return "(摘要生成失败)" if output_locale == "zh" else "(Summary failed)"
+    if status == "disabled":
+        # generate_summary=false asked for no summary, so nothing is coming.
+        # "pending" here told a reader to wait for something that will never
+        # arrive — the manifest already said `disabled` while this file said the
+        # opposite.
+        return (
+            "(未生成摘要：本次上传未请求)"
+            if output_locale == "zh"
+            else "(No summary: this ingest did not ask for one)"
+        )
+    if status == "not_queued":
+        return (
+            "(摘要未排队：队列已满，可重试)"
+            if output_locale == "zh"
+            else "(Summary not queued: the queue was full; retry it)"
+        )
     return "(摘要待生成)" if output_locale == "zh" else "(Summary pending)"
 
 

@@ -283,6 +283,10 @@ class CaptureResponse(BaseModel):
     doc_id: str
     content_type: str = "General"
     storage_path: str = ""
+    # Always "parsed" for a capture — a captured page is distilled into sections.
+    # Present so a caller handling both /doc/parse and /web/capture reads the
+    # same field on both instead of special-casing the one that omits it.
+    kind: str = "parsed"
     digest: str
     section_count: int
     table_count: int

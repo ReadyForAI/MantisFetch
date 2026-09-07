@@ -178,7 +178,7 @@ Notes:
 | `doc_section` | Section tier: full text of one section by sid. | `doc_id`, `sid` |
 | `doc_sections_batch` | Read several sections by sid in one call (fewer round-trips than repeated `doc_section`); returns found + missing sids. | `doc_id`, `sids[]` |
 | `doc_full` | Full document text — expensive; prefer the tiers above. | `doc_id` |
-| `doc_search` | Search library **metadata** — filename, digest, tags, custom metadata. Does NOT look inside bodies. | `q`, `tags?`, `limit=20` |
+| `doc_search` | Search library **metadata** — filename, digest, tags, custom metadata. Does NOT look inside bodies: a word that appears only in the text returns `total: 0` here, which is not the same as "not in the library". A zero result carries a `hint` saying so. | `q`, `tags?`, `limit=20` |
 | `doc_search_text` | **Full-text** search across document bodies; returns doc_id + sid + a snippet per hit. Use this when the term appears only in the text. | `q`, `tags?`, `doc_id?`, `scope="all"` (`all` \| `full` \| `section`), `limit=20` |
 | `doc_search_sections` | Search within one document's sections; returns sid/page provenance. | `doc_id`, `q`, `include_content=false` |
 | `doc_table` | Read one extracted table (with numeric column stats). | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`) |
