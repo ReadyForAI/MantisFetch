@@ -42,6 +42,33 @@ from mantisfetch_docreader import app as doc_app  # noqa: E402
 from mantisfetch_mcp import mcp, mcp_app  # noqa: E402
 
 
+def _warn_unconfigured_llm() -> None:
+    """Say at startup which LLM roles cannot run, instead of on the first document.
+
+    No model name is invented anywhere any more, so a deployment that never set
+    one now fails when it first tries to summarize or OCR — better than talking
+    to a model the code guessed, but still late and far from the cause.
+
+    Deliberately a warning rather than a refusal to start: parsing, capture and
+    local OCR are complete features that need no LLM at all, and a deployment
+    using only those must keep working. Constructing the provider costs no
+    network, so this is just the same error, surfaced at boot.
+    """
+    from providers import get_provider  # noqa: PLC0415
+
+    for role in ("summary", "ocr"):
+        try:
+            get_provider(role)
+        except Exception as exc:  # noqa: BLE001 - report, never block startup
+            logger.warning(
+                "LLM role %r is not usable: %s — %s features will fail until this "
+                "is configured. Parsing, capture and local OCR are unaffected.",
+                role,
+                exc,
+                "summarisation" if role == "summary" else "LLM OCR",
+            )
+
+
 def _warn_legacy_env() -> None:
     """Warn about pre-rename ``LARKSCOUT_*`` environment variables.
 
@@ -66,6 +93,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Start sub-application lifespans (browser Playwright init, docreader startup
     tasks) plus the MCP server's streamable-HTTP session manager."""
     _warn_legacy_env()
+    _warn_unconfigured_llm()
     async with browser_app.router.lifespan_context(browser_app):
         async with doc_app.router.lifespan_context(doc_app):
             async with mcp.session_manager.run():
@@ -80,6 +108,23 @@ app = FastAPI(
 )
 
 
+def _llm_role_status() -> dict[str, str]:
+    """Per-role model name, or the reason the role cannot run."""
+    from providers import get_provider  # noqa: PLC0415
+
+    status: dict[str, str] = {}
+    for role in ("summary", "ocr"):
+        try:
+            provider = get_provider(role)
+        except Exception as exc:  # noqa: BLE001 - health must not raise
+            status[role] = f"unconfigured: {exc}"
+            continue
+        inner = getattr(provider, "_inner", provider)
+        attr = "_ocr_model" if role == "ocr" else "_model"
+        status[role] = str(getattr(inner, attr, None) or type(inner).__name__)
+    return status
+
+
 @app.get("/health")
 async def health() -> dict:
     """Return aggregated health status for all mounted services."""
@@ -90,6 +135,11 @@ async def health() -> dict:
             "browser": "mounted at /web",
             "docreader": "mounted at /doc",
         },
+        # Which model each LLM role resolved to, or why it did not. There is no
+        # built-in model name to fall back on, so "unconfigured" here is the
+        # difference between "summaries are off" and "summaries are broken" —
+        # and it names the key to set.
+        "llm": _llm_role_status(),
     }
 
 

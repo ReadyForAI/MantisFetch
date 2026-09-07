@@ -12,8 +12,16 @@ from providers.vendor_profiles import get_vendor_profile
 
 
 @pytest.fixture(autouse=True)
-def _reset():
-    """Reset the cached provider before every test."""
+def _reset(monkeypatch):
+    """Reset the cached provider before every test, and give it a model.
+
+    No provider invents a model name any more, so constructing one without
+    MANTISFETCH_LLM_MODEL raises — which is the point, and is covered by its own
+    tests. The tests below are about caching, delegation and request shapes and
+    would otherwise all have to repeat this line. A test that cares about the
+    missing-model behaviour deletes the variable itself.
+    """
+    monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "test-model")
     reset_provider()
     yield
     reset_provider()
@@ -277,7 +285,9 @@ class TestOpenAICompatProvider:
         call_kwargs = mock_client.chat.completions.create.call_args.kwargs
         assert call_kwargs["model"] == "gpt-test"
 
-    def test_openai_compat_uses_vendor_defaults_when_overrides_absent(self, monkeypatch):
+    def test_a_vendor_without_a_model_says_which_key_to_set(self, monkeypatch):
+        """The endpoint comes from the profile; the model has to come from the
+        deployment. Naming the key is the whole value of failing here."""
         monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
         monkeypatch.setenv("MANTISFETCH_LLM_VENDOR", "zhipu")
         monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
@@ -285,22 +295,35 @@ class TestOpenAICompatProvider:
         monkeypatch.delenv("MANTISFETCH_LLM_MODEL", raising=False)
         monkeypatch.delenv("MANTISFETCH_OCR_MODEL", raising=False)
 
-        mock_client = MagicMock()
         mock_openai = MagicMock()
-        mock_openai.OpenAI.return_value = mock_client
+        mock_openai.OpenAI.return_value = MagicMock()
+
+        with patch.dict("sys.modules", {"openai": mock_openai}), pytest.raises(
+            RuntimeError, match="MANTISFETCH_LLM_MODEL"
+        ) as caught:
+            get_provider()
+        assert "zhipu" in str(caught.value)
+
+    def test_an_explicit_model_still_uses_the_profile_endpoint(self, monkeypatch):
+        """The other half: the profile is still doing its job."""
+        monkeypatch.setenv("MANTISFETCH_LLM_PROVIDER", "openai")
+        monkeypatch.setenv("MANTISFETCH_LLM_VENDOR", "zhipu")
+        monkeypatch.setenv("MANTISFETCH_LLM_API_KEY", "sk-test")
+        monkeypatch.setenv("MANTISFETCH_LLM_MODEL", "glm-4.6v")
+        monkeypatch.delenv("MANTISFETCH_LLM_BASE_URL", raising=False)
+        monkeypatch.delenv("MANTISFETCH_OCR_MODEL", raising=False)
+
+        mock_openai = MagicMock()
+        mock_openai.OpenAI.return_value = MagicMock()
 
         with patch.dict("sys.modules", {"openai": mock_openai}):
             p = get_provider()
 
         assert p._base_url == "https://open.bigmodel.cn/api/paas/v4"
-        assert p._model == "glm-5.1"
+        assert p._model == "glm-4.6v"
+        # OCR falls back to the model the caller named — derived from an
+        # explicit value, not invented like the profile defaults were.
         assert p._ocr_model == "glm-4.6v"
-        mock_openai.OpenAI.assert_called_once_with(
-            api_key="sk-test",
-            base_url="https://open.bigmodel.cn/api/paas/v4",
-            max_retries=0,
-            timeout=120,
-        )
 
     def test_openai_compat_ocr_sends_base64_image(self, monkeypatch):
         """OpenAICompatProvider.ocr() encodes image as base64 and sends multipart content."""
@@ -504,32 +527,27 @@ class TestOpenAICompatProvider:
 
 
 class TestVendorProfiles:
-    def test_openai_vendor_profile_defaults(self):
-        profile = get_vendor_profile("openai")
-        assert profile.base_url == "https://api.openai.com/v1"
-        assert profile.default_text_model == "gpt-4o-mini"
+    """A profile says how to talk to a vendor, never which model to talk to.
 
-    def test_zhipu_vendor_profile_defaults(self):
-        profile = get_vendor_profile("zhipu")
-        assert profile.base_url == "https://open.bigmodel.cn/api/paas/v4"
-        assert profile.default_text_model == "glm-5.1"
-        assert profile.default_ocr_model == "glm-4.6v"
+    Base URLs and protocol quirks are stable knowledge worth encoding. Model
+    names are not: every one that used to live here had a shelf life, and the
+    first to expire (gemini-2.5-flash, in the provider rather than in a profile)
+    failed a fresh deployment on its first document.
+    """
 
-    def test_kimi_vendor_profile_defaults(self):
-        profile = get_vendor_profile("kimi")
-        assert profile.base_url == "https://api.moonshot.cn/v1"
-        assert profile.default_text_model == "kimi-k2.6"
-        assert profile.default_ocr_model == "kimi-k2.6"
-
-    def test_aliyun_vendor_profile_defaults(self):
-        profile = get_vendor_profile("aliyun")
-        assert profile.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        assert profile.default_text_model == "qwen-plus"
-        assert profile.default_ocr_model == "qwen-vl-ocr"
-
-    def test_volcengine_vendor_profile_defaults(self):
-        profile = get_vendor_profile("volcengine")
-        assert profile.base_url == "https://ark.cn-beijing.volces.com/api/v3"
+    @pytest.mark.parametrize(
+        ("vendor", "base_url"),
+        [
+            ("openai", "https://api.openai.com/v1"),
+            ("zhipu", "https://open.bigmodel.cn/api/paas/v4"),
+            ("kimi", "https://api.moonshot.cn/v1"),
+            ("aliyun", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            ("volcengine", "https://ark.cn-beijing.volces.com/api/v3"),
+        ],
+    )
+    def test_a_profile_knows_the_endpoint_and_not_the_model(self, vendor, base_url):
+        profile = get_vendor_profile(vendor)
+        assert profile.base_url == base_url
         assert profile.default_text_model is None
         assert profile.default_ocr_model is None
 

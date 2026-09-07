@@ -22,6 +22,11 @@ services:
       MANTISFETCH_TLS_CERTFILE: ${MANTISFETCH_TLS_CERTFILE:-}
       MANTISFETCH_TLS_KEYFILE: ${MANTISFETCH_TLS_KEYFILE:-}
       # LLM provider (default: gemini)
+      # The provider has a default; the *model* does not, on purpose — a model
+      # name in the code is only correct until the vendor retires it. Set
+      # MANTISFETCH_LLM_MODEL (below) or the per-role slot keys, or summaries
+      # and LLM OCR will refuse with a message naming the key. Startup warns and
+      # GET /health reports what each role resolved to.
       MANTISFETCH_LLM_PROVIDER: ${MANTISFETCH_LLM_PROVIDER:-gemini}
       MANTISFETCH_LLM_VENDOR: ${MANTISFETCH_LLM_VENDOR:-openai}
       # Gemini / Google AI credentials

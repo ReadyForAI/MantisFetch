@@ -98,7 +98,7 @@ services:
 | `GEMINI_API_KEY` | — | Google Gemini API key |
 | `MANTISFETCH_LLM_API_KEY` | — | API key for OpenAI-compatible provider |
 | `MANTISFETCH_LLM_BASE_URL` | vendor default | Base URL override for OpenAI-compat provider |
-| `MANTISFETCH_LLM_MODEL` | vendor default | Model name override |
+| `MANTISFETCH_LLM_MODEL` | **required** | Model name. No built-in default — one written into the code only stays correct until the vendor retires it |
 | `MANTISFETCH_OCR_MODEL` | `MANTISFETCH_LLM_MODEL` | Optional OCR vision model override |
 | `MANTISFETCH_OCR_IMAGE_INPUT_MODE` | `data_url` | OCR image serialization mode: `data_url`, `plain_base64`, `remote_url_only` |
 | `MANTISFETCH_LLM_EXTRA_BODY_JSON` | — | Optional JSON object merged into text chat request body |
@@ -120,27 +120,36 @@ docker compose up
 
 #### OpenAI-compatible vendor profiles
 
-OpenAI-compatible integrations can use a vendor profile to supply a default `base_url`,
-text model, and OCR model. You can still override any of them explicitly.
-The global default OCR image input mode stays `data_url` for maximum compatibility.
+A vendor profile supplies the `base_url` and the protocol quirks (image encoding,
+request-body extras) for an OpenAI-compatible vendor. It does **not** supply a model:
+`MANTISFETCH_LLM_MODEL` is required, because a model name written into the code is only
+correct until the vendor retires it — and then every call fails, far from the cause.
+Startup logs a warning naming the key, and `GET /health` reports which model each role
+resolved to. The global default OCR image input mode stays `data_url` for maximum
+compatibility.
 
 ```bash
-# Zhipu: text + OCR models split by default
+# Zhipu: one model for text, another for OCR
 MANTISFETCH_LLM_PROVIDER=openai \
 MANTISFETCH_LLM_VENDOR=zhipu \
 MANTISFETCH_LLM_API_KEY=your_key_here \
+MANTISFETCH_LLM_MODEL=<their current text model> \
+MANTISFETCH_OCR_MODEL=<their current vision model> \
 docker compose up
 
-# Kimi: one multimodal model for text and OCR by default
+# Kimi: one multimodal model covers both (omit MANTISFETCH_OCR_MODEL)
 MANTISFETCH_LLM_PROVIDER=openai \
 MANTISFETCH_LLM_VENDOR=kimi \
 MANTISFETCH_LLM_API_KEY=your_key_here \
+MANTISFETCH_LLM_MODEL=<their current multimodal model> \
 docker compose up
 
-# Aliyun Bailian: vendor defaults can be overridden
+# Aliyun Bailian
 MANTISFETCH_LLM_PROVIDER=openai \
 MANTISFETCH_LLM_VENDOR=aliyun \
 MANTISFETCH_LLM_API_KEY=your_key_here \
+MANTISFETCH_LLM_MODEL=<their current text model> \
+MANTISFETCH_OCR_MODEL=<their current vision model> \
 docker compose up
 
 # Volcengine Ark: set your deployed endpoint/model explicitly
@@ -461,7 +470,7 @@ services:
 | `GEMINI_API_KEY` | — | Google Gemini API Key |
 | `MANTISFETCH_LLM_API_KEY` | — | OpenAI 兼容接口的 API Key |
 | `MANTISFETCH_LLM_BASE_URL` | 厂商默认值 | 覆盖 OpenAI 兼容接口的 Base URL |
-| `MANTISFETCH_LLM_MODEL` | 厂商默认值 | 指定模型名称 |
+| `MANTISFETCH_LLM_MODEL` | **必填** | 模型名称。没有内置默认值 —— 写死在代码里的名字只在厂商下架它之前是对的 |
 | `MANTISFETCH_OCR_MODEL` | `MANTISFETCH_LLM_MODEL` | 可选：单独指定 OCR 视觉模型 |
 | `MANTISFETCH_OCR_IMAGE_INPUT_MODE` | `data_url` | OCR 图片序列化模式：`data_url`、`plain_base64`、`remote_url_only` |
 | `MANTISFETCH_LLM_EXTRA_BODY_JSON` | — | 可选：合并到文本请求体中的 JSON 对象 |
@@ -483,26 +492,33 @@ docker compose up
 
 #### OpenAI 兼容厂商配置
 
-OpenAI 兼容接口支持按厂商 profile 自动补全默认 `base_url`、文本模型和 OCR 模型；如果你已有固定配置，也可以继续显式覆盖。
+厂商 profile 提供 OpenAI 兼容厂商的 `base_url` 与协议细节（图片编码、请求体附加项），**但不提供模型名**：
+`MANTISFETCH_LLM_MODEL` 是必填的 —— 写死在代码里的模型名只在厂商下架它之前是对的，之后每次调用都会失败，
+而且失败点离原因很远。启动时会打一条点名该键的告警，`GET /health` 也会报出每个角色实际解析到的模型。
 OCR 图片输入模式的全局默认值仍固定为 `data_url`，优先保证兼容面。
 
 ```bash
-# 智谱：默认文本模型与 OCR 模型分离
+# 智谱：文本一个模型、OCR 另一个
 MANTISFETCH_LLM_PROVIDER=openai \
 MANTISFETCH_LLM_VENDOR=zhipu \
 MANTISFETCH_LLM_API_KEY=your_key_here \
+MANTISFETCH_LLM_MODEL=<该厂商当前的文本模型> \
+MANTISFETCH_OCR_MODEL=<该厂商当前的视觉模型> \
 docker compose up
 
-# Kimi：默认使用同一个多模态模型处理文本与 OCR
+# Kimi：一个多模态模型两用（不设 MANTISFETCH_OCR_MODEL 即可）
 MANTISFETCH_LLM_PROVIDER=openai \
 MANTISFETCH_LLM_VENDOR=kimi \
 MANTISFETCH_LLM_API_KEY=your_key_here \
+MANTISFETCH_LLM_MODEL=<该厂商当前的多模态模型> \
 docker compose up
 
-# 阿里百炼：可使用 profile 默认模型，也可自行覆盖
+# 阿里百炼
 MANTISFETCH_LLM_PROVIDER=openai \
 MANTISFETCH_LLM_VENDOR=aliyun \
 MANTISFETCH_LLM_API_KEY=your_key_here \
+MANTISFETCH_LLM_MODEL=<该厂商当前的文本模型> \
+MANTISFETCH_OCR_MODEL=<该厂商当前的视觉模型> \
 docker compose up
 
 # 火山方舟：通常需要显式填写你的推理接入点 / 模型名

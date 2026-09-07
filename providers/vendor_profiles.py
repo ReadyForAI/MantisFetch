@@ -12,6 +12,12 @@ class VendorProfile:
 
     name: str
     base_url: str
+    # Kept as fields, and left None for every registered vendor. A profile knows
+    # how to *talk to* a vendor — base URL, image encoding, body quirks — and
+    # that is stable knowledge. Which model to talk to is not: every name here
+    # had a shelf life, and the one that expired first (gemini-2.5-flash, in the
+    # provider rather than here) failed a fresh deployment on its first document.
+    # A caller that wants one passes it; nothing invents one.
     default_text_model: str | None = None
     default_ocr_model: str | None = None
     supports_vision: bool = True
@@ -26,25 +32,18 @@ _VENDOR_PROFILES: dict[str, VendorProfile] = {
     "openai": VendorProfile(
         name="openai",
         base_url=_DEFAULT_OPENAI_BASE_URL,
-        default_text_model="gpt-4o-mini",
     ),
     "zhipu": VendorProfile(
         name="zhipu",
         base_url="https://open.bigmodel.cn/api/paas/v4",
-        default_text_model="glm-5.1",
-        default_ocr_model="glm-4.6v",
     ),
     "kimi": VendorProfile(
         name="kimi",
         base_url="https://api.moonshot.cn/v1",
-        default_text_model="kimi-k2.6",
-        default_ocr_model="kimi-k2.6",
     ),
     "aliyun": VendorProfile(
         name="aliyun",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        default_text_model="qwen-plus",
-        default_ocr_model="qwen-vl-ocr",
     ),
     "volcengine": VendorProfile(
         name="volcengine",

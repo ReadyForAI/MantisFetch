@@ -2,7 +2,7 @@
 
 Reads credentials from the environment:
   GEMINI_API_KEY  or  GOOGLE_API_KEY  — required
-  MANTISFETCH_LLM_MODEL                 — optional; defaults to gemini-2.5-flash
+  MANTISFETCH_LLM_MODEL                 — required; there is no built-in default
   MANTISFETCH_OCR_MODEL                 — optional; OCR-only override, defaults to
                                           MANTISFETCH_LLM_MODEL
 """
@@ -22,7 +22,6 @@ from providers.errors import (
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "gemini-2.5-flash"
 _OCR_TRANSCRIBE_PROMPT = OCR_TRANSCRIBE_PROMPT
 _OCR_PROOFREAD_PROMPT = OCR_PROOFREAD_PROMPT
 
@@ -70,7 +69,20 @@ class GeminiProvider(LLMProvider):
     def __init__(self, *, api_key=_UNSET, model=_UNSET, ocr_model=_UNSET) -> None:
         self._client = None
         model_in = os.environ.get("MANTISFETCH_LLM_MODEL") if model is _UNSET else model
-        self._model = model_in or _DEFAULT_MODEL
+        self._model = model_in
+        if not self._model:
+            # No built-in default on purpose. A model name written into the code
+            # is only correct on the day it is written: gemini-2.5-flash shipped
+            # as the default and Google later stopped serving it to new keys, so
+            # a fresh deployment that set only an API key got a 404 on its first
+            # document, several layers from the cause. Every other path in this
+            # package already refuses to guess — openai_compat raises when no
+            # model resolves, and an unknown vendor raises rather than defaulting
+            # to OpenAI. This is the one that did not.
+            raise RuntimeError(
+                "gemini has no default model; set MANTISFETCH_LLM_MODEL to the "
+                "model name to use (e.g. the one Google's docs list as current)."
+            )
         ocr_model_in = (
             os.environ.get("MANTISFETCH_OCR_MODEL") if ocr_model is _UNSET else ocr_model
         )
