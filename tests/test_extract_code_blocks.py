@@ -89,3 +89,13 @@ def test_indentation_survives_section_assembly() -> None:
     body = sections[0]["t"]
     assert '    print("first")' in body, body
     assert "Some prose with gaps." in body, "prose should still be collapsed"
+
+
+def test_a_pre_that_uses_br_for_its_line_breaks() -> None:
+    """Some pages render a code block's newlines as <br> rather than as literal
+    newlines. With the verbatim separator empty, dropping them joined the two
+    lines into one word — worse than the space the collapsing version gave."""
+    blocks = html_to_blocks(
+        "<article><pre>echo first-command<br>echo second-command</pre></article>"
+    )
+    assert _first("pre", blocks) == "echo first-command\necho second-command"

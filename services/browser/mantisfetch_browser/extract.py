@@ -226,6 +226,12 @@ def _clean_text(node: Any) -> str:
     every one of them.
     """
     if node.name in _VERBATIM_TAGS:
+        # An empty separator is what keeps a highlighter's per-token <span> from
+        # becoming a gap, and it is also why <br> has to be turned into the
+        # newline it renders as first: without this the two lines of
+        # "echo one<br>echo two" would be joined into one word.
+        for br in node.find_all("br"):
+            br.replace_with("\n")
         return node.get_text("").strip("\n").rstrip()
     return " ".join(node.get_text(" ", strip=True).split())
 
