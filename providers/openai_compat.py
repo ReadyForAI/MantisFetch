@@ -236,6 +236,15 @@ class OpenAICompatProvider(LLMProvider):
                 return text, (str(finish) if finish is not None else None)
             except Exception as exc:
                 last_exc = exc
+                # Classify before deciding to retry. A 4xx, a bad argument or a
+                # content refusal fails identically on the next attempt, so
+                # retrying only spends the caller's seconds and the provider's
+                # quota — and the failover layer above already knows not to
+                # move these to a peer. Only what might succeed is retried.
+                typed = classify_provider_error(exc)
+                if not typed.retryable:
+                    logger.warning("OpenAI-compat chat rejected (not retrying): %s", exc)
+                    raise typed from exc
                 if attempt < max_retries:
                     logger.warning(
                         "OpenAI-compat chat retry (%d/%d): %s", attempt + 1, max_retries, exc
