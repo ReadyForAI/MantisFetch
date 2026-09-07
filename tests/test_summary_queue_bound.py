@@ -252,3 +252,119 @@ def test_the_sweep_does_not_re_enqueue(docs, monkeypatch) -> None:
 
     dr._reset_interrupted_summaries(docs)
     assert called["n"] == 0
+
+
+# ── the three the local Codex review of #264 found ───────────────────────────────
+def test_the_admission_lock_is_not_held_while_a_refusal_is_written(docs, monkeypatch) -> None:
+    """A refusal writes the whole extraction under document locks. Holding the
+    admission lock across that would park every later arrival *outside* the
+    counted queue, still holding its ParsedDocument — which is the memory the
+    bound exists to cap."""
+    import mantisfetch_docreader as dr
+
+    monkeypatch.setattr(dr, "DEFERRED_SUMMARY_MAX_QUEUED", 0)
+    seen: list[bool] = []
+    real_write = dr.write_output_extract_only
+
+    def observing_write(*a, **kw):
+        seen.append(dr._deferred_summary_waiting_lock.acquire(blocking=False))
+        if seen[-1]:
+            dr._deferred_summary_waiting_lock.release()
+        return real_write(*a, **kw)
+
+    monkeypatch.setattr(dr, "write_output_extract_only", observing_write)
+    dr._deferred_summary_sem.acquire()
+    try:
+        dr._generate_deferred_summary(
+            "DOC-920", _seed(dr, docs, "DOC-920"), docs, 1, [], {}, {}, "General"
+        )
+    finally:
+        dr._deferred_summary_sem.release()
+
+    assert seen and all(seen), "the admission lock was held across the refusal write"
+
+
+def test_an_interrupted_web_capture_lands_where_its_own_retry_looks(docs) -> None:
+    """Uploads and captures have different retry routes. `POST .../summary`
+    treats `pending` as retryable but refuses web captures outright, and a
+    capture is re-scheduled by the next cache hit — which only fires for a
+    status outside pending/running/completed. Resetting a capture to `pending`
+    strands it in a state neither route picks up."""
+    import mantisfetch_browser as web
+    import mantisfetch_docreader as dr
+
+    web._persist_web_capture(
+        "WEB-30",
+        "https://example.com/a",
+        "T",
+        [{"h": "T", "t": "body", "sid": "s_001"}],
+        "digest",
+        [],
+        "hash30",
+        docs,
+        summary_mode="defer",
+    )
+    doc_dir = docs / "General" / "WEB-30"
+    web._set_web_summary_status(doc_dir, "running")
+    from mantisfetch_docreader.storage import _update_doc_index
+
+    entry = next(e for e in dr._load_doc_index(docs) if e.get("id") == "WEB-30")
+    entry["summary_status"] = "running"
+    import mantisfetch_common.doc_index_store as dis
+
+    dis.upsert_document(docs, entry)
+
+    assert dr._reset_interrupted_summaries(docs) == 1
+    assert web._read_web_summary_status(doc_dir) == "failed", (
+        "a capture reset to pending is picked up by neither retry route"
+    )
+
+
+def test_a_web_refusal_does_not_overwrite_a_replacement(docs, monkeypatch) -> None:
+    """The refusal rewrites the whole manifest. Without the generation check it
+    would write this capture's metadata over whatever replaced it."""
+    import mantisfetch_browser as web
+
+    web._persist_web_capture(
+        "WEB-31",
+        "https://example.com/b",
+        "T",
+        [{"h": "T", "t": "body", "sid": "s_001"}],
+        "digest",
+        [],
+        "hash31",
+        docs,
+        summary_mode="defer",
+    )
+    doc_dir = docs / "General" / "WEB-31"
+
+    # The document is replaced while this summary is still queued.
+    import json
+
+    manifest = json.loads((doc_dir / "manifest.json").read_text())
+    manifest["file_type"] = "txt"
+    manifest["provenance"]["generation"] = "web:something-else"
+    (doc_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(web, "_WEB_SUMMARY_MAX_QUEUED", 0)
+    web._web_summary_sem.acquire()
+    try:
+        web._defer_web_summary(
+            "WEB-31",
+            [{"h": "T", "t": "body", "sid": "s_001"}],
+            docs,
+            "General",
+            "T",
+            "https://example.com/b",
+        )
+    finally:
+        web._web_summary_sem.release()
+
+    after = json.loads((doc_dir / "manifest.json").read_text())
+    # The observable difference: with the generation check the refusal writes
+    # nothing at all, so the replacement's manifest carries no summary status
+    # from a capture that is no longer this document.
+    assert after["file_type"] == "txt"
+    assert after.get("parse_metadata", {}).get("summary", {}).get("status") != "not_queued", (
+        "the refusal wrote its status onto the document that replaced it"
+    )

@@ -1155,10 +1155,17 @@ def _deferred_summary_slot():
         yield True
         return
     with _deferred_summary_waiting_lock:
-        if _deferred_summary_waiting >= DEFERRED_SUMMARY_MAX_QUEUED:
-            yield False
-            return
-        _deferred_summary_waiting += 1
+        admitted = _deferred_summary_waiting < DEFERRED_SUMMARY_MAX_QUEUED
+        if admitted:
+            _deferred_summary_waiting += 1
+    if not admitted:
+        # Outside the lock: what the caller does with a refusal is a full
+        # extraction rewrite under document locks, and holding the admission
+        # lock across it would park every other arrival *outside* the counted
+        # queue — still holding its ParsedDocument, which is the memory this
+        # bound exists to cap.
+        yield False
+        return
     try:
         _deferred_summary_sem.acquire()
     finally:
@@ -2516,11 +2523,20 @@ def _reset_interrupted_summaries(docs_dir: Path) -> int:
                 summary = manifest.setdefault("parse_metadata", {}).setdefault("summary", {})
                 if summary.get("status") != "running":
                     continue
-                summary["status"] = "pending"
+                # Uploads and captures have different retry routes, so the
+                # honest terminal state differs. `POST /library/{id}/summary`
+                # treats `pending` as retryable but refuses web captures
+                # outright; a capture is re-scheduled instead by the next cache
+                # hit, and that only happens for a status outside
+                # {pending, running, completed}. Resetting a capture to
+                # `pending` would therefore strand it in a state neither route
+                # picks up.
+                is_capture = (manifest.get("file_type") or entry.get("file_type")) == "web_capture"
+                summary["status"] = "failed" if is_capture else "pending"
                 summary["error"] = "interrupted by a restart"
                 summary["error_code"] = "summary_interrupted"
                 _write_json(manifest_path, manifest)
-                entry["summary_status"] = "pending"
+                entry["summary_status"] = summary["status"]
                 from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
                 dis.upsert_document(docs_dir, entry)
