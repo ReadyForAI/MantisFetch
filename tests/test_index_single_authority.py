@@ -193,3 +193,102 @@ def test_a_tag_merge_that_cannot_commit_is_not_reported_as_merged(docs, monkeypa
         if e["id"] == "WEB-8"
     )
     assert stored["tags"] == ["first"], "a merge that could not commit must not appear committed"
+
+
+# ── what a *committed* write must survive (local Codex review of #255) ───────────
+def test_a_failed_export_does_not_undo_a_committed_write(docs, monkeypatch) -> None:
+    """The export is a derived view. Raising when it fails made the caller roll
+    its files back around a row that was already committed — a replacement would
+    end up with the old document on disk and the new one's metadata in the
+    index, which is worse than a stale JSON file."""
+    import mantisfetch_common.doc_index_store as dis
+    from mantisfetch_docreader.storage import _load_doc_index, _update_doc_index
+
+    _update_doc_index(docs, _meta(1), "d1")
+    monkeypatch.setattr(
+        dis, "export_json", lambda d, **kw: (_ for _ in ()).throw(OSError("disk full"))
+    )
+
+    _update_doc_index(docs, _meta(2), "d2")  # must not raise
+
+    monkeypatch.undo()
+    assert [e["id"] for e in _load_doc_index(docs)] == ["DOC-1", "DOC-2"]
+
+
+def test_a_capture_that_cannot_commit_leaves_nothing_published(docs, monkeypatch) -> None:
+    """A published directory with no index row is a document nothing can find
+    and nothing will clean up; retries pile up more of them."""
+    import mantisfetch_browser as web
+
+    _fail_upsert_for(monkeypatch, "WEB-7")
+    with pytest.raises(OSError):
+        web._persist_web_capture(
+            "WEB-7",
+            "https://example.com/z",
+            "T",
+            [{"h": "T", "t": "body", "sid": "s_001"}],
+            "digest",
+            [],
+            "hash7",
+            docs,
+        )
+
+    assert not (docs / "General" / "WEB-7").exists()
+    assert not list(docs.glob("General/*.rollback-capture"))
+
+
+def test_a_failed_re_capture_keeps_the_document_it_was_replacing(docs, monkeypatch) -> None:
+    """Publishing used to delete the previous version before the new one was
+    committed, so a failing commit lost both."""
+    import mantisfetch_browser as web
+
+    def capture(digest, content_hash):
+        web._persist_web_capture(
+            "WEB-6",
+            "https://example.com/w",
+            "T",
+            [{"h": "T", "t": "body", "sid": "s_001"}],
+            digest,
+            [],
+            content_hash,
+            docs,
+        )
+
+    capture("first digest", "hash-a")
+    _fail_upsert_for(monkeypatch, "WEB-6")
+    with pytest.raises(OSError):
+        capture("second digest", "hash-b")
+
+    monkeypatch.undo()
+    assert (docs / "General" / "WEB-6" / "manifest.json").exists()
+    assert "first digest" in (docs / "General" / "WEB-6" / "digest.md").read_text()
+    assert not list(docs.glob("General/*.rollback-capture"))
+
+
+def test_a_summary_claim_that_cannot_be_recorded_is_given_back(docs, monkeypatch) -> None:
+    """The claim is what stops a second cache hit enqueueing a duplicate job.
+    Left at "pending" with no worker behind it, every later request reads "one is
+    already in flight" and none ever starts."""
+    import mantisfetch_browser as web
+
+    web._persist_web_capture(
+        "WEB-5",
+        "https://example.com/v",
+        "T",
+        [{"h": "T", "t": "body worth keeping", "sid": "s_001"}],
+        "digest",
+        [],
+        "hash5",
+        docs,
+        summary_mode="off",
+    )
+    entry = next(
+        e
+        for e in json.loads((docs / "doc-index.json").read_text())["documents"]
+        if e["id"] == "WEB-5"
+    )
+    _fail_upsert_for(monkeypatch, "WEB-5")
+
+    status = web._resolve_cached_summary(entry, docs, "General", "defer")
+    assert status != "pending", "a claim nobody is working on must not read as in flight"
+    assert web._read_web_summary_status(docs / "General" / "WEB-5") == "failed"

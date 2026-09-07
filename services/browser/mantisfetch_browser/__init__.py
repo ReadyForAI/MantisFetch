@@ -2315,8 +2315,16 @@ def _persist_web_capture(
 
         with _doc_index_lock:
             final_dir.parent.mkdir(parents=True, exist_ok=True)
-            if final_dir.exists():
-                shutil.rmtree(final_dir)
+            # Publish, but keep a way back: the index commit below can fail, and
+            # a published directory with no index row is a document nothing can
+            # find and nothing will clean up. Any previous version moves aside
+            # rather than being deleted, so a failed re-capture restores it
+            # instead of destroying both.
+            rollback_dir = final_dir.with_name(final_dir.name + ".rollback-capture")
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+            had_previous = final_dir.exists()
+            if had_previous:
+                os.replace(final_dir, rollback_dir)
             os.replace(staging_dir, final_dir)
             staging_dir = None  # published; don't cleanup in finally
 
@@ -2356,8 +2364,15 @@ def _persist_web_capture(
             # library — erased that record on its way out.
             from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
-            dis.upsert_document(docs_dir, index_entry)
-            dis.export_json(docs_dir, last_updated=now_str)
+            try:
+                dis.upsert_document(docs_dir, index_entry)
+            except Exception:
+                shutil.rmtree(final_dir, ignore_errors=True)
+                if had_previous:
+                    os.replace(rollback_dir, final_dir)
+                raise
+            shutil.rmtree(rollback_dir, ignore_errors=True)
+            _export_index_json(docs_dir, now_str)
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -2411,9 +2426,8 @@ def _update_web_index_summary(
                 if digest is not None:
                     entry["digest"] = digest[:200]
                 dis.upsert_document(docs_dir, entry)
-                dis.export_json(
-                    docs_dir,
-                    last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                _export_index_json(
+                    docs_dir, datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
                 )
                 return
 
@@ -2447,7 +2461,12 @@ def _defer_web_summary(
             logger.info("web capture summary skipped (doc deleted): %s", doc_id)
             return
         _set_web_summary_status(doc_dir, "running")
-        _update_web_index_summary(docs_dir, doc_id, status="running")
+        try:
+            _update_web_index_summary(docs_dir, doc_id, status="running")
+        except Exception as exc:  # noqa: BLE001 - same as the claim above
+            logger.warning("web summary start for %s not recorded: %s", doc_id, exc)
+            _set_web_summary_status(doc_dir, "failed", error=str(exc))
+            return
         text_sections = [s for s in sections if s.get("type") != "table"]
         parsed = ParsedDocument(
             filename=title or url,
@@ -2516,6 +2535,19 @@ async def _optional_capture_lock(key: str | None) -> AsyncGenerator[None, None]:
             _capture_locks[key] = lock
     async with lock:
         yield
+
+
+def _export_index_json(docs_dir: Path, last_updated: str) -> None:
+    """Refresh doc-index.json from the database, best effort — same contract as
+    docreader's helper of this name: the commit already happened, this file is a
+    derived view, and a failure here leaves it stale rather than the library
+    wrong."""
+    from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+    try:
+        dis.export_json(docs_dir, last_updated=last_updated)
+    except Exception as exc:  # noqa: BLE001 - the index is committed either way
+        logger.warning("doc-index.json export failed (index is committed): %s", exc)
 
 
 def _load_doc_index(docs_dir: Path) -> dict[str, Any] | None:
@@ -2709,7 +2741,7 @@ def _merge_capture_tags_metadata(
         from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
         dis.upsert_document(docs_dir, target)
-        dis.export_json(docs_dir, last_updated=index["last_updated"])
+        _export_index_json(docs_dir, index["last_updated"])
 
         # Keep manifest in sync when the product tree is still present.
         # Manifest stores full metadata (including nested values); index is filtered.
@@ -2774,7 +2806,16 @@ def _resolve_cached_summary(
         if not sections:
             return status
         _set_web_summary_status(doc_dir, "pending")
-        _update_web_index_summary(docs_dir, doc_id, status="pending")
+        try:
+            _update_web_index_summary(docs_dir, doc_id, status="pending")
+        except Exception as exc:  # noqa: BLE001 - give the claim back
+            # The claim is what stops a second cache hit from enqueueing a
+            # duplicate job, so a claim that fails to record must be released:
+            # left at "pending" with no worker behind it, every later request
+            # reads "one is already in flight" and none ever starts.
+            logger.warning("web summary claim for %s not recorded: %s", doc_id, exc)
+            _set_web_summary_status(doc_dir, "failed", error=str(exc))
+            return "failed"
     threading.Thread(
         target=_defer_web_summary,
         args=(

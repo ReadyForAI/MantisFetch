@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -77,6 +78,30 @@ async def _optional_doc_id_lock(doc_id: str | None):
 _doc_counter_lock = threading.Lock()
 # _doc_index_lock is the process-wide shared lock from mantisfetch_common.storage
 # (imported above) so /web and /doc serialize on the same doc-index.json.
+
+
+logger = logging.getLogger("mantisfetch_docreader")
+
+
+def _export_index_json(docs_dir: Path) -> None:
+    """Refresh ``doc-index.json`` from the database, best effort.
+
+    The commit already happened. This file is a derived view, and readers prefer
+    the database, so a failure here leaves the export stale rather than the
+    library wrong — and the next successful write rewrites it whole. Raising
+    instead would be worse than the bug it looks like it is preventing: the
+    caller's rollback puts the *files* back but cannot un-commit the row, so a
+    replacement would end up with the old document on disk and the new one's
+    metadata in the index.
+    """
+    from mantisfetch_common import doc_index_store as dis
+
+    try:
+        dis.export_json(
+            docs_dir, last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        )
+    except Exception as exc:  # noqa: BLE001 - the index is committed either way
+        logger.warning("doc-index.json export failed (index is committed): %s", exc)
 
 
 def _update_doc_index(
@@ -154,9 +179,7 @@ def _update_doc_index(
         from mantisfetch_common import doc_index_store as dis
 
         dis.upsert_document(docs_dir, entry)
-        dis.export_json(
-            docs_dir, last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
+        _export_index_json(docs_dir)
 
 
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
@@ -245,10 +268,7 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
                 d.get("id") == doc_id for d in dis.list_documents(docs_dir)
             )
         dis.delete_document(docs_dir, doc_id)
-        dis.export_json(
-            docs_dir,
-            last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        )
+        _export_index_json(docs_dir)
         if had_index_entry:
             removed = True
         return removed
