@@ -738,7 +738,7 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | Parsing takes too long                             | Large file + OCR               | Use `generate_summary=false` for fast extraction first, generate summary later |
 | Table is empty                                     | Tables are images or complex layouts | First confirm text OCR was ingested; if critical table content is missing, retry only relevant pages with `ocr_pages`, or use `force_ocr=true` only when the extra cost is acceptable |
 | OCR output looks like `No image provided`          | Vision model / image input mode mismatch | Check the active OCR model, vendor profile, and OCR image input mode before retrying |
-| XLSX/CSV truncated warning in metadata             | File exceeds MAX_PARSE_ROWS    | Normal — large spreadsheets are truncated for safety; check `metadata.truncated` |
+| `metadata.large_output` on an XLSX                 | The converted workbook is over `MANTISFETCH_MAX_PARSE_ROWS × 100` characters | Informational, **nothing was cut** — `metadata.output_chars` says how big. Read it by section rather than asking for the full text |
 
 ---
 

@@ -90,11 +90,23 @@ def parse_xlsx(filepath: Path) -> ParsedDocument:
             else []
         )
 
-    # Size guard
-    truncated = len(markdown_text) > MAX_PARSE_ROWS * 100  # rough char limit
+    # A size report, not a limit. Nothing here truncates: MarkItDown converts the
+    # whole workbook before this line runs, so the old `truncated=True` described
+    # a guess about length while every row was still in the output — and it named
+    # a row limit that had not been applied to anything. An agent that read it
+    # could not find out which rows were missing, because none were.
+    #
+    # A real budget (refuse, or return a stated range) is a contract decision to
+    # make before coding it. Until then: say how big it came out, and do not
+    # claim a cut that did not happen.
+    large_output = len(markdown_text) > MAX_PARSE_ROWS * 100
 
-    if truncated:
-        logger.warning("XLSX output may be truncated (large file)")
+    if large_output:
+        logger.warning(
+            "XLSX output is large: %d chars from %s (nothing was truncated)",
+            len(markdown_text),
+            filepath.name,
+        )
     logger.info(f"XLSX parse complete: {len(sections)} sheets, {table_count} tables")
     result = ParsedDocument(
         filename=filepath.name,
@@ -104,9 +116,9 @@ def parse_xlsx(filepath: Path) -> ParsedDocument:
         sections=sections,
         table_count=table_count,
     )
-    if truncated:
-        result.metadata["truncated"] = True
-        result.metadata["max_rows"] = MAX_PARSE_ROWS
+    if large_output:
+        result.metadata["large_output"] = True
+        result.metadata["output_chars"] = len(markdown_text)
     return result
 
 
