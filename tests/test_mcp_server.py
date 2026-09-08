@@ -312,6 +312,25 @@ def test_doc_sections_batch_delegates(monkeypatch) -> None:
     assert out["missing"] == ["s9"]
 
 
+def test_doc_source_description_leads_with_the_bare_call_being_metadata_only() -> None:
+    """Issue #273. A bare doc_source call returns metadata and no content, and the
+    description never said so — so a model that called it once concluded the
+    tool cannot read a raw document, fell through to doc_full, got 404, and told
+    the user the content was unreadable. Every step was sound; the description
+    was the broken link. For an LLM-facing tool the description is the entire
+    manual, and a call whose bare result looks complete gives the model no
+    second chance to discover the parameters. So the load-bearing fact goes in
+    the first sentence, not the third paragraph."""
+    tool = next(t for t in asyncio.run(mm.mcp.list_tools()) if t.name == "doc_source")
+    desc = tool.description or ""
+    first_sentence = desc.split(". ")[0] + "."
+    assert "WITHOUT offset/limit" in desc
+    assert "METADATA ONLY" in first_sentence.upper() or "METADATA ONLY" in desc[:160]
+    assert "NO content" in desc
+    assert "pass offset and/or limit" in desc
+    assert "doc_full" in desc  # names the dead end so the model does not walk into it
+
+
 def test_doc_delete_delegates(monkeypatch) -> None:
     fake = {"doc_id": "F-abc", "deleted": True}
     monkeypatch.setattr(mm, "_doc_delete", AsyncMock(return_value=fake))

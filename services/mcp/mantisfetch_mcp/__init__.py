@@ -849,18 +849,18 @@ async def doc_manifest(doc_id: str) -> Any:
 async def doc_source(
     doc_id: str, offset: int | None = None, limit: int | None = None
 ) -> Any:
-    """Describe a document's stored original file, and optionally read its text.
+    """Read a raw document's stored original, or describe it. WITHOUT offset/limit
+    this returns METADATA ONLY (doc_id, filename, media_type, size_bytes, kind)
+    and NO content. To read the text, pass offset and/or limit — offset=0 alone
+    reads from the start. That is the only way to read a document stored as an
+    original (kind="raw": markdown or an image stored without parsing); for such
+    a document doc_full / doc_section / doc_brief answer 404, not this tool.
 
-    For documents whose manifest says kind="raw" (markdown and images stored
-    without parsing) this is the only reader — there are no sections, digest or
-    brief to ask for. Returns doc_id, filename, media_type and size_bytes; never
-    the bytes themselves, so an image cannot arrive as base64 in your context.
-    The runtime that assembles a turn is what fetches the bytes.
-
-    Pass offset (0-based line) and/or limit (lines) to read a window of a text
-    original — for paging a markdown file too large to hold at once. Each window
-    is capped at 64 KiB of UTF-8 and cut at a line boundary; next_offset is where
-    to continue, or null at the end. Asking for a window of an image is an error.
+    offset is a 0-based line, limit a line count. Each window is capped at
+    64 KiB of UTF-8 and cut at a line boundary; next_offset is where to
+    continue, or null at the end. An image never comes back as bytes (the
+    runtime that assembles a turn fetches those); a window of an image is an
+    error.
     """
     params: dict[str, Any] = {}
     if offset is not None:

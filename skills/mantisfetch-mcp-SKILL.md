@@ -184,7 +184,7 @@ Notes:
 | `doc_table` | Read one extracted table (with numeric column stats). | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`) |
 | `doc_chunks` | Retrieval-friendly chunks for downstream RAG. | `doc_id`, `include_text=false` |
 | `doc_manifest` | Provenance manifest (source, hash, timestamps). | `doc_id` |
-| `doc_source` | The stored original file of a `kind: "raw"` document (markdown / image stored without parsing) — metadata only, never the bytes. Pass `offset`/`limit` to page a text original: 0-based lines, 64 KiB per window, `next_offset` to continue. A window of an image is an error. | `doc_id`, `offset?`, `limit?` |
+| `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, 64 KiB per window, `next_offset` to continue. The only reader for a raw document — `doc_full` / `doc_section` 404 on it. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
 | `doc_summary` | The document's three-tier generated summary / status. | `doc_id` |
 
 A document whose manifest says `kind: "raw"` has no digest, brief, sections or full
