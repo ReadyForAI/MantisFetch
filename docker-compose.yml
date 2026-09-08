@@ -63,6 +63,13 @@ services:
       # declared, and how many bytes of staged upload the queue may hold.
       MANTISFETCH_PARSE_QUEUE_MAX_WAIT_SEC: ${MANTISFETCH_PARSE_QUEUE_MAX_WAIT_SEC:-600}
       MANTISFETCH_PARSE_QUEUE_MAX_BYTES: ${MANTISFETCH_PARSE_QUEUE_MAX_BYTES:-}
+      # Keep the uploaded original beside the parse, under the document's
+      # source/. On by default in code too, but stated here so it is a declared
+      # deployment property rather than one inherited from a default: the raw
+      # channel (store_only=true) refuses with a 422 without it, /library/{id}/source
+      # has nothing to serve, and the loss is silent and unrecoverable — the
+      # original is gone once the upload connection closes.
+      MANTISFETCH_STORE_SOURCE_FILES: ${MANTISFETCH_STORE_SOURCE_FILES:-true}
       # Raw channel (store_only=true) per-type ceilings, in MiB. These are a
       # cross-product contract — AULO refuses oversize uploads client-side
       # against the same two numbers (2,097,152 / 8,388,608 bytes).
