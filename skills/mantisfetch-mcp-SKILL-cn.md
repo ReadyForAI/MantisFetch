@@ -163,7 +163,7 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
 | `doc_chunks` | 面向下游 RAG 的检索友好分块。 | `doc_id`、`include_text=false` |
 | `doc_manifest` | provenance manifest（来源、hash、时间戳）。 | `doc_id` |
-| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面 —— 只返元数据，不返字节。带 `offset`/`limit` 分页读文本原件：0 起行号、单窗口 64 KiB、`next_offset` 续读。对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
+| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、单窗口 64 KiB、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 对它 `doc_full` / `doc_section` 都是 404。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
 | `doc_summary` | 文档的三级生成摘要 / 状态。 | `doc_id` |
 
 manifest 里 `kind` 为 `"raw"` 的文档没有 digest / brief / sections / 全文 ——
