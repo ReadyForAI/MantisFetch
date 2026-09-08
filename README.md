@@ -105,6 +105,7 @@ services:
 | `MANTISFETCH_OCR_EXTRA_BODY_JSON` | — | Optional JSON object merged into OCR request body |
 | `MANTISFETCH_DOCS_DIR` | `~/.mantisfetch/docs` | Document library directory |
 | `MANTISFETCH_STORE_SOURCE_FILES` | `true` | Persist uploaded source files under each document's `source/` directory |
+| `MANTISFETCH_LIBRARY_RETENTION_DAYS` | `0` | Library-wide retention by `created_at`, in days; `0` = off. Deletes hourly through the same locked path as `DELETE /doc/library/{id}`. Set it ≥ every writer's own retention |
 | `MANTISFETCH_RAW_MAX_MD_MB` | `2` | Raw-channel ceiling for markdown, in MiB (2 = 2,097,152 bytes) |
 | `MANTISFETCH_RAW_MAX_IMAGE_MB` | `8` | Raw-channel ceiling for images, in MiB (8 = 8,388,608 bytes) |
 
@@ -477,6 +478,7 @@ services:
 | `MANTISFETCH_OCR_EXTRA_BODY_JSON` | — | 可选：合并到 OCR 请求体中的 JSON 对象 |
 | `MANTISFETCH_DOCS_DIR` | `~/.mantisfetch/docs` | 文档库存储目录 |
 | `MANTISFETCH_STORE_SOURCE_FILES` | `true` | 是否将上传原件保存在每个文档目录下的 `source/` 子目录 |
+| `MANTISFETCH_LIBRARY_RETENTION_DAYS` | `0` | 库级保留天数（按 `created_at`），`0` = 关闭；每小时经与 `DELETE /doc/library/{id}` 相同的加锁路径删除。应 ≥ 各写入方自己的保留期 |
 | `MANTISFETCH_RAW_MAX_MD_MB` | `2` | 原件通道 markdown 上限，单位 MiB（2 = 2,097,152 字节） |
 | `MANTISFETCH_RAW_MAX_IMAGE_MB` | `8` | 原件通道图片上限，单位 MiB（8 = 8,388,608 字节） |
 

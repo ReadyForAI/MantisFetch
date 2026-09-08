@@ -149,7 +149,7 @@ def test_search_and_capture_serial_with_skip(client: TestClient) -> None:
     seen_reqs = []
     seen_ttls = []
 
-    async def fake_capture(req, *, url_ttl_hours=None):
+    async def fake_capture(req, *, url_ttl_hours=None, actor=None):
         seen_reqs.append(req)
         seen_ttls.append(url_ttl_hours)
         if req.url == "https://b.com":
@@ -185,7 +185,7 @@ def test_search_and_capture_caps_top_at_3(client: TestClient) -> None:
     provider = _FakeSearchProvider(results=[_sr(f"https://{i}.com") for i in range(10)])
     calls = []
 
-    async def fake_capture(req, *, url_ttl_hours=None):
+    async def fake_capture(req, *, url_ttl_hours=None, actor=None):
         calls.append(req.url)
         return CaptureResponse(doc_id="WEB-1", digest="d", section_count=1, table_count=0)
 

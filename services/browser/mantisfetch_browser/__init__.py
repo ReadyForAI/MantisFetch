@@ -16,12 +16,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from i18n import t
 from mantisfetch_common import __version__
 from mantisfetch_common import metrics as metrics
+from mantisfetch_common.actor import Actor, actor_from_headers
 from mantisfetch_common.atomic import _write_text as _write_text_atomic
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
@@ -2198,6 +2199,7 @@ def _persist_web_capture(
     summary_mode: str = "off",
     http_status: int | None = None,
     fetch_via: str = "html",
+    actor: Actor | None = None,
 ) -> None:
     """Write a web capture to the document library and update doc-index.json.
 
@@ -2307,6 +2309,10 @@ def _persist_web_capture(
                 "source": "web_capture",
                 "source_url": url,
                 "created_at": now_str,
+                # Who captured it, off the transport (IRP 20260908 P1); the
+                # endpoint read the headers, this just records what it was told.
+                "created_by": actor[0] if actor else None,
+                "created_via": actor[1] if actor else None,
                 "content_hash": content_hash,
                 # What a deferred summary checks before it writes back. Every
                 # capture of this id gets a new one — created_at is in it — so a
@@ -3455,7 +3461,9 @@ async def close_session(req: CloseSessionRequest) -> dict:
     return {"ok": True}
 
 
-async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path) -> CaptureResponse:
+async def _capture_fresh(
+    req: CaptureRequest, content_type: str, docs_dir: Path, actor: Actor | None = None
+) -> CaptureResponse:
     """Do an actual capture (navigate → distill → persist) and return the response.
     The caller holds the per-key cache lock (when caching is on), so concurrent
     same-key requests never reach here twice."""
@@ -3618,6 +3626,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                         doc_id = _next_web_doc_id(docs_dir)
                         _persist_web_capture(
                             doc_id=doc_id,
+                            actor=actor,
                             url=url,
                             title=title,
                             sections=sections,
@@ -3642,6 +3651,7 @@ async def _capture_fresh(req: CaptureRequest, content_type: str, docs_dir: Path)
                     doc_id = _next_web_doc_id(docs_dir)
                     _persist_web_capture(
                         doc_id=doc_id,
+                        actor=actor,
                         url=url,
                         title=title,
                         sections=sections,
@@ -3708,7 +3718,7 @@ def _find_capture_by_requested_url(docs_dir: Path, url: str) -> dict[str, Any] |
 
 
 async def _capture_negotiated(
-    req: CaptureRequest, content_type: str, docs_dir: Path
+    req: CaptureRequest, content_type: str, docs_dir: Path, actor: Actor | None = None
 ) -> CaptureResponse | None:
     """Capture without a browser when the site will serve markdown.
 
@@ -3768,7 +3778,7 @@ async def _capture_negotiated(
                 )
             doc_id = await asyncio.to_thread(
                 _persist_negotiated, req, doc, content_type, docs_dir, sections,
-                title, digest, content_hash,
+                title, digest, content_hash, actor,
             )
             return _negotiated_response(
                 req, doc, content_type, docs_dir, sections, title, digest, doc_id
@@ -3791,6 +3801,7 @@ def _persist_negotiated(
     title: str | None,
     digest: str,
     content_hash: str,
+    actor: Actor | None = None,
 ) -> str:
     """Mint an id and write a negotiated capture. Runs in a worker thread."""
 
@@ -3798,6 +3809,7 @@ def _persist_negotiated(
         doc_id = _next_web_doc_id(docs_dir)
         _persist_web_capture(
             doc_id=doc_id,
+            actor=actor,
             url=doc.final_url,
             title=title,
             sections=sections,
@@ -3857,7 +3869,7 @@ def _negotiated_response(
 
 
 async def _capture_impl(
-    req: CaptureRequest, *, url_ttl_hours: float | None = None
+    req: CaptureRequest, *, url_ttl_hours: float | None = None, actor: Actor | None = None
 ) -> CaptureResponse:
     """Shared capture path for /capture and /search_and_capture.
 
@@ -3933,14 +3945,14 @@ async def _capture_impl(
                 # Counted here so the hit counter has a denominator: a hit rate
                 # needs to know how often the ladder was climbed at all.
                 metrics.incr("capture_negotiated_attempts")
-                fast = await _capture_negotiated(req, content_type, docs_dir)
+                fast = await _capture_negotiated(req, content_type, docs_dir, actor=actor)
                 if fast is not None:
                     return fast
-        return await _capture_fresh(req, content_type, docs_dir)
+        return await _capture_fresh(req, content_type, docs_dir, actor=actor)
 
 
 @app.post("/capture", response_model=CaptureResponse)
-async def capture(req: CaptureRequest) -> CaptureResponse:
+async def capture(req: CaptureRequest, request: Request) -> CaptureResponse:
     """One-shot web capture: navigate to URL, distill, persist to document library, return doc_id.
 
     Internally runs: session/new → goto → distill → persist → session/close.
@@ -3948,7 +3960,7 @@ async def capture(req: CaptureRequest) -> CaptureResponse:
     when (a) URL-level cache hits within MANTISFETCH_CAPTURE_TTL_HOURS, or
     (b) the distilled body content_hash already exists (B5 content dedup).
     """
-    return await _capture_impl(req)
+    return await _capture_impl(req, actor=actor_from_headers(request.headers))
 
 
 def _search_and_capture_url_ttl() -> float:
@@ -4092,7 +4104,9 @@ async def search(req: SearchRequest) -> SearchResponse:
 
 
 @app.post("/search_and_capture", response_model=SearchAndCaptureResponse)
-async def search_and_capture(req: SearchAndCaptureRequest) -> SearchAndCaptureResponse:
+async def search_and_capture(
+    req: SearchAndCaptureRequest, request: Request
+) -> SearchAndCaptureResponse:
     """Search, then capture the top N hits into the document library (serially) with
     search provenance stamped in metadata. One hit failing to capture is recorded in
     `skipped` and does not abort the batch."""
@@ -4127,7 +4141,11 @@ async def search_and_capture(req: SearchAndCaptureRequest) -> SearchAndCaptureRe
         # pointing at a private/loopback target is rejected here → skipped.
         # URL TTL defaults to 24h for this path (B5) so repeated queries reuse hits.
         try:
-            cap = await _capture_impl(cap_req, url_ttl_hours=_search_and_capture_url_ttl())
+            cap = await _capture_impl(
+                cap_req,
+                url_ttl_hours=_search_and_capture_url_ttl(),
+                actor=actor_from_headers(request.headers),
+            )
         except HTTPException as exc:
             skipped.append(
                 SkippedItem(url=hit.url, reason=f"capture_failed: {exc.detail}", rank=rank)

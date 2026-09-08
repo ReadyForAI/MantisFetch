@@ -28,7 +28,7 @@ import weakref
 import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,7 @@ from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
 from mantisfetch_common import __version__
+from mantisfetch_common.actor import Actor, actor_from_headers, actor_label
 from mantisfetch_common.atomic import _write_json, _write_text
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
@@ -1665,6 +1666,31 @@ def _delete_doc_serialized(docs_dir: Path, doc_id: str) -> bool:
         return _delete_doc(docs_dir, doc_id)
 
 
+def _read_manifest_actor(doc_dir: Path) -> Actor:
+    """``(created_by, created_via)`` from a document's manifest, or two Nones."""
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (None, None)
+    provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
+    if not isinstance(provenance, dict):
+        return (None, None)
+    return (provenance.get("created_by"), provenance.get("created_via"))
+
+
+def _actor_provenance(doc_dir: Path, actor: Actor | None) -> dict[str, str | None]:
+    """The two ownership fields for a manifest being (re)written.
+
+    SharedSpecs IRP 20260908 P1. A writer that was not handed an actor is
+    rewriting a document that already has one — the deferred-summary write-back
+    re-runs these same writers once the LLM answers — so it carries the recorded
+    values forward instead of blanking them. Only a write that arrived over the
+    wire has anything new to say, and it says it through ``actor``.
+    """
+    created_by, created_via = actor if actor is not None else _read_manifest_actor(doc_dir)
+    return {"created_by": created_by, "created_via": created_via}
+
+
 def _reversible_rewrite(impl):
     """Give a writer all-or-nothing semantics against the document on disk.
 
@@ -1734,6 +1760,7 @@ def _write_output_impl(
     content_type: str | None = None,
     preserve_extracted: bool = False,
     guard_stale_generation: bool = False,
+    actor: Actor | None = None,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
@@ -1885,6 +1912,7 @@ def _write_output_impl(
             "source": source,
             "source_url": original_path or str(parsed.filename),
             "created_at": meta["created_at"],
+            **_actor_provenance(doc_dir, actor),
             "content_hash": content_hash,
             "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
@@ -1927,6 +1955,7 @@ def _write_output_extract_only_impl(
     content_type: str | None = None,
     preserve_extracted: bool = False,
     guard_stale_generation: bool = False,
+    actor: Actor | None = None,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
@@ -2054,6 +2083,7 @@ def _write_output_extract_only_impl(
             "source": source,
             "source_url": str(parsed.filename),
             "created_at": meta["created_at"],
+            **_actor_provenance(doc_dir, actor),
             "content_hash": content_hash,
             "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
@@ -2472,6 +2502,66 @@ class SectionBatchRequest(BaseModel):
 # ---- FastAPI app ----
 
 
+# ── library retention (SharedSpecs IRP 20260908 D4) ───────────────────────────
+# Days a document lives, by created_at; 0 = off. The library is a working set,
+# not a knowledge base: Agents' captures and AULO's direct ingests have no writer
+# that sweeps them, so with this off they accumulate for ever. Harness sweeps its
+# own chat attachments regardless — the two coexist because both go through the
+# same idempotent delete. Deployment rule (decision §4a): set this >= every
+# writer's own retention, so their finer policy runs first.
+# ``or "0"``: an exported-but-empty variable reads as unset, it does not crash.
+LIBRARY_RETENTION_DAYS = int(os.environ.get("MANTISFETCH_LIBRARY_RETENTION_DAYS", "0") or "0")
+_RETENTION_SWEEP_INTERVAL_SEC = 3600.0
+_MANIFEST_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _expired_doc_ids(docs_dir: Path, cutoff: datetime) -> list[str]:
+    """Ids of documents created before ``cutoff``.
+
+    Anything that cannot be dated is kept: a missing or unparseable created_at
+    is a reason not to delete, never a reason to.
+    """
+    from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+    expired: list[str] = []
+    for entry in dis.list_documents(docs_dir):
+        doc_id, raw = entry.get("id"), entry.get("created_at")
+        if not doc_id or not raw:
+            continue
+        try:
+            created = datetime.strptime(str(raw), _MANIFEST_TIME_FORMAT).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+        if created < cutoff:
+            expired.append(str(doc_id))
+    return expired
+
+
+async def _sweep_expired_documents(docs_dir: Path, days: int) -> int:
+    """One retention pass: delete what is older than ``days``, one document at a
+    time, through the same locked path as DELETE /library/{id}. Returns how many."""
+    cutoff = datetime.now(UTC) - timedelta(days=days)
+    deleted = 0
+    for doc_id in await asyncio.to_thread(_expired_doc_ids, docs_dir, cutoff):
+        try:
+            if await _delete_document_locked(docs_dir, doc_id, actor=None, trigger="retention"):
+                deleted += 1
+        except Exception as exc:  # noqa: BLE001 - one document must not stop the sweep
+            logger.warning("retention: could not delete %s: %s", doc_id, exc)
+    return deleted
+
+
+async def _retention_loop(days: int) -> None:
+    while True:
+        try:
+            deleted = await _sweep_expired_documents(_get_docs_dir(), days)
+            if deleted:
+                logger.info("retention: deleted %d document(s) older than %d day(s)", deleted, days)
+        except Exception as exc:  # noqa: BLE001 - the loop outlives any one failure
+            logger.warning("retention sweep skipped: %s", exc)
+        await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SEC)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup tasks (replaces deprecated @app.on_event). Runs under the unified
@@ -2480,7 +2570,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _startup_prewarm_local_ocr()
     await _startup_backfill_manifest_tags()
     await _startup_reset_interrupted_summaries()
-    yield
+    # On the loop, not in a thread: the delete path takes an asyncio lock.
+    retention = (
+        asyncio.create_task(_retention_loop(LIBRARY_RETENTION_DAYS))
+        if LIBRARY_RETENTION_DAYS > 0
+        else None
+    )
+    try:
+        yield
+    finally:
+        if retention is not None:
+            retention.cancel()
 
 
 app = FastAPI(title="Doc Reader API", version=__version__, lifespan=lifespan)
@@ -3955,6 +4055,7 @@ async def _store_only_ingest(
     replace: bool,
     will_replace: bool,
     t_entry: float,
+    actor: Actor | None = None,
 ) -> ParseResponse:
     """Store an original file with no parse products at all (store_only=true).
 
@@ -4004,6 +4105,7 @@ async def _store_only_ingest(
                 storage_path=storage_path,
                 dedup_status=dedup_status,
                 will_replace=will_replace,
+                actor=actor,
                 t_entry=t_entry,
             )
         except HTTPException as exc:
@@ -4089,6 +4191,7 @@ def _write_raw_document(
     storage_path: str,
     dedup_status: str,
     t_entry: float,
+    actor: Actor | None = None,
 ) -> ParseResponse:
     """Write the original, the manifest and the index entry, in that order.
 
@@ -4138,6 +4241,7 @@ def _write_raw_document(
             "source": "upload",
             "source_url": filename,
             "created_at": created_at,
+            **_actor_provenance(doc_dir, actor),
             "content_hash": "",
             # No summary worker runs for a raw document, but one may still be
             # in flight for the parsed document this replaces; a token here
@@ -4234,6 +4338,7 @@ async def _reserve_doc_id(
 @app.post("/parse", response_model=ParseResponse)
 @_survives_client_disconnect
 async def api_parse_doc(
+    request: Request,
     file: UploadFile = File(...),
     doc_id: str | None = Form(None),
     content_type: str = Form("General"),
@@ -4271,6 +4376,8 @@ async def api_parse_doc(
 ):
     """Parse uploaded document (PDF/DOCX), return structured result."""
     t_entry = time.monotonic()
+    # Who is writing, off the transport — never off the form (IRP 20260908 P1).
+    actor = actor_from_headers(request.headers)
 
     docs_dir = _get_docs_dir()
     filename = file.filename or "unknown"
@@ -4427,6 +4534,7 @@ async def api_parse_doc(
                 replace=replace,
                 will_replace=will_replace,
                 t_entry=t_entry,
+                actor=actor,
             )
 
         # The OOXML formats are zips. A file that is not one cannot be read as
@@ -4866,6 +4974,7 @@ async def api_parse_doc(
                             metadata=parsed_metadata,
                             source_record=source_record,
                             content_type=selected_content_type,
+                            actor=actor,
                         ),
                     )
                 else:
@@ -4882,6 +4991,7 @@ async def api_parse_doc(
                             metadata=parsed_metadata,
                             source_record=source_record,
                             content_type=selected_content_type,
+                            actor=actor,
                         ),
                     )
                     if summary_mode == "defer":
@@ -5589,8 +5699,60 @@ async def get_full(doc_id: str):
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
 
 
+def _manifest_actor_for(docs_dir: Path, doc_id: str) -> Actor:
+    try:
+        doc_dir = _resolve_doc_dir(docs_dir, doc_id)
+    except HTTPException:
+        return (None, None)
+    return _read_manifest_actor(doc_dir)
+
+
+async def _delete_document_locked(
+    docs_dir: Path, doc_id: str, *, actor: Actor | None, trigger: str
+) -> bool:
+    """Delete one document under every lock a delete needs, and say who did it.
+
+    The single delete path: the REST endpoint and the retention sweep both come
+    through here, so neither can be the one that forgot a lock.
+
+    Hold the per-doc_id parse lock so a delete can't race a concurrent same-doc
+    /doc/parse: parse writes its product dir under this lock but its index entry
+    only at the end, so a delete holding only _doc_index_lock could rmtree the
+    just-written dir and leave the index pointing at missing artifacts. It is an
+    asyncio lock, which is why a sweep has to run on the loop and not in a thread.
+
+    And the writer lock, which that one cannot stand in for: a deferred-summary
+    write runs in a plain thread that can never take an asyncio lock. It decides
+    whether to write by looking for the manifest, so a delete landing between
+    that look and the write is undone — the document comes back after the caller
+    was told it was gone (#168). In an executor because the wait is for a summary
+    write to finish, which is not something to hold the event loop for.
+    """
+    loop = asyncio.get_running_loop()
+    async with _optional_doc_id_lock(doc_id):
+        created_by, created_via = await loop.run_in_executor(
+            None, _manifest_actor_for, docs_dir, doc_id
+        )
+        removed = await loop.run_in_executor(None, _delete_doc_serialized, docs_dir, doc_id)
+    # SharedSpecs IRP 20260908 D6: the library-side audit line, the dual of the
+    # one Harness writes for its own deletes. Every field on one line, so the
+    # deletes no writer sees — an Agent's capture, a Channel attachment — are
+    # attributable after the fact. ``actor`` is what the request asserted;
+    # ``created_by``/``created_via`` are what the document recorded.
+    logger.info(
+        "library_delete doc_id=%s trigger=%s actor=%s created_by=%s created_via=%s deleted=%s",
+        doc_id,
+        trigger,
+        actor_label(actor),
+        created_by,
+        created_via,
+        removed,
+    )
+    return removed
+
+
 @app.delete("/library/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(doc_id: str, request: Request):
     """Delete a document from the library by doc_id: removes its doc-index entry
     and all on-disk products, atomically under the shared index lock.
 
@@ -5599,22 +5761,9 @@ async def delete_document(doc_id: str):
     are side-effect-free (a doc already gone stays a success). Drives the chat
     attachment lifecycle (session archive/reset delete + retention sweep)."""
     _validate_doc_id(doc_id)
-    # Hold the per-doc_id parse lock so a delete can't race a concurrent same-doc
-    # /doc/parse: parse writes its product dir under this lock but its index entry
-    # only at the end, so a delete holding only _doc_index_lock could rmtree the
-    # just-written dir and leave the index pointing at missing artifacts.
-    async with _optional_doc_id_lock(doc_id):
-        docs_dir = _get_docs_dir()
-        # And the writer lock, which that one cannot stand in for: a
-        # deferred-summary write runs in a plain thread that can never take an
-        # asyncio lock. It decides whether to write by looking for the manifest,
-        # so a delete landing between that look and the write is undone — the
-        # document comes back after the caller was told it was gone (#168).
-        # In an executor because the wait is for a summary write to finish, which
-        # is not something to hold the event loop for.
-        removed = await asyncio.get_running_loop().run_in_executor(
-            None, _delete_doc_serialized, docs_dir, doc_id
-        )
+    removed = await _delete_document_locked(
+        _get_docs_dir(), doc_id, actor=actor_from_headers(request.headers), trigger="rest"
+    )
     return {"doc_id": doc_id, "deleted": removed}
 
 

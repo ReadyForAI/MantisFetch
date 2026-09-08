@@ -44,10 +44,11 @@ from typing import Any
 import httpx
 import mantisfetch_browser as _web_mod
 import mantisfetch_docreader as _doc_mod
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from mantisfetch_common import __version__
+from mantisfetch_common.actor import forwardable_headers
 from providers.search import available_providers, provider_trait
 
 try:  # ToolError gives the agent a clean message; fall back if the path moves.
@@ -135,20 +136,32 @@ def _unwrap(resp: httpx.Response) -> Any:
     return resp.text
 
 
-async def _web_post(path: str, payload: dict[str, Any]) -> Any:
-    return _unwrap(await _web_client.post(path, json=payload))
+async def _web_post(
+    path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+) -> Any:
+    return _unwrap(await _web_client.post(path, json=payload, headers=headers))
 
 
 async def _doc_get(path: str, params: dict[str, Any] | None = None) -> Any:
     return _unwrap(await _doc_client.get(path, params=params))
 
 
-async def _doc_post(path: str, payload: dict[str, Any]) -> Any:
-    return _unwrap(await _doc_client.post(path, json=payload))
+async def _doc_post(
+    path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+) -> Any:
+    return _unwrap(await _doc_client.post(path, json=payload, headers=headers))
 
 
-async def _doc_delete(path: str) -> Any:
-    return _unwrap(await _doc_client.delete(path))
+def _actor_headers(ctx: Context | None) -> dict[str, str]:
+    """The caller's identity headers, to pass through on a write.
+
+    This server is a front-end over the two sub-apps; what they record as
+    ``created_by``/``created_via`` (SharedSpecs IRP 20260908 P1) has to be what
+    the *caller* sent, so the two headers travel on the in-process hop. Only
+    those two: the caller's Authorization never does. ``ctx`` is None when a tool
+    is called as a plain function (tests); on the wire the SDK supplies it.
+    """
+    return forwardable_headers(getattr(ctx, "headers", None))
 
 
 # ── injection boundary (untrusted web page text) ───────────────────────────────
@@ -362,6 +375,7 @@ async def web_capture(
     extract_tables: bool = True,
     force_refresh: bool = False,
     summary_mode: str = "off",
+    ctx: Context | None = None,
 ) -> Any:
     """One-shot semantic capture of a web page into the document library — the
     token-cheap replacement for a raw fetch. Returns doc_id + digest + section/
@@ -379,7 +393,9 @@ async def web_capture(
     }
     if tags is not None:
         payload["tags"] = tags
-    return _wrap_web_result(await _web_post("/capture", payload), url)
+    return _wrap_web_result(
+        await _web_post("/capture", payload, headers=_actor_headers(ctx)), url
+    )
 
 
 def _search_tools_enabled() -> bool:
@@ -457,6 +473,7 @@ if _search_tools_enabled():
         lang: str = "en",
         freshness: str | None = None,
         provider: str | None = None,
+        ctx: Context | None = None,
     ) -> Any:
         """Search + capture the top N hits into the library (capture_top <= 3),
         returning [{doc_id, digest, rank, reused}]. Deep-read the returned doc_ids
@@ -474,6 +491,7 @@ if _search_tools_enabled():
                     "freshness": freshness,
                     "provider": provider,
                 },
+                headers=_actor_headers(ctx),
             )
         )
 
@@ -609,6 +627,7 @@ async def doc_parse(
     doc_id: str | None = None,
     replace: bool = False,
     store_only: bool = False,
+    ctx: Context | None = None,
 ) -> Any:
     """Parse a document (PDF/DOCX/PPTX/XLSX/CSV/HTML, with OCR fallback) into the
     library; returns doc_id + structure. Provide exactly one source:
@@ -735,7 +754,9 @@ async def doc_parse(
         import json
 
         form["tags"] = json.dumps(tags)
-    resp = await _doc_client.post("/parse", data=form, files={"file": (name, data)})
+    resp = await _doc_client.post(
+        "/parse", data=form, files={"file": (name, data)}, headers=_actor_headers(ctx)
+    )
     return _unwrap(resp)
 
 
@@ -869,14 +890,6 @@ async def doc_source(
         params["limit"] = limit
     return await _doc_get(f"/library/{doc_id}/source/info", params or None)
 
-
-@mcp.tool()
-async def doc_delete(doc_id: str) -> Any:
-    """Delete a document from the library by doc_id (removes its index entry +
-    parsed products). Idempotent: deleting an unknown doc_id succeeds (returns
-    deleted=false), so retries and cleanup passes are side-effect-free. Used by the
-    chat-attachment lifecycle (session archive/reset + retention GC)."""
-    return await _doc_delete(f"/library/{doc_id}")
 
 
 @mcp.tool()
