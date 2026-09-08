@@ -70,6 +70,14 @@ services:
       # has nothing to serve, and the loss is silent and unrecoverable — the
       # original is gone once the upload connection closes.
       MANTISFETCH_STORE_SOURCE_FILES: ${MANTISFETCH_STORE_SOURCE_FILES:-true}
+      # Library-wide retention (SharedSpecs IRP 20260908 D4). 0 = off. When on,
+      # documents older than this many days (by created_at) are deleted hourly,
+      # through the same locked path as DELETE /doc/library/{id}. This is the
+      # only reclaim for what Agents capture and what AULO ingests directly;
+      # Harness sweeps its own chat attachments regardless. Deployment rule
+      # (decision §4a): set this >= every writer's own retention, so their finer
+      # policy runs first — today that means >= Harness's library_retention_days.
+      MANTISFETCH_LIBRARY_RETENTION_DAYS: ${MANTISFETCH_LIBRARY_RETENTION_DAYS:-0}
       # Raw channel (store_only=true) per-type ceilings, in MiB. These are a
       # cross-product contract — AULO refuses oversize uploads client-side
       # against the same two numbers (2,097,152 / 8,388,608 bytes).

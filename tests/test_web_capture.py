@@ -5,6 +5,7 @@ import json
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -387,7 +388,10 @@ async def test_concurrent_same_url_captures_only_once(tmp_path: Path) -> None:
         lb._browser.new_context = AsyncMock(return_value=mock_context)
         try:
             req = CaptureRequest(url="https://example.com", content_type="Knowledge")
-            r1, r2 = await asyncio.gather(lb.capture(req), lb.capture(req))
+            # The endpoint reads identity headers off the request (IRP 20260908);
+            # a direct call hands it one with none.
+            bare = SimpleNamespace(headers={})
+            r1, r2 = await asyncio.gather(lb.capture(req, bare), lb.capture(req, bare))
         finally:
             lb._browser = orig_browser
 

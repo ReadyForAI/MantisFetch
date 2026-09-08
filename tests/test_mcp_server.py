@@ -41,7 +41,6 @@ EXPECTED_TOOLS = {
     "doc_chunks",
     "doc_manifest",
     "doc_source",
-    "doc_delete",
     "doc_summary",
 }
 
@@ -329,15 +328,6 @@ def test_doc_source_description_leads_with_the_bare_call_being_metadata_only() -
     assert "NO content" in desc
     assert "pass offset and/or limit" in desc
     assert "doc_full" in desc  # names the dead end so the model does not walk into it
-
-
-def test_doc_delete_delegates(monkeypatch) -> None:
-    fake = {"doc_id": "F-abc", "deleted": True}
-    monkeypatch.setattr(mm, "_doc_delete", AsyncMock(return_value=fake))
-    out = asyncio.run(mm.doc_delete("F-abc"))
-    args, _ = mm._doc_delete.call_args
-    assert args[0] == "/library/F-abc"
-    assert out == fake
 
 
 def test_unwrap_raises_tool_error_on_4xx() -> None:
