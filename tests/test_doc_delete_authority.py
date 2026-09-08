@@ -352,6 +352,32 @@ def test_sweep_keeps_young_documents(client) -> None:
     assert client.get(f"/doc/library/{doc_id}/manifest").status_code == 200
 
 
+def test_sweep_rechecks_age_under_the_lock(client, caplog, monkeypatch) -> None:
+    """Codex review, P1. The sweep picks candidates from the index without a
+    lock. Between that read and the delete, a /parse with replace=true can put a
+    new document under the same id with a fresh created_at — and the caller has
+    already been told 200. The age has to be re-read under the per-doc lock the
+    parse itself holds while writing, so the sweep sees the old document or the
+    finished new one, never the gap. Simulated by handing the sweep a stale
+    selection: a document the index says is expired but the disk says is new."""
+    import mantisfetch_docreader as d
+
+    from mantisfetch_common.storage import _get_docs_dir
+
+    doc_id = _parse(client, HUMAN).json()["doc_id"]
+    docs_dir = _get_docs_dir()
+    monkeypatch.setattr(d, "_expired_doc_ids", lambda docs_dir, cutoff: [doc_id])
+
+    with caplog.at_level(logging.INFO, logger="mantisfetch_docreader"):
+        assert asyncio.run(d._sweep_expired_documents(docs_dir, days=3650)) == 0
+    assert client.get(f"/doc/library/{doc_id}/manifest").status_code == 200
+    assert any("skipped=no_longer_expired" in r.getMessage() for r in caplog.records)
+
+    # The same stale selection with a cutoff the document really is older than.
+    assert asyncio.run(d._sweep_expired_documents(docs_dir, days=-1)) == 1
+    assert client.get(f"/doc/library/{doc_id}/manifest").status_code == 404
+
+
 def test_retention_runs_only_when_a_deployment_turns_it_on(monkeypatch) -> None:
     import mantisfetch_docreader as d
 

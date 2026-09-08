@@ -2544,7 +2544,9 @@ async def _sweep_expired_documents(docs_dir: Path, days: int) -> int:
     deleted = 0
     for doc_id in await asyncio.to_thread(_expired_doc_ids, docs_dir, cutoff):
         try:
-            if await _delete_document_locked(docs_dir, doc_id, actor=None, trigger="retention"):
+            if await _delete_document_locked(
+                docs_dir, doc_id, actor=None, trigger="retention", only_if_created_before=cutoff
+            ):
                 deleted += 1
         except Exception as exc:  # noqa: BLE001 - one document must not stop the sweep
             logger.warning("retention: could not delete %s: %s", doc_id, exc)
@@ -5699,21 +5701,52 @@ async def get_full(doc_id: str):
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
 
 
-def _manifest_actor_for(docs_dir: Path, doc_id: str) -> Actor:
+def _manifest_provenance_for(docs_dir: Path, doc_id: str) -> dict[str, Any]:
+    """The document's recorded provenance, or ``{}`` when there is none to read."""
     try:
         doc_dir = _resolve_doc_dir(docs_dir, doc_id)
-    except HTTPException:
-        return (None, None)
-    return _read_manifest_actor(doc_dir)
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (HTTPException, OSError, ValueError):
+        return {}
+    provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
+    return provenance if isinstance(provenance, dict) else {}
+
+
+def _created_before(provenance: dict[str, Any], cutoff: datetime) -> bool:
+    """Whether the document, as it is on disk right now, is older than ``cutoff``.
+
+    Undatable means no: a missing or unparseable created_at is a reason to keep.
+    """
+    raw = provenance.get("created_at")
+    if not raw:
+        return False
+    try:
+        created = datetime.strptime(str(raw), _MANIFEST_TIME_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return False
+    return created < cutoff
 
 
 async def _delete_document_locked(
-    docs_dir: Path, doc_id: str, *, actor: Actor | None, trigger: str
+    docs_dir: Path,
+    doc_id: str,
+    *,
+    actor: Actor | None,
+    trigger: str,
+    only_if_created_before: datetime | None = None,
 ) -> bool:
     """Delete one document under every lock a delete needs, and say who did it.
 
     The single delete path: the REST endpoint and the retention sweep both come
     through here, so neither can be the one that forgot a lock.
+
+    ``only_if_created_before`` is the retention sweep's guard against its own
+    staleness. It picks candidates from the index without any lock, and between
+    that read and this delete a ``/parse`` with ``replace=true`` can put a new
+    document under the same id with a fresh created_at. The parse holds the
+    per-doc lock while it writes, so re-reading the age here, under that lock,
+    sees either the old document or the finished new one — never the gap. A
+    document that is no longer old is kept, and nothing is logged as deleted.
 
     Hold the per-doc_id parse lock so a delete can't race a concurrent same-doc
     /doc/parse: parse writes its product dir under this lock but its index entry
@@ -5730,9 +5763,15 @@ async def _delete_document_locked(
     """
     loop = asyncio.get_running_loop()
     async with _optional_doc_id_lock(doc_id):
-        created_by, created_via = await loop.run_in_executor(
-            None, _manifest_actor_for, docs_dir, doc_id
-        )
+        provenance = await loop.run_in_executor(None, _manifest_provenance_for, docs_dir, doc_id)
+        created_by, created_via = provenance.get("created_by"), provenance.get("created_via")
+        if only_if_created_before is not None and not _created_before(
+            provenance, only_if_created_before
+        ):
+            logger.info(
+                "library_delete doc_id=%s trigger=%s skipped=no_longer_expired", doc_id, trigger
+            )
+            return False
         removed = await loop.run_in_executor(None, _delete_doc_serialized, docs_dir, doc_id)
     # SharedSpecs IRP 20260908 D6: the library-side audit line, the dual of the
     # one Harness writes for its own deletes. Every field on one line, so the
