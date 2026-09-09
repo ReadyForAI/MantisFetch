@@ -39,16 +39,18 @@ import os
 import re
 import secrets
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import httpx
 import mantisfetch_browser as _web_mod
 import mantisfetch_docreader as _doc_mod
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 
 from mantisfetch_common import __version__
 from mantisfetch_common.actor import forwardable_headers
+from mantisfetch_common.storage import CONTENT_TYPE_DIRS
 from providers.search import available_providers, provider_trait
 
 try:  # ToolError gives the agent a clean message; fall back if the path moves.
@@ -116,6 +118,33 @@ _web_client = httpx.AsyncClient(
 _doc_client = httpx.AsyncClient(
     transport=httpx.ASGITransport(app=_doc_mod.app), base_url="http://mantisfetch.doc"
 )
+
+
+# ── closed sets the server rejects on, declared where the model reads them ────
+# Issue #277: a parameter the server refuses from a closed set must carry that
+# set in the advertised schema, or the model is shown "any string" and refused
+# on its first sensible guess. Each Literal below is *derived* from the value
+# the sub-app actually checks against — the storage constant or the REST
+# request model — so the two cannot drift; the test in test_mcp_server pins it.
+# content_type is the one set the server *normalises* rather than matches: the
+# storage layer accepts "general" or " CONTRACT " and folds them to the canonical
+# name. So the face advertises the canonical enum (what a model should send)
+# without making the MCP layer stricter than the server it fronts — a lenient
+# caller that worked yesterday must not be refused today (Codex review, P2).
+_ContentType = Annotated[
+    str,
+    Field(
+        json_schema_extra={"enum": list(CONTENT_TYPE_DIRS)},
+        description="case-insensitive; normalised server-side to one of the listed values",
+    ),
+]
+_SummaryMode = _web_mod.models.CaptureRequest.model_fields["summary_mode"].annotation
+_Action = _web_mod.models.ActRequest.model_fields["action"].annotation
+_WaitUntil = _web_mod.models.ActRequest.model_fields["wait_until"].annotation
+_ScrollDirection = _web_mod.models.ScrollRequest.model_fields["direction"].annotation
+_NavDirection = _web_mod.models.NavigateRequest.model_fields["direction"].annotation
+_SearchTextScope = Literal[_doc_mod.SEARCH_TEXT_SCOPES]
+_TableFormat = Literal["md", "json"]
 
 
 # ── delegation helpers ─────────────────────────────────────────────────────────
@@ -370,11 +399,11 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
 @mcp.tool()
 async def web_capture(
     url: str,
-    content_type: str = "General",
+    content_type: _ContentType = "General",
     tags: list[str] | None = None,
     extract_tables: bool = True,
     force_refresh: bool = False,
-    summary_mode: str = "off",
+    summary_mode: _SummaryMode = "off",
     ctx: Context | None = None,
 ) -> Any:
     """One-shot semantic capture of a web page into the document library — the
@@ -467,9 +496,11 @@ if _search_tools_enabled():
     @_search_tool
     async def web_search_capture(
         query: str,
-        capture_top: int = 2,
+        capture_top: Annotated[
+            int, Field(description=f"clamped server-side to 1..{_web_mod.SEARCH_CAPTURE_TOP_MAX}")
+        ] = 2,
         tags: list[str] | None = None,
-        content_type: str = "General",
+        content_type: _ContentType = "General",
         lang: str = "en",
         freshness: str | None = None,
         provider: str | None = None,
@@ -505,7 +536,9 @@ async def web_session_open() -> Any:
 
 
 @mcp.tool()
-async def web_goto(session_id: str, url: str, wait_until: str = "domcontentloaded") -> Any:
+async def web_goto(
+    session_id: str, url: str, wait_until: _WaitUntil = "domcontentloaded"
+) -> Any:
     """Navigate the session's page to a URL."""
     return await _web_post(
         "/session/goto", {"session_id": session_id, "url": url, "wait_until": wait_until}
@@ -550,10 +583,10 @@ async def web_read_sections(session_id: str, section_ids: list[str]) -> Any:
 async def web_act(
     session_id: str,
     aid: str,
-    action: str,
+    action: _Action,
     text: str | None = None,
     value: str | None = None,
-    wait_until: str = "domcontentloaded",
+    wait_until: _WaitUntil = "domcontentloaded",
 ) -> Any:
     """Execute an action on the page. `aid` comes from a prior web_distill;
     `action` is one of click/type/select/scroll_into_view/invoke. A click whose
@@ -574,7 +607,9 @@ async def web_act(
 
 
 @mcp.tool()
-async def web_scroll(session_id: str, direction: str = "down", pixels: int = 600) -> Any:
+async def web_scroll(
+    session_id: str, direction: _ScrollDirection = "down", pixels: int = 600
+) -> Any:
     """Scroll the page (down/up) to trigger lazy-loading; follow with web_distill
     (include_diff=true) and read only added_sids."""
     return await _web_post(
@@ -583,7 +618,7 @@ async def web_scroll(session_id: str, direction: str = "down", pixels: int = 600
 
 
 @mcp.tool()
-async def web_navigate(session_id: str, direction: str = "back") -> Any:
+async def web_navigate(session_id: str, direction: _NavDirection = "back") -> Any:
     """Navigate browser history (back/forward)."""
     return await _web_post("/session/navigate", {"session_id": session_id, "direction": direction})
 
@@ -619,7 +654,7 @@ async def doc_parse(
     rel_path: str | None = None,
     content_b64: str | None = None,
     filename: str | None = None,
-    content_type: str = "General",
+    content_type: _ContentType = "General",
     generate_summary: bool = True,
     extract_tables: bool = True,
     force_ocr: bool = False,
@@ -817,7 +852,7 @@ async def doc_search_text(
     q: str,
     tags: str | None = None,
     doc_id: str | None = None,
-    scope: str = "all",
+    scope: _SearchTextScope = "all",
     limit: int = 20,
 ) -> Any:
     """Full-text search across the library's document bodies; returns doc_id +
@@ -844,7 +879,7 @@ async def doc_search_sections(doc_id: str, q: str, include_content: bool = False
 
 
 @mcp.tool()
-async def doc_table(doc_id: str, table_id: str, fmt: str = "md") -> Any:
+async def doc_table(doc_id: str, table_id: str, fmt: _TableFormat = "md") -> Any:
     """Read one extracted table (with numeric column stats). fmt = md | json."""
     suffix = "/json" if fmt == "json" else ""
     return await _doc_get(f"/library/{doc_id}/table/{table_id}{suffix}")

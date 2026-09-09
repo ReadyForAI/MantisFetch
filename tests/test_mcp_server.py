@@ -9,6 +9,7 @@ import asyncio
 import base64
 from unittest.mock import AsyncMock
 
+import httpx
 import mantisfetch_mcp as mm
 import pytest
 
@@ -388,3 +389,129 @@ def test_gate_requires_bearer_when_token_set(monkeypatch) -> None:
     assert bad == 401 and not reached_bad
     ok, reached_ok = _drive_gate(("10.0.0.9", 5555), headers={"authorization": "Bearer s3cret"})
     assert ok == 200 and reached_ok
+
+
+# ── #277: every closed set the server rejects on is in the advertised schema ─────
+
+
+def _closed_sets() -> dict[tuple[str, str], set[str]]:
+    """(tool, param) -> the set the server actually enforces, read from the server."""
+    import typing
+
+    import mantisfetch_browser.models as wm
+    import mantisfetch_docreader as dr
+
+    from mantisfetch_common.storage import CONTENT_TYPE_DIRS
+
+    def lit(model: str, field: str) -> set[str]:
+        return set(typing.get_args(getattr(wm, model).model_fields[field].annotation))
+
+    return {
+        ("doc_parse", "content_type"): set(CONTENT_TYPE_DIRS),
+        ("web_capture", "content_type"): set(CONTENT_TYPE_DIRS),
+        ("web_search_capture", "content_type"): set(CONTENT_TYPE_DIRS),
+        ("web_capture", "summary_mode"): lit("CaptureRequest", "summary_mode"),
+        ("web_act", "action"): lit("ActRequest", "action"),
+        ("web_act", "wait_until"): lit("ActRequest", "wait_until"),
+        ("web_goto", "wait_until"): lit("ActRequest", "wait_until"),
+        ("web_scroll", "direction"): lit("ScrollRequest", "direction"),
+        ("web_navigate", "direction"): lit("NavigateRequest", "direction"),
+        ("doc_search_text", "scope"): set(dr.SEARCH_TEXT_SCOPES),
+    }
+
+
+def _declared_set(hint) -> set[str]:
+    """The set a type hint advertises: Literal args, or an Annotated Field's
+    json_schema_extra enum (the shape used when the server normalises inputs
+    and the face must not be stricter than the server)."""
+    import typing
+
+    if typing.get_origin(hint) is typing.Literal:
+        return set(typing.get_args(hint))
+    for meta in getattr(hint, "__metadata__", ()):
+        extra = getattr(meta, "json_schema_extra", None) or {}
+        if "enum" in extra:
+            return set(extra["enum"])
+    return set()
+
+
+def test_closed_sets_the_server_rejects_are_in_the_advertised_schema() -> None:
+    """Issue #277. A Coordinator called web_search_capture four times and got
+    `422: content_type must be one of: General, Contract, Bid, Knowledge` four
+    times, because what it was shown was `{"type": "string", "default":
+    "General"}` — no enum. The schema is the model's only manual; a constraint
+    the server enforces but the schema omits is a lie the model cannot detect.
+    Each expected set here is read from the server side, not typed in, so a
+    server that changes its set and an MCP face that does not are caught too."""
+    import typing
+
+    tools = {t.name: t for t in asyncio.run(mm.mcp.list_tools())}
+    for (tool, param), expected in _closed_sets().items():
+        # The signature, whether or not the tool is registered in this process
+        # (search tools only register when a provider is configured).
+        fn = getattr(mm, tool, None)
+        if fn is not None:
+            hint = typing.get_type_hints(fn, include_extras=True)[param]
+            assert _declared_set(hint) == expected, (tool, param, hint)
+        # What the model is actually shown.
+        if tool in tools:
+            prop = tools[tool].input_schema["properties"][param]
+            assert set(prop.get("enum") or ()) == expected, (tool, param, prop)
+
+
+def test_search_capture_content_type_is_advertised_with_its_enum() -> None:
+    """The search tools register only under a provider; check their schema in a
+    process that has one, so the assertion is about what a real deployment
+    advertises rather than about a signature nobody registered."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    code = (
+        "import asyncio, json, mantisfetch_mcp as mm;"
+        "t={t.name:t for t in asyncio.run(mm.mcp.list_tools())}['web_search_capture'];"
+        "print(json.dumps(t.input_schema['properties']['content_type']))"
+    )
+    env = {
+        **os.environ,
+        "MANTISFETCH_SEARCH_PROVIDER": "searxng",
+        "MANTISFETCH_SEARXNG_URL": "http://127.0.0.1:1",
+        "PYTHONPATH": os.pathsep.join(
+            str(root / p) for p in ("services/mcp", "services/browser", "services/docreader", ".")
+        ),
+    }
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True
+    )
+    prop = json.loads(out.stdout.strip().splitlines()[-1])
+    assert set(prop["enum"]) == {"General", "Contract", "Bid", "Knowledge"}
+
+
+@pytest.mark.parametrize("value", ["general", " CONTRACT ", "bid", "Knowledge"])
+def test_content_type_stays_as_lenient_as_the_server(monkeypatch, value) -> None:
+    """Codex review of #278, P2. The storage layer folds case and whitespace
+    ("general" -> "General"); typing the MCP parameter as a Literal would have
+    refused those before the round-trip — a caller that worked yesterday,
+    refused today. The face advertises the canonical enum and forwards what it
+    was given; the server normalises as it always did."""
+    seen: dict = {}
+
+    async def fake_post(path, **kwargs):
+        seen["payload"] = kwargs.get("json")
+        return httpx.Response(
+            200,
+            json={"doc_id": "WEB-1", "digest": "d", "title": "t", "url": "u"},
+            request=httpx.Request("POST", "http://mantisfetch"),
+        )
+
+    monkeypatch.setattr(mm._web_client, "post", fake_post)
+    # Through the SDK's tool runner, not the Python function: argument
+    # validation against the advertised schema happens there and nowhere else —
+    # a direct call would pass with a Literal too, and prove nothing. No request
+    # is in flight, so the context is None (the tool takes Context | None).
+    tool = mm.mcp._tool_manager.get_tool("web_capture")
+    asyncio.run(tool.run({"url": "https://example.com", "content_type": value}, None))
+    assert seen["payload"]["content_type"] == value
