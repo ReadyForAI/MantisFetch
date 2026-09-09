@@ -9,6 +9,7 @@ import asyncio
 import base64
 from unittest.mock import AsyncMock
 
+import httpx
 import mantisfetch_mcp as mm
 import pytest
 
