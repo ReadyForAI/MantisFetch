@@ -2319,6 +2319,9 @@ def _safe_filename(title: str, max_len: int = 40) -> str:
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MANTISFETCH_MAX_UPLOAD_MB", "200")) * 1024 * 1024
 SEARCH_LIMIT_MAX = int(os.environ.get("MANTISFETCH_SEARCH_LIMIT_MAX", "200"))
+# What /library/search_text accepts for `scope`. Named so the MCP tool can
+# advertise the same set instead of a bare string (#277).
+SEARCH_TEXT_SCOPES = ("all", "full", "section")
 STORE_SOURCE_FILES = os.environ.get("MANTISFETCH_STORE_SOURCE_FILES", "true").lower() not in {
     "0",
     "false",
@@ -5166,8 +5169,8 @@ async def library_search_text(
         raise HTTPException(422, "q is required")
     if doc_id:
         _validate_doc_id(doc_id)
-    if scope not in {"all", "full", "section"}:
-        raise HTTPException(422, "scope must be one of: all, full, section")
+    if scope not in SEARCH_TEXT_SCOPES:
+        raise HTTPException(422, "scope must be one of: " + ", ".join(SEARCH_TEXT_SCOPES))
 
     docs_dir = _get_docs_dir()
     metadata_filters = _metadata_filters_from_request(request)
