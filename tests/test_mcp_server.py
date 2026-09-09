@@ -419,6 +419,21 @@ def _closed_sets() -> dict[tuple[str, str], set[str]]:
     }
 
 
+def _declared_set(hint) -> set[str]:
+    """The set a type hint advertises: Literal args, or an Annotated Field's
+    json_schema_extra enum (the shape used when the server normalises inputs
+    and the face must not be stricter than the server)."""
+    import typing
+
+    if typing.get_origin(hint) is typing.Literal:
+        return set(typing.get_args(hint))
+    for meta in getattr(hint, "__metadata__", ()):
+        extra = getattr(meta, "json_schema_extra", None) or {}
+        if "enum" in extra:
+            return set(extra["enum"])
+    return set()
+
+
 def test_closed_sets_the_server_rejects_are_in_the_advertised_schema() -> None:
     """Issue #277. A Coordinator called web_search_capture four times and got
     `422: content_type must be one of: General, Contract, Bid, Knowledge` four
@@ -435,8 +450,8 @@ def test_closed_sets_the_server_rejects_are_in_the_advertised_schema() -> None:
         # (search tools only register when a provider is configured).
         fn = getattr(mm, tool, None)
         if fn is not None:
-            hint = typing.get_type_hints(fn)[param]
-            assert set(typing.get_args(hint)) == expected, (tool, param, hint)
+            hint = typing.get_type_hints(fn, include_extras=True)[param]
+            assert _declared_set(hint) == expected, (tool, param, hint)
         # What the model is actually shown.
         if tool in tools:
             prop = tools[tool].input_schema["properties"][param]
@@ -472,3 +487,25 @@ def test_search_capture_content_type_is_advertised_with_its_enum() -> None:
     )
     prop = json.loads(out.stdout.strip().splitlines()[-1])
     assert set(prop["enum"]) == {"General", "Contract", "Bid", "Knowledge"}
+
+
+@pytest.mark.parametrize("value", ["general", " CONTRACT ", "bid", "Knowledge"])
+def test_content_type_stays_as_lenient_as_the_server(monkeypatch, value) -> None:
+    """Codex review of #278, P2. The storage layer folds case and whitespace
+    ("general" -> "General"); typing the MCP parameter as a Literal would have
+    refused those before the round-trip — a caller that worked yesterday,
+    refused today. The face advertises the canonical enum and forwards what it
+    was given; the server normalises as it always did."""
+    seen: dict = {}
+
+    async def fake_post(path, **kwargs):
+        seen["payload"] = kwargs.get("json")
+        return httpx.Response(
+            200,
+            json={"doc_id": "WEB-1", "digest": "d", "title": "t", "url": "u"},
+            request=httpx.Request("POST", "http://mantisfetch"),
+        )
+
+    monkeypatch.setattr(mm._web_client, "post", fake_post)
+    asyncio.run(mm.web_capture(url="https://example.com", content_type=value))
+    assert seen["payload"]["content_type"] == value

@@ -126,7 +126,18 @@ _doc_client = httpx.AsyncClient(
 # on its first sensible guess. Each Literal below is *derived* from the value
 # the sub-app actually checks against — the storage constant or the REST
 # request model — so the two cannot drift; the test in test_mcp_server pins it.
-_ContentType = Literal[CONTENT_TYPE_DIRS]
+# content_type is the one set the server *normalises* rather than matches: the
+# storage layer accepts "general" or " CONTRACT " and folds them to the canonical
+# name. So the face advertises the canonical enum (what a model should send)
+# without making the MCP layer stricter than the server it fronts — a lenient
+# caller that worked yesterday must not be refused today (Codex review, P2).
+_ContentType = Annotated[
+    str,
+    Field(
+        json_schema_extra={"enum": list(CONTENT_TYPE_DIRS)},
+        description="case-insensitive; normalised server-side to one of the listed values",
+    ),
+]
 _SummaryMode = _web_mod.models.CaptureRequest.model_fields["summary_mode"].annotation
 _Action = _web_mod.models.ActRequest.model_fields["action"].annotation
 _WaitUntil = _web_mod.models.ActRequest.model_fields["wait_until"].annotation
