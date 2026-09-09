@@ -508,5 +508,10 @@ def test_content_type_stays_as_lenient_as_the_server(monkeypatch, value) -> None
         )
 
     monkeypatch.setattr(mm._web_client, "post", fake_post)
-    asyncio.run(mm.web_capture(url="https://example.com", content_type=value))
+    # Through the SDK's tool runner, not the Python function: argument
+    # validation against the advertised schema happens there and nowhere else —
+    # a direct call would pass with a Literal too, and prove nothing. No request
+    # is in flight, so the context is None (the tool takes Context | None).
+    tool = mm.mcp._tool_manager.get_tool("web_capture")
+    asyncio.run(tool.run({"url": "https://example.com", "content_type": value}, None))
     assert seen["payload"]["content_type"] == value
