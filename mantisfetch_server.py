@@ -234,9 +234,9 @@ def _max_request_bytes() -> int:
     Read per call, like the other tunables, so a test or a redeploy that changes
     MANTISFETCH_MAX_UPLOAD_MB is seen.
     """
-    from mantisfetch_docreader import MAX_UPLOAD_BYTES  # noqa: PLC0415
+    from mantisfetch_docreader import _max_request_bytes as _doc_max  # noqa: PLC0415
 
-    return MAX_UPLOAD_BYTES + 1024 * 1024
+    return _doc_max()
 
 
 def _body_too_large_bases() -> tuple[type[BaseException], ...]:
