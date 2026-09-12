@@ -18,6 +18,12 @@ dependencies = [
     "markitdown[pdf,docx,pptx,xlsx,xls]>=0.1.0",
     "pymupdf>=1.24.0",
     "python-docx>=1.1.0",
+    # The browser's in-process extractor parses page HTML with these directly
+    # (extract.py). Today they arrive through MarkItDown — bs4 always, lxml only
+    # via its docx extra — which is an accident of its extras, not a promise.
+    # Without lxml every page silently falls back to the stdlib parser.
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
     "google-genai>=0.8.0",
     "openai>=1.0.0",
     "Pillow>=10.4.0",

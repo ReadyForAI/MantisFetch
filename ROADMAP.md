@@ -17,7 +17,7 @@
 - [x] README and Contributing guide — quick-start, API overview, dev setup, PR process
 
 ### SDK & Ecosystem
-- [x] Python SDK — sync (`MantisFetchClient`) and async (`AsyncMantisFetchClient`) clients with full API coverage
+- [x] Python SDK — sync (`MantisFetchClient`) and async (`AsyncMantisFetchClient`) clients covering the core capture / parse / library read flow. Not every REST parameter is exposed yet: `capture` lacks `force_refresh` and `summary_mode`, and `parse` lacks `replace`, `store_only`, `budget_seconds` and `parse_mode`
 
 ### Validation
 - [x] E2E web capture tests — full pipeline: capture → digest → sections
