@@ -2615,23 +2615,33 @@ async def _startup_prewarm_local_ocr() -> None:
 
 
 def _reset_interrupted_summaries(docs_dir: Path) -> int:
-    """Turn every `running` summary back into `pending`, and say how many.
+    """Settle every summary a previous process left in flight, and say how many.
 
     A deferred summary lives in a daemon thread, so a restart takes every
-    in-flight one with it while `running` stays on disk. Nothing swept it: the
+    in-flight one with it while its status stays on disk. Nothing swept it: the
     document said a summary was in progress for as long as it existed, and the
     status face an agent polls (IRP 20260801) had no way to tell that apart from
     one that really was running.
 
-    `pending` rather than `failed`: it is the state the retry endpoint already
-    treats as retryable, and it is the truth — the summary was asked for and has
-    not happened. Nothing is re-enqueued here. With several NodalOS instances
-    behind one MantisFetch, a restart that re-queued everything it found would
-    refill the queue this release just bounded, at the worst possible moment.
+    An upload's `running` becomes `pending`: it is the state the retry endpoint
+    already treats as retryable, and it is the truth — the summary was asked
+    for and has not happened. An upload's `pending` is left alone for the same
+    reason. A web capture's `running` *and* `pending` both become `failed`: its
+    only retry is the next cache hit, which schedules a summary for any status
+    outside pending/running/completed, and treats `pending` as one already
+    queued — so a queued job lost to the restart would otherwise stay `pending`
+    for good.
+
+    Nothing is re-enqueued here. With several NodalOS instances behind one
+    MantisFetch, a restart that re-queued everything it found would refill the
+    queue this release just bounded, at the worst possible moment.
     """
     reset = 0
     for entry in _load_doc_index(docs_dir):
-        if entry.get("summary_status") != "running":
+        status = entry.get("summary_status")
+        if status != "running" and not (
+            status == "pending" and entry.get("file_type") == "web_capture"
+        ):
             continue
         doc_id = entry.get("id")
         if not isinstance(doc_id, str):
@@ -2642,17 +2652,17 @@ def _reset_interrupted_summaries(docs_dir: Path) -> int:
                 manifest_path = doc_dir / "manifest.json"
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 summary = manifest.setdefault("parse_metadata", {}).setdefault("summary", {})
-                if summary.get("status") != "running":
-                    continue
                 # Uploads and captures have different retry routes, so the
                 # honest terminal state differs. `POST /library/{id}/summary`
                 # treats `pending` as retryable but refuses web captures
                 # outright; a capture is re-scheduled instead by the next cache
                 # hit, and that only happens for a status outside
-                # {pending, running, completed}. Resetting a capture to
-                # `pending` would therefore strand it in a state neither route
-                # picks up.
+                # {pending, running, completed}. Leaving a capture at `pending`
+                # would therefore strand it in a state neither route picks up.
                 is_capture = (manifest.get("file_type") or entry.get("file_type")) == "web_capture"
+                in_flight = {"running", "pending"} if is_capture else {"running"}
+                if summary.get("status") not in in_flight:
+                    continue
                 summary["status"] = "failed" if is_capture else "pending"
                 summary["error"] = "interrupted by a restart"
                 summary["error_code"] = "summary_interrupted"
@@ -2696,8 +2706,7 @@ async def _startup_reset_interrupted_summaries() -> None:
         return
     if reset:
         logger.info(
-            "Reset %d summary/summaries left running by a previous process to pending",
-            reset,
+            "Reset %d summary/summaries a previous process left in flight", reset
         )
 
 
