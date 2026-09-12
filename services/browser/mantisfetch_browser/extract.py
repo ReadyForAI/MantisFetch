@@ -236,6 +236,45 @@ def _clean_text(node: Any) -> str:
     return " ".join(node.get_text(" ", strip=True).split())
 
 
+def _verbatim_segments(node: Any) -> list[tuple[str, str]]:
+    """A container's content in document order, its code blocks kept apart.
+
+    A ``<li>`` or ``<blockquote>`` is emitted whole so that its text lands in
+    one block — and a ``<pre>`` inside it used to go with it, through the prose
+    collapse, so the code in a tutorial's numbered steps or in a quoted example
+    came out as one line. Here the prose around each code block stays in the
+    container's tag and each code block becomes a ``pre`` block of its own,
+    which is what keeps it verbatim through section assembly as well.
+    """
+    from bs4 import Comment, Tag  # noqa: PLC0415
+
+    segments: list[tuple[str, str]] = []
+    prose: list[str] = []
+
+    def flush() -> None:
+        text = " ".join(" ".join(prose).split())
+        if text:
+            segments.append((node.name, text))
+        prose.clear()
+
+    def walk(parent: Any) -> None:
+        for child in parent.children:
+            if isinstance(child, Tag):
+                if child.name in _VERBATIM_TAGS:
+                    flush()
+                    code = _clean_text(child)
+                    if code:
+                        segments.append((child.name, code))
+                else:
+                    walk(child)
+            elif not isinstance(child, Comment):
+                prose.append(str(child))
+
+    walk(node)
+    flush()
+    return segments
+
+
 def html_to_blocks(
     html: str, max_blocks: int = _MAX_BLOCKS, max_chars: int = _MAX_TOTAL_CHARS
 ) -> list[dict[str, str]]:
@@ -288,9 +327,23 @@ def html_to_blocks(
                 continue
         elif len(text) < _MIN_BODY_CHARS:
             continue
-        blocks.append({"tag": tag, "text": text})
-        total_chars += len(text)
-        if len(blocks) >= max_blocks or total_chars >= max_chars:
+        # Whether a container is kept is decided on the whole of it, as before;
+        # only how it is written out changes when it holds a code block.
+        emitted = (
+            _verbatim_segments(node)
+            if tag not in _HEADING_TAGS
+            and tag not in _VERBATIM_TAGS
+            and node.find(_VERBATIM_TAGS)
+            else [(tag, text)]
+        )
+        full = False
+        for block_tag, block_text in emitted:
+            blocks.append({"tag": block_tag, "text": block_text})
+            total_chars += len(block_text)
+            if len(blocks) >= max_blocks or total_chars >= max_chars:
+                full = True
+                break
+        if full:
             break
 
     return blocks
