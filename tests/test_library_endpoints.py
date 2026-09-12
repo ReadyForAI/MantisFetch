@@ -1399,18 +1399,21 @@ class TestLibraryDelete:
         # DOC-500's own dir is still cleaned via the safe …/{doc_id} candidate
         assert not own.exists()
 
-    def test_delete_raises_on_rmtree_failure_and_keeps_index(self, tmp_path, monkeypatch):
-        # A real filesystem failure must surface (not a silent deleted=true) and
-        # leave the index entry intact so the doc stays resolvable + retryable.
+    def test_delete_raises_on_set_aside_failure_and_keeps_index(self, tmp_path, monkeypatch):
+        # A real filesystem failure before the commit must surface (not a silent
+        # deleted=true) and leave the index entry intact so the doc stays
+        # resolvable + retryable. (A failure clearing the products *after* the
+        # commit is a completed delete — see test_recoverable_delete.)
         import mantisfetch_docreader.storage as st
 
-        _setup_doc(tmp_path)
+        doc_dir = _setup_doc(tmp_path)
 
         def _boom(*args, **kwargs):
             raise OSError("disk on fire")
 
-        monkeypatch.setattr(st.shutil, "rmtree", _boom)
+        monkeypatch.setattr(st.os, "replace", _boom)
         with pytest.raises(OSError):
             st._delete_doc(tmp_path, "DOC-001")
         index = json.loads((tmp_path / "doc-index.json").read_text(encoding="utf-8"))
         assert any(d["id"] == "DOC-001" for d in index["documents"])
+        assert (doc_dir / "manifest.json").exists()

@@ -214,21 +214,49 @@ def _load_doc_tags(docs_dir: Path, doc_id: str) -> list[str]:
     return []
 
 
+#: What a product directory is renamed to while its delete commits: a sibling,
+#: so the rename is atomic, and not a legal doc_id (the id pattern has no "."),
+#: so nothing resolves it as a document. On disk it is also the record that a
+#: delete was in flight — see _finish_interrupted_deletes.
+_DELETING_SUFFIX = ".deleting"
+
+
+def _put_back_set_aside(set_aside: list[tuple[Path, Path]]) -> None:
+    """Undo the renames of a delete that did not commit. Never raises: this runs
+    on the way out of a failure, and the startup sweep restores anything left."""
+    for original, tombstone in reversed(set_aside):
+        try:
+            os.replace(tombstone, original)
+        except OSError as exc:
+            logger.error(
+                "Could not put %s back after a failed delete; it stays at %s and is "
+                "restored at the next start: %s",
+                original,
+                tombstone,
+                exc,
+            )
+
+
 def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
     """Remove a document's doc-index entry and all on-disk products, serialized on
     the shared doc-index lock so it can't race a concurrent capture/parse index
     write. Idempotent: returns True if anything existed and was removed, False if
     the doc_id was absent everywhere — callers treat both as success.
 
-    Products are removed *before* the index entry, so a filesystem failure leaves
-    the entry intact (the doc stays resolvable) and surfaces as a raised error the
-    caller can retry — never a dangling index pointing at missing artifacts, and
-    never a false "deleted" while products remain on disk. The removal set is the
-    index entry's own resolved storage_path (covers migrated/legacy layouts where
-    it isn't one of the current content-type dirs) plus every known content-type
-    dir and the legacy flat path. rmtree is allowed to raise on a real error
-    (permission/IO); ignoring it would report success while leaking products.
-    doc_id is validated by the caller (`_validate_doc_id`), so joins can't escape.
+    The index commit decides whether the delete happened, and the products follow
+    it either way. They are renamed aside first (``{doc_id}.deleting``), the row
+    is deleted, and only then are they removed. A commit that fails renames them
+    back, so the caller is told the delete failed about a document that is still
+    whole — removing them first left an index row pointing at nothing, which no
+    retry, restore or export could repair. A cleanup that fails after the commit
+    is logged, not raised: the document is gone as far as any reader can tell,
+    and the leftover directory is cleared at the next start. So is a delete the
+    process died in the middle of (_finish_interrupted_deletes).
+
+    The removal set is the index entry's own resolved storage_path (covers
+    migrated/legacy layouts where it isn't one of the current content-type dirs)
+    plus every known content-type dir and the legacy flat path. doc_id is
+    validated by the caller (`_validate_doc_id`), so joins can't escape.
     """
     with _doc_index_lock:
         entry = _find_doc_index_entry(docs_dir, doc_id)
@@ -244,36 +272,112 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
                 product_dirs.append(resolved)
         product_dirs.extend(_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS)
         product_dirs.append(docs_dir / doc_id)  # legacy flat layout
+        # The indexed path is resolved and the layout candidates are not, so the
+        # same directory can appear twice under two spellings.
+        product_dirs = list(dict.fromkeys(p.resolve() for p in product_dirs))
 
-        removed = False
-        for candidate in product_dirs:
-            if candidate.exists():
-                shutil.rmtree(candidate)  # raise on real failure -> caller retries
-                removed = True
+        set_aside: list[tuple[Path, Path]] = []
+        leftovers: list[Path] = []  # tombstones an earlier delete did not clear
+        try:
+            for candidate in product_dirs:
+                tombstone = candidate.with_name(candidate.name + _DELETING_SUFFIX)
+                if candidate.exists():
+                    if tombstone.exists():
+                        # A live directory wins over a stale tombstone of itself.
+                        shutil.rmtree(tombstone)
+                    os.replace(candidate, tombstone)
+                    set_aside.append((candidate, tombstone))
+                elif tombstone.exists():
+                    leftovers.append(tombstone)
+        except BaseException:
+            _put_back_set_aside(set_aside)
+            raise
 
-        # Drop the index entry only after products are gone. SQLite is the commit
-        # point; JSON is rewritten from it. There is no JSON-only fallback: a
-        # delete recorded in JSON alone is undone by the next export, which
-        # rebuilds JSON from a database that still holds the row — the caller
-        # would have been told the document was gone and then found it back.
+        # SQLite is the commit point; JSON is rewritten from it. There is no
+        # JSON-only fallback: a delete recorded in JSON alone is undone by the
+        # next export, which rebuilds JSON from a database that still holds the
+        # row — the caller would have been told the document was gone and then
+        # found it back.
         from mantisfetch_common import doc_index_store as dis
 
-        had_index_entry = entry is not None
-        # entry was looked up pre-delete; if missing from SQLite, check list.
-        # Both of those go through list_documents, which is what migrates a
-        # legacy JSON-only library into the database. Keep them before the
-        # delete: dis.delete_document does not migrate, so on a library that has
-        # never been migrated it would remove nothing and the export below —
-        # which does migrate — would import the row straight back.
-        if not had_index_entry:
-            had_index_entry = any(
-                d.get("id") == doc_id for d in dis.list_documents(docs_dir)
-            )
-        dis.delete_document(docs_dir, doc_id)
+        try:
+            had_index_entry = entry is not None
+            # entry was looked up pre-delete; if missing from SQLite, check list.
+            # Both of those go through list_documents, which is what migrates a
+            # legacy JSON-only library into the database. Keep them before the
+            # delete: dis.delete_document does not migrate, so on a library that
+            # has never been migrated it would remove nothing and the export
+            # below — which does migrate — would import the row straight back.
+            if not had_index_entry:
+                had_index_entry = any(
+                    d.get("id") == doc_id for d in dis.list_documents(docs_dir)
+                )
+            dis.delete_document(docs_dir, doc_id)
+        except BaseException:
+            _put_back_set_aside(set_aside)
+            raise
         _export_index_json(docs_dir)
-        if had_index_entry:
-            removed = True
-        return removed
+
+        leftovers.extend(tombstone for _, tombstone in set_aside)
+        for tombstone in leftovers:
+            try:
+                shutil.rmtree(tombstone)
+            except OSError as exc:
+                logger.warning(
+                    "Deleted %s, but could not clear %s; it is removed at the next start: %s",
+                    doc_id,
+                    tombstone,
+                    exc,
+                )
+        return bool(set_aside) or had_index_entry
+
+
+def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
+    """Settle the deletes a previous process did not finish; (restored, cleared).
+
+    A ``{doc_id}.deleting`` directory is a delete that renamed its products
+    aside and then stopped. Whether it happened is whatever the index says:
+    a document still indexed and with nothing at the original path is put back,
+    because its delete never committed; anything else is cleared, because either
+    the delete committed or a live copy has taken the place since.
+
+    Refuses to guess. If the database cannot be read, nothing is touched — an
+    empty answer here would clear the products of every document whose delete
+    had not committed.
+    """
+    from mantisfetch_common import doc_index_store as dis
+
+    restored = cleared = 0
+    with _doc_index_lock:
+        try:
+            entries = dis.list_documents(docs_dir)
+        except Exception as exc:  # noqa: BLE001 - the sweep waits for a readable index
+            logger.warning("Interrupted-delete sweep skipped, index unreadable: %s", exc)
+            return 0, 0
+        indexed = {e["id"] for e in entries if isinstance(e.get("id"), str)}
+        parents = {docs_dir, *(docs_dir / ct for ct in CONTENT_TYPE_DIRS)}
+        for entry in entries:
+            resolved = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
+            if resolved is not None:
+                parents.add(resolved.parent)
+        for parent in parents:
+            if not parent.is_dir():
+                continue
+            for tombstone in parent.glob(f"*{_DELETING_SUFFIX}"):
+                if not tombstone.is_dir():
+                    continue
+                doc_id = tombstone.name[: -len(_DELETING_SUFFIX)]
+                original = tombstone.with_name(doc_id)
+                try:
+                    if doc_id in indexed and not original.exists():
+                        os.replace(tombstone, original)
+                        restored += 1
+                    else:
+                        shutil.rmtree(tombstone)
+                        cleared += 1
+                except OSError as exc:
+                    logger.warning("Could not settle %s: %s", tombstone, exc)
+    return restored, cleared
 
 
 # ═══════════════════════════════════════════
