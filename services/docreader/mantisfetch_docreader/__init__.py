@@ -4735,11 +4735,10 @@ async def api_parse_doc(
                     f"{filename} is not a valid {suffix.lstrip('.')} file "
                     f"(not a zip archive)",
                 )
-            # And budgets that have to hold before anything expands it. Here,
-            # ahead of the doc_id, because both are properties of the upload:
-            # a workbook over the row limit is a refused request, not a parse
-            # that failed. The unzip budget was DOCX-only and ran inside the
-            # parser; MarkItDown reads XLSX and PPTX entries just as whole.
+            # And budgets that have to hold before anything expands it: every
+            # OOXML entry within the unzip budget, and a workbook within the row
+            # limit. Ahead of the doc_id, because both are properties of the
+            # upload — over either is a refused request, not a failed parse.
             await asyncio.to_thread(_check_ooxml_unzip_budget, scratch_path)
             if suffix == ".xlsx":
                 await asyncio.to_thread(

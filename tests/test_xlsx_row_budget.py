@@ -151,3 +151,48 @@ def test_the_count_stops_at_the_limit_and_allows_it_exactly(tmp_path) -> None:
         _check_xlsx_row_budget(path, 10, "big.xlsx")
     assert "more than 10 rows" in str(exc.value.detail)
     _check_xlsx_row_budget(path, 5000, "big.xlsx")  # exactly at the limit: fine
+
+
+def _with_part(xlsx: bytes, name: str, data: bytes) -> bytes:
+    """The workbook with one more part added to its archive."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(xlsx)) as src, zipfile.ZipFile(buf, "w") as dst:
+        for info in src.infolist():
+            dst.writestr(info, src.read(info))
+        dst.writestr(name, data)
+    return buf.getvalue()
+
+
+def _sheet_xml(rows: int) -> bytes:
+    body = "".join(f'<row r="{i + 1}"><c r="A{i + 1}"><v>{i}</v></c></row>' for i in range(rows))
+    return (
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"<sheetData>{body}</sheetData></worksheet>"
+    ).encode()
+
+
+def test_a_sheet_outside_the_usual_folder_is_still_counted(tmp_path) -> None:
+    """The reader finds sheets through the package relationships, so a sheet can
+    sit anywhere in the archive — counting only xl/worksheets/ let it through."""
+    from fastapi import HTTPException
+
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    path = tmp_path / "moved.xlsx"
+    path.write_bytes(_with_part(_workbook(1), "xl/elsewhere/data.xml", _sheet_xml(60)))
+    with pytest.raises(HTTPException):
+        _check_xlsx_row_budget(path, 50, "moved.xlsx")
+
+
+def test_one_unreadable_part_does_not_end_the_count(tmp_path) -> None:
+    """A malformed part used to abort the whole count, and everything after it
+    went uncounted — however big."""
+    from fastapi import HTTPException
+
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    broken = _with_part(_workbook(1), "xl/worksheets/aaa-broken.xml", b"<worksheet><sheetData>")
+    path = tmp_path / "broken-first.xlsx"
+    path.write_bytes(_with_part(broken, "xl/worksheets/zzz-big.xml", _sheet_xml(60)))
+    with pytest.raises(HTTPException):
+        _check_xlsx_row_budget(path, 50, "broken-first.xlsx")

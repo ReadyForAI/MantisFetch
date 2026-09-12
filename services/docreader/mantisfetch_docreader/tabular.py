@@ -39,25 +39,32 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
     MarkItDown reads every sheet whole into memory before anything can look at
     how big it is: measured, a 5 MB workbook of 100,000 rows x 10 columns (50 MB
     of sheet XML) peaked at 2 GB RSS and took 30 s, and the upload limit admits
-    workbooks many times that. So the rows are counted first, by streaming each
-    worksheet's XML — one row held at a time — and the count stops as soon as
-    it passes the limit.
+    workbooks many times that. So the rows are counted first, by streaming the
+    XML — one row held at a time — and the count stops as soon as it passes the
+    limit.
+
+    Every XML part is counted, not just ``xl/worksheets/``: the reader finds its
+    sheets through the package relationships, so a sheet can live at any path.
+    Only worksheets hold ``row`` elements, so the others add nothing but the
+    time to stream them. A part that cannot be read is skipped rather than
+    ending the count — the converter cannot read it either, so it cannot be
+    where an oversized sheet gets through.
 
     Rows, not cells: it is the knob the service already had. A wide sheet under
     the row limit is bounded by the per-entry unzip budget instead.
-
-    A file whose worksheets cannot be read is left to the parser, which says
-    what is wrong with it more usefully than a count could.
     """
     total = 0
     try:
-        with zipfile.ZipFile(filepath) as zf:
-            for info in zf.infolist():
-                name = info.filename
-                if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
-                    continue
-                with zf.open(info) as sheet:
-                    for _event, element in ET.iterparse(sheet, events=("end",)):
+        zf = zipfile.ZipFile(filepath)
+    except (zipfile.BadZipFile, OSError):
+        return  # not an archive: the parser says what is wrong with it
+    with zf:
+        for info in zf.infolist():
+            if not info.filename.lower().endswith(".xml"):
+                continue
+            try:
+                with zf.open(info) as part:
+                    for _event, element in ET.iterparse(part, events=("end",)):
                         if element.tag.rpartition("}")[2] != "row":
                             continue
                         total += 1
@@ -70,8 +77,10 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
                                 f"memory to convert it",
                             )
                         element.clear()
-    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError):
-        return
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 - unreadable part: see the docstring
+                continue
 
 
 def parse_xlsx(filepath: Path) -> ParsedDocument:
@@ -135,15 +144,10 @@ def parse_xlsx(filepath: Path) -> ParsedDocument:
             else []
         )
 
-    # A size report, not a limit. Nothing here truncates: MarkItDown converts the
-    # whole workbook before this line runs, so the old `truncated=True` described
-    # a guess about length while every row was still in the output — and it named
-    # a row limit that had not been applied to anything. An agent that read it
-    # could not find out which rows were missing, because none were.
-    #
-    # The row limit is enforced before conversion instead, by refusing the
-    # workbook (_check_xlsx_row_budget, from /parse). What reaches this point is
-    # whole; this only says how big it came out.
+    # A size report, not a limit: nothing here truncates. The row limit is
+    # enforced before conversion by refusing the workbook
+    # (_check_xlsx_row_budget, from /parse), so what reaches this point is whole
+    # and this only says how big it came out.
     large_output = len(markdown_text) > MAX_PARSE_ROWS * 100
 
     if large_output:
