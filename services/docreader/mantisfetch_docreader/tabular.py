@@ -18,6 +18,7 @@ tests that patch `docreader._convert_to_markdown` take effect.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import zipfile
@@ -33,6 +34,17 @@ from .sectioning import _split_sections
 logger = logging.getLogger("mantisfetch_docreader")
 
 
+#: A worksheet row, in the transitional and the strict SpreadsheetML namespace.
+#: Not any element named "row": DrawingML anchors (``xdr:row``) are cell
+#: coordinates, and counting them would refuse a workbook for its pictures.
+_SHEET_ROW_TAGS = frozenset(
+    {
+        "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row",
+        "{http://purl.oclc.org/ooxml/spreadsheetml/main}row",
+    }
+)
+
+
 def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
     """Refuse a workbook with more than ``limit`` rows before it is converted.
 
@@ -40,8 +52,9 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
     how big it is: measured, a 5 MB workbook of 100,000 rows x 10 columns (50 MB
     of sheet XML) peaked at 2 GB RSS and took 30 s, and the upload limit admits
     workbooks many times that. So the rows are counted first, by streaming the
-    XML — one row held at a time — and the count stops as soon as it passes the
-    limit.
+    XML — each element dropped from its parent as soon as it ends, so a part
+    of any size costs about its nesting depth — and the count stops as soon as
+    it passes the limit.
 
     Every XML part is counted, not just ``xl/worksheets/``: the reader finds its
     sheets through the package relationships, so a sheet can live at any path.
@@ -64,8 +77,19 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
                 continue
             try:
                 with zf.open(info) as part:
-                    for _event, element in ET.iterparse(part, events=("end",)):
-                        if element.tag.rpartition("}")[2] != "row":
+                    open_elements: list[ET.Element] = []
+                    for event, element in ET.iterparse(part, events=("start", "end")):
+                        if event == "start":
+                            open_elements.append(element)
+                            continue
+                        open_elements.pop()
+                        if open_elements:
+                            # Not "delete the last child": the parser runs a
+                            # buffer ahead of the events, so later siblings are
+                            # already attached. This one is near the front.
+                            with contextlib.suppress(ValueError):
+                                open_elements[-1].remove(element)
+                        if element.tag not in _SHEET_ROW_TAGS:
                             continue
                         total += 1
                         if total > limit:
@@ -76,7 +100,6 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
                                 f"workbook, or raise the limit if this host has the "
                                 f"memory to convert it",
                             )
-                        element.clear()
             except HTTPException:
                 raise
             except Exception:  # noqa: BLE001 - unreadable part: see the docstring

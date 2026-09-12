@@ -43,7 +43,7 @@ logger = logging.getLogger("mantisfetch_docreader")
 
 # Decompression-bomb guard for the OOXML containers (zips): a few KB can inflate
 # to GBs, and MarkItDown and the embedded-image extractor read entries whole.
-# Named for DOCX, where it started; it covers XLSX and PPTX too.
+# The MANTISFETCH_MAX_DOCX_* keys apply to DOCX, XLSX and PPTX alike.
 _MAX_DOCX_ENTRY_BYTES = int(os.environ.get("MANTISFETCH_MAX_DOCX_ENTRY_MB", "64")) * 1024 * 1024
 _MAX_DOCX_UNZIP_BYTES = int(os.environ.get("MANTISFETCH_MAX_DOCX_UNZIP_MB", "512")) * 1024 * 1024
 

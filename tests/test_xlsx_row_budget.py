@@ -194,3 +194,44 @@ def test_one_unreadable_part_does_not_end_the_count(tmp_path) -> None:
     path.write_bytes(_with_part(broken, "xl/worksheets/zzz-big.xml", _sheet_xml(60)))
     with pytest.raises(HTTPException):
         _check_xlsx_row_budget(path, 50, "broken-first.xlsx")
+
+
+def test_picture_anchors_are_not_rows(tmp_path) -> None:
+    """A drawing's ``xdr:row`` is a cell coordinate, not a row of data; counting
+    it would refuse a workbook for having pictures."""
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    anchors = "".join(
+        f"<xdr:twoCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>{i}</xdr:row></xdr:from>"
+        f"<xdr:to><xdr:col>1</xdr:col><xdr:row>{i + 1}</xdr:row></xdr:to></xdr:twoCellAnchor>"
+        for i in range(40)
+    )
+    drawing = (
+        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing">'
+        f"{anchors}</xdr:wsDr>"
+    ).encode()
+    path = tmp_path / "pictures.xlsx"
+    path.write_bytes(_with_part(_workbook(40), "xl/drawings/drawing1.xml", drawing))
+    _check_xlsx_row_budget(path, 50, "pictures.xlsx")  # 40 rows, 80 anchors: fine
+
+
+def test_a_large_non_sheet_part_is_streamed_not_built(tmp_path) -> None:
+    """The count must not build the tree of a big part it only passes through —
+    a shared-strings table the size of the unzip budget, say."""
+    import tracemalloc
+
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    strings = "".join(f"<si><t>{'s' * 40}{i}</t></si>" for i in range(200_000))
+    sst = (
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f"{strings}</sst>"
+    ).encode()
+    path = tmp_path / "strings.xlsx"
+    path.write_bytes(_with_part(_workbook(1), "xl/sharedStrings2.xml", sst))
+
+    tracemalloc.start()
+    _check_xlsx_row_budget(path, 50, "strings.xlsx")
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak < len(sst) // 2, f"peak {peak} bytes for a {len(sst)}-byte part"
