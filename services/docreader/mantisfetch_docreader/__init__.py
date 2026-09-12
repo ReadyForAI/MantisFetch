@@ -4649,16 +4649,19 @@ async def api_parse_doc(
     # The bytes are ours now (in scratch_path) and the request's UploadFile is
     # no longer touched, so from here a client disconnect must not discard the
     # work — see _survives_client_disconnect.
-    #
-    # Close the multipart spool now rather than at request teardown, minutes
-    # away for a parse, so that giving back the admission is true: the bytes it
-    # was reserved for are no longer on disk.
-    await file.close()
-    _release_upload_admission()
     _allow_running_detached()
 
     scratch_counted = False
     try:
+        # Close the multipart spool now rather than at request teardown, minutes
+        # away for a parse, so that giving back the admission is true: the bytes
+        # it was reserved for are no longer on disk. Inside this try, whose
+        # finally owns the scratch file: closing a spool that rolled to disk
+        # awaits a thread, and nothing may leave the scratch behind there.
+        with contextlib.suppress(Exception):
+            await file.close()
+        _release_upload_admission()
+
         # An upload with no bytes is not a document. It parsed to a section
         # titled "Full document" with char_count 0, took a doc_id, and joined
         # the library and every tag index — an entry whose only content is that

@@ -49,6 +49,16 @@ def spooled(monkeypatch):
     return counter
 
 
+@pytest.fixture()
+def docs_dir_for_scratch(monkeypatch, tmp_path):
+    import mantisfetch_common.storage as cs
+
+    d = tmp_path / "docs"
+    d.mkdir()
+    monkeypatch.setattr(cs, "DEFAULT_DOCS_DIR", d)
+    return d
+
+
 def _surface(name):
     """Both ways in: the unified server, and the MCP front-end's in-process hop
     straight to doc_app, which never passes the unified server's middleware."""
@@ -217,3 +227,25 @@ async def test_a_body_with_no_declared_length_reserves_the_most_a_request_may_be
         )
     assert resp.status_code == 429, resp.text
     assert spooled["bytes"] == 0
+
+
+async def test_nothing_is_left_in_scratch_if_the_handler_is_cut_off_closing_the_spool(
+    monkeypatch, docs_dir_for_scratch
+):
+    """Closing a spool that rolled to disk awaits a thread. If the handler is
+    cancelled there, the scratch copy it has just made must still be removed —
+    it sat outside the block whose finally owns that file."""
+    import starlette.datastructures as sd
+
+    app, path = _surface("unified")
+
+    async def cut_off(self):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(sd.UploadFile, "close", cut_off)
+    async with _client(app) as c:
+        with contextlib.suppress(BaseException):
+            await c.post(path, files={"file": ("a.txt", b"x" * 4096)})
+
+    scratch = docs_dir_for_scratch / ".upload-tmp"
+    assert not scratch.exists() or list(scratch.iterdir()) == [], list(scratch.iterdir())
