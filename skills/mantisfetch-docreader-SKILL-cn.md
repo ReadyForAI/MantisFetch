@@ -714,7 +714,7 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | `409 summary already running` / `attempt limit reached` | 并发/重复调用 `POST .../summary` | 改为轮询 `GET .../summary`；只有必须覆盖时才传 `force=true` |
 | `429 too many concurrent parse requests`           | 解析门在整个队列上限（默认 600s）内都没空出槽——服务器是真的饱和了，不是一时忙 | 按 `Retry-After` 给的秒数等待后重试。一般规模的突发会排队通过 |
 | `429 parse queue is holding N bytes`               | 排队中的上传占用的磁盘超过了队列允许的量 | 等待后重试；排队中的解析会一直把上传留在盘上，队列排空后自然恢复 |
-| `429 uploads being received are holding N bytes`   | 其他仍在接收中的上传已占满字节额度；本次请求在读取任何内容之前就被拒绝 | 按 `Retry-After` 的秒数等待后重发整个请求；什么都没有存下 |
+| `429 uploads being received or queued for parse hold N bytes` | 正在接收的与排队待解析的上传合计已占满字节额度；本次请求在读取任何内容之前就被拒绝 | 按 `Retry-After` 的秒数等待后重发整个请求；什么都没有存下 |
 | `422 parse_budget_exceeded` 且带 `queued_seconds`  | 等一个解析槽的时间放不进本次调用声明的 `budget_seconds` | 调大预算，或换一条能等的摄入路径。同样的错误码但**没有** `queued_seconds`，表示是文档本身估算超预算 |
 | `404 document not found`                           | doc_id 无效或文档尚未入库      | 先用 search 确认 doc_id |
 | `404 section not found`                            | sid 无效                       | 先调用 `/doc/library/{doc_id}/sections` 获取有效 sid 列表 |

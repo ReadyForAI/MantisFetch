@@ -188,14 +188,22 @@ def test_a_queue_refusal_does_not_strand_the_doc_id(client, docs_dir, full_gate)
 def test_the_queue_is_bounded_by_staged_bytes(client, docs_dir, full_gate, monkeypatch) -> None:
     """The disk a queue holds is its real cost, so that is what bounds it.
 
-    The queue is nearly full rather than the budget tiny: the same budget also
-    admits the upload before it is read (test_upload_admission), and a request
-    larger than the whole budget is refused there, before it could be staged.
+    Admission (test_upload_admission) already refuses an upload the queue has
+    no room for, before reading it. This is the check behind it, for a queue
+    that fills up while an admitted upload is still being received: the queue
+    grows the moment this one hands its admission back.
     """
     import mantisfetch_docreader as dr
 
     monkeypatch.setenv("MANTISFETCH_PARSE_QUEUE_MAX_BYTES", "100000")
-    monkeypatch.setattr(dr, "_scratch_bytes_held", 100000 - 10)
+    real_release = dr._release_upload_admission
+
+    def _and_the_queue_fills(*a, **kw):
+        real_release(*a, **kw)
+        dr._scratch_bytes_held = 100000 - 10
+
+    monkeypatch.setattr(dr, "_release_upload_admission", _and_the_queue_fills)
+    monkeypatch.setattr(dr, "_scratch_bytes_held", 0)
 
     resp = _post(client, docs_dir, content=b"x" * 200 + HTML, budget_seconds="0.3")
 
@@ -298,7 +306,8 @@ def test_the_estimated_parse_time_is_reserved_out_of_the_budget(monkeypatch) -> 
 def test_the_bytes_already_held_are_what_close_the_gate(client, docs_dir, monkeypatch) -> None:
     """A cap smaller than one upload would refuse whether or not the counter
     were consulted. This sets a cap that only closes because bytes are already
-    held, which is the half the earlier test could not show."""
+    held, which is the half the earlier test could not show. It closes at
+    admission now, before the body is read (test_upload_admission)."""
     import mantisfetch_docreader as dr
 
     body = b"<h1>T</h1><p>" + b"x" * 400 + b"</p>"
@@ -312,4 +321,4 @@ def test_the_bytes_already_held_are_what_close_the_gate(client, docs_dir, monkey
     resp = _post(client, docs_dir, content=body)
 
     assert resp.status_code == 429
-    assert "staged uploads" in resp.json()["detail"]
+    assert "queued for parse" in resp.json()["detail"]

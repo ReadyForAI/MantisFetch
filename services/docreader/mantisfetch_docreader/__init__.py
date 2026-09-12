@@ -2322,6 +2322,17 @@ def _safe_filename(title: str, max_len: int = 40) -> str:
 # ═══════════════════════════════════════════
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MANTISFETCH_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+
+
+def _max_request_bytes() -> int:
+    """The largest request body the upload surface will read.
+
+    The per-file limit plus slack for the multipart envelope — boundaries and
+    the other form fields — around a file that is itself at the limit. One
+    formula for the unified server's body ceiling and doc_app's admission.
+    """
+    return MAX_UPLOAD_BYTES + 1024 * 1024
+
 SEARCH_LIMIT_MAX = int(os.environ.get("MANTISFETCH_SEARCH_LIMIT_MAX", "200"))
 # What /library/search_text accepts for `scope`. Named so the MCP tool can
 # advertise the same set instead of a bare string (#277).
@@ -2624,10 +2635,11 @@ class _UploadAdmission:
     spooled all 8 KiB of their files. How much a burst could put on disk was
     bounded only by how many clients sent at once.
 
-    So the size is reserved here, from Content-Length, against the same budget
-    as the parse queue (``MANTISFETCH_PARSE_QUEUE_MAX_BYTES``), and a request
-    that does not fit is refused with 429 without reading a byte of it. A body
-    with no declared length reserves the most a request may be. Refusing rather
+    So the size is reserved here, from Content-Length, against the parse
+    queue's budget (``MANTISFETCH_PARSE_QUEUE_MAX_BYTES``) — counting what is
+    queued as well as what is arriving — and a request that does not fit is
+    refused with 429 without reading a byte of it. A body with no declared
+    length reserves the most a request may be. Refusing rather
     than queueing: a queued request here would hold its connection open with
     the client still sending, and one stalled sender at the head of that queue
     would stall every upload behind it.
@@ -2657,18 +2669,25 @@ class _UploadAdmission:
             await self.app(scope, receive, send)
             return
         global _receiving_bytes_held
-        ceiling = MAX_UPLOAD_BYTES + 1024 * 1024
+        ceiling = _max_request_bytes()
         declared = dict(scope.get("headers") or []).get(b"content-length")
         try:
-            reserved = min(int(declared), ceiling) if declared is not None else ceiling
+            length = int(declared) if declared is not None else ceiling
         except ValueError:
-            reserved = ceiling
+            length = ceiling
+        # A length that cannot be true reserves as much as a request may be; a
+        # negative one would otherwise give bytes back to the ledger.
+        reserved = length if 0 <= length <= ceiling else ceiling
+        # Against everything uploads hold, not just what is arriving: an upload
+        # that the full parse queue would refuse after receiving it is refused
+        # before instead. One budget then bounds all of it.
+        held = _receiving_bytes_held + _scratch_bytes_held
         budget = _parse_queue_max_bytes()
-        if _receiving_bytes_held + reserved > budget:
+        if held + reserved > budget:
             body = json.dumps(
                 {
                     "detail": (
-                        f"uploads being received are holding {_receiving_bytes_held} "
+                        f"uploads being received or queued for parse hold {held} "
                         f"bytes, and this {reserved}-byte request would put them over "
                         f"the {budget}-byte limit"
                     )

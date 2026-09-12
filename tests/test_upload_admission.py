@@ -119,6 +119,53 @@ async def test_the_reservation_comes_back_once_the_handler_has_its_copy(monkeypa
     assert dr._receiving_bytes_held == 0
 
 
+async def test_a_full_parse_queue_refuses_before_the_body_is_read(monkeypatch, spooled):
+    """What is queued counts too. The handler would refuse this upload once it
+    arrived, so admission refuses it before it does."""
+    import mantisfetch_docreader as dr
+
+    app, path = _surface("unified")
+    monkeypatch.setenv("MANTISFETCH_PARSE_QUEUE_MAX_BYTES", "100000")
+    monkeypatch.setattr(dr, "_scratch_bytes_held", 100000 - 100)
+    async with _client(app) as c:
+        resp = await c.post(path, files={"file": ("a.txt", b"x" * 4096)})
+    assert resp.status_code == 429, resp.text
+    assert "queued for parse" in resp.json()["detail"]
+    assert spooled["bytes"] == 0
+
+
+async def test_a_negative_content_length_does_not_give_bytes_back():
+    """Taken at face value it would be a negative reservation, and admitting it
+    would lower the count every other request is measured against."""
+    import mantisfetch_docreader as dr
+
+    held_during: list[int] = []
+    sent: list[dict] = []
+
+    async def app(scope, receive, send):
+        held_during.append(dr._receiving_bytes_held)
+
+    async def send(message):
+        sent.append(message)
+
+    gate = dr._UploadAdmission(app)
+    before = dr._receiving_bytes_held
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/parse",
+        "root_path": "",
+        "headers": [(b"content-length", b"-500000000")],
+    }
+    await gate(scope, None, send)
+
+    # Reserved as the largest request instead, while it is in flight — which is
+    # when a negative reservation would have let others in — and given back
+    # once it ends.
+    assert held_during == [before + dr._max_request_bytes()], held_during
+    assert dr._receiving_bytes_held == before
+
+
 async def test_a_request_the_handler_refuses_gives_its_reservation_back():
     import mantisfetch_docreader as dr
 
