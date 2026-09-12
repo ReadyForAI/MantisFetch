@@ -271,8 +271,18 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
         product_dirs.extend(_doc_storage_dir(docs_dir, doc_id, ct) for ct in CONTENT_TYPE_DIRS)
         product_dirs.append(docs_dir / doc_id)  # legacy flat layout
         # The indexed path is resolved and the layout candidates are not, so the
-        # same directory can appear twice under two spellings.
-        product_dirs = list(dict.fromkeys(p.resolve() for p in product_dirs))
+        # same directory can appear twice under two spellings. Deduplicated by
+        # where it resolves, but acted on as spelled: a candidate that is a
+        # symlink is renamed and removed as the link, never followed out of the
+        # library to whatever it points at.
+        seen: set[Path] = set()
+        unique: list[Path] = []
+        for candidate in product_dirs:
+            key = candidate.resolve()
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        product_dirs = unique
 
         set_aside: list[tuple[Path, Path]] = []
         leftovers: list[Path] = []  # tombstones an earlier delete did not clear
@@ -383,19 +393,19 @@ def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
             if not _DOC_ID_RE.match(doc_id):
                 continue  # not one of ours: _delete_doc only renames valid ids
             original = tombstone.with_name(doc_id)
-            uncommitted = (
-                doc_id in indexed
-                and not original.exists()
-                and indexed[doc_id] in (None, original.resolve())
-            )
             try:
+                uncommitted = (
+                    doc_id in indexed
+                    and not original.exists()
+                    and indexed[doc_id] in (None, original.resolve())
+                )
                 if uncommitted:
                     os.replace(tombstone, original)
                     restored += 1
                 else:
                     shutil.rmtree(tombstone)
                     cleared += 1
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:  # RuntimeError: a symlink loop
                 logger.warning("Could not settle %s: %s", tombstone, exc)
     return restored, cleared
 

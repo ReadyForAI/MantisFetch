@@ -321,3 +321,54 @@ def test_a_directory_that_only_looks_like_a_tombstone_is_left_alone(docs):
     assert storage._finish_interrupted_deletes(docs) == (0, 1)
     assert stray.exists()
     assert not leftover.exists()
+
+
+def test_a_delete_that_failed_to_commit_is_not_committed_by_the_next_write(docs, monkeypatch):
+    """The connection is thread-local and lives on. A commit that failed left its
+    DELETEs pending in it, and the next write on the same thread — any document
+    — committed them: after the files had been put back, the row went anyway."""
+    from mantisfetch_docreader import storage
+
+    import mantisfetch_common.doc_index_store as dis
+
+    doc_dir = _add(docs, "DOC-001", body="still here")
+    real_connect = dis._connect
+
+    class _CommitFails:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def commit(self):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(dis, "_connect", lambda d: _CommitFails(real_connect(d)))
+    with pytest.raises(sqlite3.OperationalError):
+        storage._delete_doc(docs, "DOC-001")
+    monkeypatch.setattr(dis, "_connect", real_connect)
+
+    _add(docs, "DOC-002")  # the next write on this thread
+
+    assert "DOC-001" in _indexed(docs), "the failed delete was committed by a later write"
+    assert (doc_dir / "full.md").read_text() == "still here"
+
+
+def test_a_product_dir_that_is_a_symlink_is_never_followed(docs, tmp_path):
+    """Candidates are deduplicated by where they resolve, but must be acted on as
+    spelled: following a link would rename and delete whatever it points at,
+    outside the library."""
+    from mantisfetch_docreader import storage
+
+    _add(docs, "DOC-001")
+    outside = tmp_path / "outside" / "DOC-009"
+    outside.mkdir(parents=True)
+    (outside / "keep.md").write_text("not the library's")
+    (docs / "Contract").mkdir()
+    (docs / "Contract" / "DOC-009").symlink_to(outside, target_is_directory=True)
+
+    storage._delete_doc(docs, "DOC-009")
+
+    assert (outside / "keep.md").read_text() == "not the library's"
+    assert not (tmp_path / "outside" / "DOC-009.deleting").exists()
