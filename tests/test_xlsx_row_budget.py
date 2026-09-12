@@ -175,7 +175,6 @@ def test_a_sheet_outside_the_usual_folder_is_still_counted(tmp_path) -> None:
     """The reader finds sheets through the package relationships, so a sheet can
     sit anywhere in the archive — counting only xl/worksheets/ let it through."""
     from fastapi import HTTPException
-
     from mantisfetch_docreader.tabular import _check_xlsx_row_budget
 
     path = tmp_path / "moved.xlsx"
@@ -188,7 +187,6 @@ def test_one_unreadable_part_does_not_end_the_count(tmp_path) -> None:
     """A malformed part used to abort the whole count, and everything after it
     went uncounted — however big."""
     from fastapi import HTTPException
-
     from mantisfetch_docreader.tabular import _check_xlsx_row_budget
 
     broken = _with_part(_workbook(1), "xl/worksheets/aaa-broken.xml", b"<worksheet><sheetData>")
