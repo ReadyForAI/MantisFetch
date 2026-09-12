@@ -146,7 +146,15 @@ def test_defer_summary_writes_brief_and_llm_digest(tmp_path: Path, monkeypatch) 
         dr, "generate_summaries", lambda parsed, c, f: ("LLM DIGEST", "LLM BRIEF", [])
     )
 
-    mb._defer_web_summary("WEB-001", _SECTIONS, tmp_path, "General", "Example", "https://example.com")
+    mb._defer_web_summary(
+        "WEB-001",
+        _SECTIONS,
+        tmp_path,
+        "General",
+        "Example",
+        "https://example.com",
+        mb._web_doc_generation(doc_dir),
+    )
 
     assert "LLM BRIEF" in (doc_dir / "brief.md").read_text(encoding="utf-8")
     assert "LLM DIGEST" in (doc_dir / "digest.md").read_text(encoding="utf-8")
@@ -167,7 +175,15 @@ def test_defer_summary_failure_marks_failed(tmp_path: Path, monkeypatch) -> None
         raise RuntimeError("llm down")
 
     monkeypatch.setattr(dr, "generate_summaries", boom)
-    mb._defer_web_summary("WEB-001", _SECTIONS, tmp_path, "General", "Example", "https://example.com")
+    mb._defer_web_summary(
+        "WEB-001",
+        _SECTIONS,
+        tmp_path,
+        "General",
+        "Example",
+        "https://example.com",
+        mb._web_doc_generation(doc_dir),
+    )
 
     manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["parse_metadata"]["summary"]["status"] == "failed"
@@ -186,6 +202,7 @@ def test_defer_summary_skips_when_doc_deleted(tmp_path: Path, monkeypatch) -> No
     import mantisfetch_docreader as dr
 
     doc_dir = _persist(tmp_path, "defer")
+    generation = mb._web_doc_generation(doc_dir)
     shutil.rmtree(doc_dir)
 
     called = {"n": 0}
@@ -195,7 +212,15 @@ def test_defer_summary_skips_when_doc_deleted(tmp_path: Path, monkeypatch) -> No
         return ("DIGEST", "BRIEF", [])
 
     monkeypatch.setattr(dr, "generate_summaries", gen)
-    mb._defer_web_summary("WEB-001", _SECTIONS, tmp_path, "General", "Example", "https://example.com")
+    mb._defer_web_summary(
+        "WEB-001",
+        _SECTIONS,
+        tmp_path,
+        "General",
+        "Example",
+        "https://example.com",
+        generation,
+    )
 
     assert called["n"] == 0  # early exit before LLM
     assert not doc_dir.exists()
@@ -214,7 +239,15 @@ def test_defer_summary_discards_when_deleted_mid_llm(tmp_path: Path, monkeypatch
         return ("DIGEST", "BRIEF", [])
 
     monkeypatch.setattr(dr, "generate_summaries", gen_then_delete)
-    mb._defer_web_summary("WEB-001", _SECTIONS, tmp_path, "General", "Example", "https://example.com")
+    mb._defer_web_summary(
+        "WEB-001",
+        _SECTIONS,
+        tmp_path,
+        "General",
+        "Example",
+        "https://example.com",
+        mb._web_doc_generation(doc_dir),
+    )
 
     assert not doc_dir.exists()
 
