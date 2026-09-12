@@ -99,3 +99,107 @@ def test_a_pre_that_uses_br_for_its_line_breaks() -> None:
         "<article><pre>echo first-command<br>echo second-command</pre></article>"
     )
     assert _first("pre", blocks) == "echo first-command\necho second-command"
+
+
+# ── a code block inside a list item or a quote ───────────────────────────────────
+# The outermost container is emitted whole so its text lands in one block, and a
+# <pre> inside it used to go through the prose collapse with it. The code in a
+# tutorial's numbered steps and in a quoted example came out as one line.
+
+
+def _blocks(html):
+    return [(b["tag"], b["text"]) for b in html_to_blocks(html)]
+
+
+def test_a_code_block_in_a_quote_keeps_its_lines() -> None:
+    html = f"<article><blockquote><pre><code>{PY_SRC}</code></pre></blockquote></article>"
+    assert _blocks(html) == [("pre", PY_SRC.rstrip("\n"))]
+
+
+def test_a_code_block_in_a_list_item_keeps_its_lines_and_its_place() -> None:
+    """The step's prose stays on either side of its code, in order."""
+    html = (
+        "<article><ol><li>Define the function first:"
+        f"<pre><code>{PY_SRC}</code></pre>"
+        "then call it from the module.</li></ol></article>"
+    )
+    assert _blocks(html) == [
+        ("li", "Define the function first:"),
+        ("pre", PY_SRC.rstrip("\n")),
+        ("li", "then call it from the module."),
+    ]
+
+
+def test_a_code_block_two_containers_deep() -> None:
+    html = (
+        "<article><ul><li>Setup<ol><li>Write the config:"
+        "<pre>services:\n  web:\n    image: nginx</pre>"
+        "</li></ol></li></ul></article>"
+    )
+    assert _blocks(html) == [
+        ("li", "Setup Write the config:"),
+        ("pre", "services:\n  web:\n    image: nginx"),
+    ]
+
+
+def test_highlighting_and_br_inside_a_nested_code_block() -> None:
+    html = (
+        "<article><blockquote><p>As the docs put it:</p><pre><code>"
+        '<span class="k">def</span> <span class="n">f</span>():<br>'
+        '    <span class="k">return</span> 1'
+        "</code></pre></blockquote></article>"
+    )
+    assert _blocks(html) == [
+        ("blockquote", "As the docs put it:"),
+        ("pre", "def f():\n    return 1"),
+    ]
+
+
+def test_a_nested_code_block_is_written_once() -> None:
+    html = f"<article><ul><li>Run it:<pre>{PY_SRC}</pre></li></ul></article>"
+    blocks = html_to_blocks(html)
+    assert sum(PY_SRC.strip().splitlines()[0] in b["text"] for b in blocks) == 1
+
+
+def test_a_container_without_code_is_written_as_before() -> None:
+    """Pages with no nested code must produce exactly what they did, or every
+    re-capture of them gets a new content hash."""
+    html = (
+        "<article><ul><li>A list item\n   broken <b>across</b> lines, long enough.</li></ul>"
+        "<blockquote><p>A quoted\tparagraph that is long enough.</p></blockquote></article>"
+    )
+    assert _blocks(html) == [
+        ("li", "A list item broken across lines, long enough."),
+        ("blockquote", "A quoted paragraph that is long enough."),
+    ]
+
+
+def test_a_short_step_before_its_code_is_kept() -> None:
+    """Whether a container is kept is decided on all of it. "Run:" alone is
+    under the body minimum, and dropping it would lose what the code is for."""
+    html = "<article><ol><li>Run:<pre>pip install mantisfetch</pre></li></ol></article>"
+    assert _blocks(html) == [("li", "Run:"), ("pre", "pip install mantisfetch")]
+
+
+def test_nested_code_survives_sections_and_the_stored_capture(tmp_path) -> None:
+    """Through the rest of the pipeline: section assembly, then what is written
+    to disk and read back."""
+    import json
+
+    import mantisfetch_browser as web
+
+    blocks = html_to_blocks(
+        "<article><h1>T</h1><ol><li>Define it:"
+        f"<pre><code>{PY_SRC}</code></pre></li></ol></article>"
+    )
+    sections = web._blocks_to_sections_stable(blocks, 10, 10_000, 100_000)
+    assert '    print("first")' in sections[0]["t"], sections[0]["t"]
+
+    web._persist_web_capture(
+        "WEB-1", "https://example.com/t", "T", sections, "d", [], "h", tmp_path
+    )
+    doc_dir = tmp_path / "General" / "WEB-1"
+    manifest = json.loads((doc_dir / "manifest.json").read_text())
+    section_file = doc_dir / manifest["sections"][0]["file"]
+    assert '\n    print("first")\n' in section_file.read_text()
+    assert '\n    print("first")\n' in (doc_dir / "full.md").read_text()
