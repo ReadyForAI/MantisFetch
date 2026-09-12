@@ -618,6 +618,9 @@ from .summaries import (
 # Tabular + generic MarkItDown-backed parsers. Re-exported so the /doc/parse
 # dispatch and the xlsx/csv parse tests keep resolving these off the facade.
 from .tabular import (
+    _check_xlsx_row_budget as _check_xlsx_row_budget,
+)
+from .tabular import (
     parse_csv as parse_csv,
 )
 from .tabular import (
@@ -662,6 +665,9 @@ from .word import (
 )
 from .word import (
     _anchor_word_images_to_sections as _anchor_word_images_to_sections,
+)
+from .word import (
+    _check_ooxml_unzip_budget as _check_ooxml_unzip_budget,
 )
 from .word import (
     _count_word_embedded_image_references as _count_word_embedded_image_references,
@@ -4728,6 +4734,16 @@ async def api_parse_doc(
                     422,
                     f"{filename} is not a valid {suffix.lstrip('.')} file "
                     f"(not a zip archive)",
+                )
+            # And budgets that have to hold before anything expands it. Here,
+            # ahead of the doc_id, because both are properties of the upload:
+            # a workbook over the row limit is a refused request, not a parse
+            # that failed. The unzip budget was DOCX-only and ran inside the
+            # parser; MarkItDown reads XLSX and PPTX entries just as whole.
+            await asyncio.to_thread(_check_ooxml_unzip_budget, scratch_path)
+            if suffix == ".xlsx":
+                await asyncio.to_thread(
+                    _check_xlsx_row_budget, scratch_path, MAX_PARSE_ROWS, filename
                 )
 
         # The same refusal for a PDF, so all three land the same way: no id, no

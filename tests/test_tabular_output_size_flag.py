@@ -7,9 +7,10 @@ guess about size, the row limit it reported had not been applied to anything,
 and an agent reading `truncated: true` had no way to find out which rows were
 supposedly missing — because none were.
 
-Enforcing a real row budget is a contract decision (refuse, or return a stated
-range) that has to be made before it is coded. Until then the honest thing is
-to report the size and stop claiming a truncation that did not happen.
+The row budget is now enforced before conversion, by refusing the workbook in
+/parse (test_xlsx_row_budget). parse_xlsx itself still never cuts, so these
+call it directly: what reaches it is converted whole, and the only thing it
+reports is how big the result came out.
 """
 
 import pytest
@@ -55,8 +56,7 @@ def test_a_large_output_is_reported_as_what_it_is(big_workbook, tmp_path) -> Non
 
 
 def test_every_row_is_still_there(big_workbook, tmp_path) -> None:
-    """The point of the finding: the limit never limited anything, and this
-    change does not start limiting it either."""
+    """parse_xlsx does not cut: a workbook over the limit never gets here."""
     import mantisfetch_docreader as dr
 
     path = tmp_path / "big.xlsx"

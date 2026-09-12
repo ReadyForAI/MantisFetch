@@ -721,13 +721,15 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | `422 <file> is empty (0 bytes)`                    | 上传的文件没有任何字节         | **不要重试。** 什么也没入库，也没有占用 `doc_id` |
 | `422 <file> is not a valid docx/xlsx/pptx file`    | OOXML 三种格式本质是 zip，而这个文件不是（扩展名不对，或上传被截断） | **不要重试。** 什么也没入库。检查实际上传的是什么 |
 | `422 <file> is not a valid pdf file`               | 整个文件里找不到 `%PDF-` 标记，它根本不是 PDF | **不要重试。** 什么也没入库，也没有占用 `doc_id` |
+| `422 <file> has more than N rows across its sheets` | 工作簿超过 `MANTISFETCH_MAX_PARSE_ROWS`（默认 100000）行，在转换前就被拒绝 | **同一文件不要重试。** 什么也没入库。拆分工作簿，或请运维调高上限 |
+| `422 XLSX/PPTX/DOCX entry … uncompresses to N bytes` | zip 内某个条目解压后超过解压预算 | **同一文件不要重试。** 什么也没入库 |
 | `422 parse failed`                                 | 文件声称是某格式，打开后才失败——例如有 PDF 头但内容损坏 | **不要重试。** 已经尝试过解析，所以那个预留的 id 会保留一份 `.parse-failed.json` 记录；请重新上传正确的文件 |
 | `500 parse failed`                                 | 服务器没能读取一份本应能读的文档——缺少转换器、解析器故障 | 重试；若持续出现，那是服务端问题而不是文件问题 |
 | 与缺少 LLM 凭证相关的 `500 RuntimeError`           | LLM provider 凭证未配置        | 检查当前启用的 LLM provider 配置并重启服务 |
 | Parsing takes too long                             | 文件较大且包含 OCR             | 先用 `generate_summary=false` 做快速提取，再单独生成摘要 |
 | Table is empty                                     | PDF 中的表格是图片或版式复杂   | 先确认正文 OCR 是否已入库；如关键表格缺失，再只对相关页使用 `ocr_pages` 或在明确接受成本时使用 `force_ocr=true` |
 | OCR 结果出现 `No image provided` 一类内容          | 视觉模型或图片输入模式不匹配   | 先检查当前 OCR 模型、vendor profile 和 OCR 图片输入模式，再决定是否重试 |
-| XLSX 的 `metadata.large_output`                    | 转换后的表格超过 `MANTISFETCH_MAX_PARSE_ROWS × 100` 字符 | 只是提示，**没有截断任何内容** —— `metadata.output_chars` 给出实际大小。按 section 读，别直接要全文 |
+| XLSX 的 `metadata.large_output`                    | 转换后的表格超过 `MANTISFETCH_MAX_PARSE_ROWS × 100` 字符 | 只是提示，**没有截断任何内容** —— `metadata.output_chars` 给出实际大小（超过行数上限的工作簿会被拒绝，不会被截断）。按 section 读，别直接要全文 |
 
 ---
 

@@ -20,13 +20,58 @@ from __future__ import annotations
 
 import logging
 import re
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from fastapi import HTTPException
 
 from .models import DocumentProfile, PageContent, ParsedDocument, Section
 from .ocr.tables import _extract_markdown_table_blocks
 from .sectioning import _split_sections
 
 logger = logging.getLogger("mantisfetch_docreader")
+
+
+def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
+    """Refuse a workbook with more than ``limit`` rows before it is converted.
+
+    MarkItDown reads every sheet whole into memory before anything can look at
+    how big it is: measured, a 5 MB workbook of 100,000 rows x 10 columns (50 MB
+    of sheet XML) peaked at 2 GB RSS and took 30 s, and the upload limit admits
+    workbooks many times that. So the rows are counted first, by streaming each
+    worksheet's XML — one row held at a time — and the count stops as soon as
+    it passes the limit.
+
+    Rows, not cells: it is the knob the service already had. A wide sheet under
+    the row limit is bounded by the per-entry unzip budget instead.
+
+    A file whose worksheets cannot be read is left to the parser, which says
+    what is wrong with it more usefully than a count could.
+    """
+    total = 0
+    try:
+        with zipfile.ZipFile(filepath) as zf:
+            for info in zf.infolist():
+                name = info.filename
+                if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
+                    continue
+                with zf.open(info) as sheet:
+                    for _event, element in ET.iterparse(sheet, events=("end",)):
+                        if element.tag.rpartition("}")[2] != "row":
+                            continue
+                        total += 1
+                        if total > limit:
+                            raise HTTPException(
+                                422,
+                                f"{filename} has more than {limit} rows across its "
+                                f"sheets (MANTISFETCH_MAX_PARSE_ROWS). Split the "
+                                f"workbook, or raise the limit if this host has the "
+                                f"memory to convert it",
+                            )
+                        element.clear()
+    except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError):
+        return
 
 
 def parse_xlsx(filepath: Path) -> ParsedDocument:
@@ -96,9 +141,9 @@ def parse_xlsx(filepath: Path) -> ParsedDocument:
     # a row limit that had not been applied to anything. An agent that read it
     # could not find out which rows were missing, because none were.
     #
-    # A real budget (refuse, or return a stated range) is a contract decision to
-    # make before coding it. Until then: say how big it came out, and do not
-    # claim a cut that did not happen.
+    # The row limit is enforced before conversion instead, by refusing the
+    # workbook (_check_xlsx_row_budget, from /parse). What reaches this point is
+    # whole; this only says how big it came out.
     large_output = len(markdown_text) > MAX_PARSE_ROWS * 100
 
     if large_output:

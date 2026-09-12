@@ -41,20 +41,22 @@ from .sectioning import (
 
 logger = logging.getLogger("mantisfetch_docreader")
 
-# Decompression-bomb guard for DOCX (a zip): a few KB can inflate to GBs, and
-# both MarkItDown and the embedded-image extractor zf.read() entries whole.
+# Decompression-bomb guard for the OOXML containers (zips): a few KB can inflate
+# to GBs, and MarkItDown and the embedded-image extractor read entries whole.
+# Named for DOCX, where it started; it covers XLSX and PPTX too.
 _MAX_DOCX_ENTRY_BYTES = int(os.environ.get("MANTISFETCH_MAX_DOCX_ENTRY_MB", "64")) * 1024 * 1024
 _MAX_DOCX_UNZIP_BYTES = int(os.environ.get("MANTISFETCH_MAX_DOCX_UNZIP_MB", "512")) * 1024 * 1024
 
 
-def _check_docx_unzip_budget(filepath: Path) -> None:
-    """Reject DOCX zip bombs before anything decompresses an entry.
+def _check_ooxml_unzip_budget(filepath: Path) -> None:
+    """Reject OOXML (DOCX/XLSX/PPTX) zip bombs before anything decompresses an entry.
 
     ZipInfo.file_size comes from the central directory, so this reads no
-    compressed data. Runs as a pre-flight in parse_word, ahead of MarkItDown and
-    the image extractor.
+    compressed data. Runs as a pre-flight in /parse for every OOXML upload, and
+    again in parse_word, which also sees DOCX converted from .doc.
     """
-    if filepath.suffix.lower() != ".docx":
+    kind = filepath.suffix.lower().lstrip(".")
+    if kind not in {"docx", "xlsx", "pptx"}:
         return
     try:
         with zipfile.ZipFile(filepath) as zf:
@@ -63,7 +65,7 @@ def _check_docx_unzip_budget(filepath: Path) -> None:
                 if info.file_size > _MAX_DOCX_ENTRY_BYTES:
                     raise HTTPException(
                         422,
-                        f"DOCX entry {info.filename!r} uncompresses to "
+                        f"{kind.upper()} entry {info.filename!r} uncompresses to "
                         f"{info.file_size} bytes, over the "
                         f"{_MAX_DOCX_ENTRY_BYTES}-byte per-entry limit",
                     )
@@ -71,7 +73,7 @@ def _check_docx_unzip_budget(filepath: Path) -> None:
                 if total > _MAX_DOCX_UNZIP_BYTES:
                     raise HTTPException(
                         422,
-                        "DOCX total uncompressed size exceeds the "
+                        f"{kind.upper()} total uncompressed size exceeds the "
                         f"{_MAX_DOCX_UNZIP_BYTES}-byte limit",
                     )
     except zipfile.BadZipFile:
@@ -190,7 +192,7 @@ def _count_word_embedded_image_references(filepath: Path) -> int:
     # /doc/parse calls this before parse_word when extract_images=true, and it
     # zf.read()s document.xml — enforce the zip-bomb budget here too (outside the
     # try below, which would otherwise swallow the 422).
-    _check_docx_unzip_budget(filepath)
+    _check_ooxml_unzip_budget(filepath)
     try:
         with zipfile.ZipFile(filepath) as zf:
             document_xml = zf.read("word/document.xml")
@@ -347,7 +349,7 @@ def parse_word(
     from . import _convert_to_markdown, _section_sid
 
     logger.info(f"Parsing Word: {filepath.name}")
-    _check_docx_unzip_budget(filepath)
+    _check_ooxml_unzip_budget(filepath)
     source_size_bytes = filepath.stat().st_size
     markdown_text = _convert_to_markdown(filepath)
     logger.info(f"MarkItDown extraction complete: {len(markdown_text)} chars")
