@@ -26,7 +26,7 @@ import threading
 import time
 import weakref
 import zipfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -706,10 +706,11 @@ MAX_PARSE_ROWS = int(os.environ.get("MANTISFETCH_MAX_PARSE_ROWS", "100000"))
 _MAX_CONCURRENT_PARSE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_PARSE", "2"))
 _parse_sem = asyncio.Semaphore(_MAX_CONCURRENT_PARSE)
 
-# Bound concurrent upload reads so a burst of large requests can't allocate
-# unbounded memory before any parse slot is acquired. The doc_id reservation
-# and `_parse_sem` are deliberately downstream — this gate covers only the
-# upload-buffer footprint.
+# Bound concurrent copies of a received upload into its scratch file. It cannot
+# bound what is received: Starlette has spooled the whole body before the
+# handler reaches this gate. That is _UploadAdmission's job, which admits by
+# size before the body is read. The doc_id reservation and `_parse_sem` are
+# deliberately downstream.
 _MAX_CONCURRENT_UPLOAD = int(
     os.environ.get("MANTISFETCH_MAX_CONCURRENT_UPLOAD", str(_MAX_CONCURRENT_PARSE))
 )
@@ -2595,6 +2596,116 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 
 app = FastAPI(title="Doc Reader API", version=__version__, lifespan=lifespan)
+
+
+#: Bytes of /parse request bodies admitted and not yet copied out by their
+#: handler. See _UploadAdmission.
+_receiving_bytes_held = 0
+
+_upload_admission_release: contextvars.ContextVar[Callable[[], None] | None] = (
+    contextvars.ContextVar("mantisfetch_upload_admission_release", default=None)
+)
+
+
+def _release_upload_admission() -> None:
+    """Hand back this request's admission; a no-op outside an admitted request."""
+    release = _upload_admission_release.get()
+    if release is not None:
+        release()
+
+
+class _UploadAdmission:
+    """Admit a /parse upload by its size before any of its body is read.
+
+    Starlette parses the multipart body — spooling every file past its first
+    MiB to the system temp dir — before the handler runs, so ``_upload_sem``
+    and the parse queue's byte cap both see an upload only once it has already
+    landed. Measured: with the upload gate full, two waiting requests had
+    spooled all 8 KiB of their files. How much a burst could put on disk was
+    bounded only by how many clients sent at once.
+
+    So the size is reserved here, from Content-Length, against the same budget
+    as the parse queue (``MANTISFETCH_PARSE_QUEUE_MAX_BYTES``), and a request
+    that does not fit is refused with 429 without reading a byte of it. A body
+    with no declared length reserves the most a request may be. Refusing rather
+    than queueing: a queued request here would hold its connection open with
+    the client still sending, and one stalled sender at the head of that queue
+    would stall every upload behind it.
+
+    The reservation is returned as soon as the handler has its own copy and
+    has closed the spool — not at the end of the request, which for a parse is
+    minutes later — and in any case when the request ends, however it ends.
+
+    On ``doc_app`` itself rather than in the unified server, because the MCP
+    front-end reaches ``/parse`` in-process and never passes through that one.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    @staticmethod
+    def _is_upload(scope: dict) -> bool:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            return False
+        path, root = scope.get("path", ""), scope.get("root_path", "")
+        # Inside a Mount, Starlette keeps the full path and sets root_path.
+        route = path[len(root) :] if root and path.startswith(root) else path
+        return route == "/parse"
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if not self._is_upload(scope):
+            await self.app(scope, receive, send)
+            return
+        global _receiving_bytes_held
+        ceiling = MAX_UPLOAD_BYTES + 1024 * 1024
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        try:
+            reserved = min(int(declared), ceiling) if declared is not None else ceiling
+        except ValueError:
+            reserved = ceiling
+        budget = _parse_queue_max_bytes()
+        if _receiving_bytes_held + reserved > budget:
+            body = json.dumps(
+                {
+                    "detail": (
+                        f"uploads being received are holding {_receiving_bytes_held} "
+                        f"bytes, and this {reserved}-byte request would put them over "
+                        f"the {budget}-byte limit"
+                    )
+                }
+            ).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 429,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                        (b"retry-after", b"30"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        _receiving_bytes_held += reserved
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            global _receiving_bytes_held
+            if not released:
+                released = True
+                _receiving_bytes_held -= reserved
+
+        token = _upload_admission_release.set(release)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _upload_admission_release.reset(token)
+            release()
+
+
+app.add_middleware(_UploadAdmission)
 PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").strip().lower() not in {
     "0",
     "false",
@@ -4519,6 +4630,12 @@ async def api_parse_doc(
     # The bytes are ours now (in scratch_path) and the request's UploadFile is
     # no longer touched, so from here a client disconnect must not discard the
     # work — see _survives_client_disconnect.
+    #
+    # Close the multipart spool now rather than at request teardown, minutes
+    # away for a parse, so that giving back the admission is true: the bytes it
+    # was reserved for are no longer on disk.
+    await file.close()
+    _release_upload_admission()
     _allow_running_detached()
 
     scratch_counted = False

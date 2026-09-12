@@ -186,8 +186,16 @@ def test_a_queue_refusal_does_not_strand_the_doc_id(client, docs_dir, full_gate)
 
 # ── the bytes bound on the queue ─────────────────────────────────────────────────
 def test_the_queue_is_bounded_by_staged_bytes(client, docs_dir, full_gate, monkeypatch) -> None:
-    """The disk a queue holds is its real cost, so that is what bounds it."""
-    monkeypatch.setenv("MANTISFETCH_PARSE_QUEUE_MAX_BYTES", "10")
+    """The disk a queue holds is its real cost, so that is what bounds it.
+
+    The queue is nearly full rather than the budget tiny: the same budget also
+    admits the upload before it is read (test_upload_admission), and a request
+    larger than the whole budget is refused there, before it could be staged.
+    """
+    import mantisfetch_docreader as dr
+
+    monkeypatch.setenv("MANTISFETCH_PARSE_QUEUE_MAX_BYTES", "100000")
+    monkeypatch.setattr(dr, "_scratch_bytes_held", 100000 - 10)
 
     resp = _post(client, docs_dir, content=b"x" * 200 + HTML, budget_seconds="0.3")
 
