@@ -111,17 +111,24 @@ Before any of a `/doc/parse` body is read, the request is admitted by its
 uploads still arriving together with uploads already queued for parse. A
 request that does not fit gets `429` with `Retry-After: 30`, and none of it is
 read or stored. A request that declares no length is counted as the outer
-ceiling above. The reservation is handed back as soon as the handler has its
-own copy of the file, not when the parse finishes.
+ceiling above. Once the handler has its own copy of the file, the reservation
+is handed over to the parse queue's count of staged bytes rather than freed:
+those bytes stay counted until the parse finishes.
 
-This runs inside `doc_app`, so MCP ingests pass through it too, even though
-they skip the outer ceiling.
+This runs in the `/doc` service itself, so MCP ingests pass through it too, even
+though they skip the outer ceiling.
 
 So one number bounds what a burst of uploads can put on disk: the system temp
 dir, where the multipart body is spooled, plus `.upload-tmp` under the library,
-where queued uploads wait. A `429` here means the service is full, not that the
-file is bad; retry it. If it shows up under normal load, the budget is too small
-for the fan-in, and raising it means more disk at both places.
+where queued uploads wait. A `429` here normally means the service is full, not
+that the file is bad, so retry it. If it shows up under normal load, the budget
+is too small for the fan-in, and raising it means more disk at both places.
+
+The budget must also hold at least one request of the largest size: a request
+bigger than the whole budget is refused even when nothing else is in flight,
+and retrying will not help. That includes any request without a declared length
+once the budget is set below the outer ceiling. The default is ten times the
+upload cap.
 
 ## Container hardening
 
