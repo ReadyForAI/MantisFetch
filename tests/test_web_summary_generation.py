@@ -204,7 +204,15 @@ def one_busy_slot(monkeypatch):
     sem = threading.BoundedSemaphore(1)
     monkeypatch.setattr(web, "_web_summary_sem", sem)
     sem.acquire()
-    return sem
+    try:
+        yield sem
+    finally:
+        # A test that fails before handing the slot back must not leave its
+        # worker parked on it for the rest of the run.
+        try:
+            sem.release()
+        except ValueError:
+            pass
 
 
 def test_a_summary_waiting_for_its_slot_does_not_claim_the_document_that_replaced_it(
@@ -239,6 +247,7 @@ def test_a_summary_waiting_for_its_slot_does_not_claim_the_document_that_replace
             "https://example.com/page",
             generation,
         ),
+        daemon=True,
     )
     worker.start()
     # The precondition for the race: parked at the slot, having read nothing.

@@ -2028,9 +2028,6 @@ _WEB_SUMMARY_MAX_QUEUED = max(
 )
 _web_summary_waiting = 0
 _web_summary_waiting_lock = threading.Lock()
-# Serializes the "read status → claim pending → enqueue" step for cache hits so
-# concurrent hits on the same cached doc can't enqueue duplicate LLM jobs.
-_web_summary_claim_lock = threading.Lock()
 
 
 def _read_web_summary_status(doc_dir: Path) -> str | None:
@@ -2535,12 +2532,9 @@ def _defer_web_summary(
     ``/doc/parse`` accepts a WEB-* doc_id with replace=true and this thread can
     outlive the document it started on.
 
-    ``generation`` is the one the caller read together with ``sections`` — from
-    the persist that wrote them, or under the claim of a cache hit. It is not
-    read here: this thread can wait a long time for its slot, and a generation
-    read after that wait belongs to whatever is on disk by then. A document
-    replaced in the meantime would pass every check below, and get a summary of
-    the old ``sections``.
+    ``generation`` is the token the caller read together with ``sections`` (the
+    persist's return, or a cache hit's claim), and it is never re-read here,
+    however long this thread waits for its slot.
     """
     from mantisfetch_docreader import (  # noqa: PLC0415
         ParsedDocument,
@@ -2948,12 +2942,13 @@ def _resolve_cached_summary(
     # window before the worker acquires the semaphore would enqueue a duplicate
     # LLM job and /summary would disagree with the returned status.
     #
-    # And under the document writer lock, like every other write to this
-    # manifest: the claim rewrites all of it, and the sections and the
-    # generation the worker is bound to have to come from the same document.
+    # The document writer lock, like every other write to this manifest: the
+    # claim rewrites all of it, and the sections and the generation the worker
+    # is bound to have to come from the same document. Per document, so a long
+    # replacement of one stalls only the claims on that one.
     from mantisfetch_docreader import _document_writer_lock  # noqa: PLC0415
 
-    with _web_summary_claim_lock, _document_writer_lock(docs_dir, doc_id):
+    with _document_writer_lock(docs_dir, doc_id):
         status = _read_web_summary_status(doc_dir)
         if status in {"pending", "running", "completed"}:
             return status  # already generated, or one is already claimed/in flight
