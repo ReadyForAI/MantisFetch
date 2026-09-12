@@ -71,10 +71,21 @@ provider together; pick it against that provider's rate limit. A summary costs
 one call per section plus two, so a 100-section document is ~102 calls.
 
 A restart cannot carry deferred summaries with it (they live in daemon
-threads). On startup every `running` summary is reset to `pending` so the status
-face stops claiming work that no longer exists; nothing is re-queued
-automatically, because with fan-in that would refill the queue at the worst
-moment. Retry the ones you care about.
+threads). On startup the status face is corrected so it stops claiming work
+that no longer exists, and where it lands depends on how that kind of document
+is retried:
+
+- **Uploads:** `running` goes back to `pending` (and `pending` stays). Retry with
+  `POST /doc/library/{doc_id}/summary`, which accepts `pending`.
+- **Web captures:** `running` *and* `pending` become `failed` with
+  `error_code: summary_interrupted`. The summary endpoint does not take web
+  captures; capturing the same page again with `summary_mode: "defer"` hits the
+  cache and schedules a new summary — and it only does that for a status other
+  than pending/running/completed, which is why a capture is not left at
+  `pending`.
+
+Nothing is re-queued automatically, because with fan-in that would refill the
+queue at the worst moment. Retry the ones you care about.
 
 ## Request size
 

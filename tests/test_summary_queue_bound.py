@@ -370,3 +370,91 @@ def test_a_web_refusal_does_not_overwrite_a_replacement(docs, monkeypatch) -> No
     assert after.get("parse_metadata", {}).get("summary", {}).get("status") != "not_queued", (
         "the refusal wrote its status onto the document that replaced it"
     )
+
+
+# ── a queued web summary lost to a restart (review 2026-09-10 R06) ───────────────
+def test_a_restart_settles_all_four_in_flight_states(docs, monkeypatch) -> None:
+    """Upload and capture, pending and running. The queued web job is the one
+    the sweep used to miss: `pending` on disk, its thread gone, and every cache
+    hit reading `pending` as "already queued" — so nothing ever started it."""
+    import json
+    import types
+
+    import mantisfetch_browser as web
+    import mantisfetch_docreader as dr
+
+    import mantisfetch_common.doc_index_store as dis
+
+    def _upload(doc_id: str, status: str) -> None:
+        _seed(dr, docs, doc_id)
+        manifest_path = docs / "General" / doc_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["parse_metadata"]["summary"]["status"] = status
+        manifest_path.write_text(json.dumps(manifest))
+        from mantisfetch_docreader.storage import _update_doc_index
+
+        _update_doc_index(
+            docs,
+            {
+                "doc_id": doc_id,
+                "filename": "x.txt",
+                "file_type": "txt",
+                "total_pages": 1,
+                "section_count": 1,
+                "created_at": "2026-09-12T00:00:00Z",
+                "storage_path": f"General/{doc_id}",
+                "parse_metadata": {"summary": {"mode": "defer", "status": status}},
+            },
+            "d",
+        )
+
+    def _capture(doc_id: str, status: str):
+        web._persist_web_capture(
+            doc_id,
+            f"https://example.com/{doc_id}",
+            "T",
+            [{"h": "T", "t": "a body worth summarizing", "sid": "s_001"}],
+            "digest",
+            [],
+            f"hash-{doc_id}",
+            docs,
+            summary_mode="defer",
+        )
+        doc_dir = docs / "General" / doc_id
+        if status != "pending":  # persist already wrote pending
+            web._set_web_summary_status(doc_dir, status)
+            entry = next(e for e in dr._load_doc_index(docs) if e.get("id") == doc_id)
+            entry["summary_status"] = status
+            dis.upsert_document(docs, entry)
+        return doc_dir
+
+    _upload("DOC-940", "pending")
+    _upload("DOC-941", "running")
+    queued = _capture("WEB-40", "pending")
+    running = _capture("WEB-41", "running")
+
+    assert dr._reset_interrupted_summaries(docs) == 3
+    assert _status(docs, "DOC-940") == "pending", "an upload's pending is its retry state"
+    assert _status(docs, "DOC-941") == "pending"
+    for doc_dir in (queued, running):
+        summary = json.loads((doc_dir / "manifest.json").read_text())["parse_metadata"]["summary"]
+        assert summary["status"] == "failed"
+        assert summary["error_code"] == "summary_interrupted"
+    index = {e["id"]: e for e in dr._load_doc_index(docs)}
+    assert index["WEB-40"]["summary_status"] == "failed"
+
+    # And the capture's own retry route now picks it up — once.
+    started: list[tuple] = []
+
+    class _Recorded:
+        def __init__(self, target, args, daemon, name):
+            self.args = args
+
+        def start(self):
+            started.append(self.args)
+
+    monkeypatch.setattr(web, "threading", types.SimpleNamespace(Thread=_Recorded))
+    entry = index["WEB-40"]
+    assert web._resolve_cached_summary(entry, docs, "General", "defer") == "pending"
+    assert web._resolve_cached_summary(entry, docs, "General", "defer") == "pending"
+    assert len(started) == 1, "a cache hit started no summary, or two"

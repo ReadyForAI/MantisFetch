@@ -774,7 +774,7 @@ Request body:
 | `lang`           | string   | `"en-US"`      | Browser locale                                   |
 | `timeout_ms`     | int      | `25000`        | Page load timeout in milliseconds                |
 | `force_refresh`  | bool     | `false`        | Bypass the URL dedup cache and always re-fetch (see notes) |
-| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. |
+| `summary_mode`   | string   | `"off"`        | `"off"`: digest is a fast local snippet. `"defer"`: also generate an LLM digest + brief in the background (three-tier parity with `/doc`); poll `/doc/library/{doc_id}/summary`. Opt-in — it spends tokens. If that reports `failed` or `not_queued` (including `error_code: summary_interrupted` after a service restart), capture the same URL again with `"defer"`: the cache hit schedules a new summary. `POST /doc/library/{doc_id}/summary` does not accept web captures. |
 
 **Error pages are refused, not stored.** Capture reads the HTTP status the final
 URL was served with. An upstream 4xx returns **422** (the URL is dead or

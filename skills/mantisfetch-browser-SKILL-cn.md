@@ -774,6 +774,7 @@ If false:
 | `lang`           | string   | `"en-US"`      | 浏览器语言环境 |
 | `timeout_ms`     | int      | `25000`        | 页面加载超时（毫秒） |
 | `force_refresh`  | bool     | `false`        | 绕过 URL 去重缓存、强制重抓（见下方说明） |
+| `summary_mode`   | string   | `"off"`        | `"off"`：digest 是快速的本地摘录。`"defer"`：另在后台生成 LLM digest + brief（与 `/doc` 三层对齐），轮询 `/doc/library/{doc_id}/summary` 查看进度。需主动开启——会消耗 token。若状态为 `failed` 或 `not_queued`（包括服务重启后的 `error_code: summary_interrupted`），用 `"defer"` 再抓一次同一 URL：命中缓存即会重新排一次摘要。`POST /doc/library/{doc_id}/summary` 不接受网页抓取的文档。 |
 
 **错误页会被拒绝，不入库。** capture 会读最终 URL 被服务的 HTTP 状态码。源站 4xx 返回
 **422**（链接已死或被禁——**不要重试**），源站 5xx 返回 **502**（真的是网关故障，重试可能成功）。
