@@ -18,15 +18,92 @@ tests that patch `docreader._convert_to_markdown` take effect.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
+
+from fastapi import HTTPException
 
 from .models import DocumentProfile, PageContent, ParsedDocument, Section
 from .ocr.tables import _extract_markdown_table_blocks
 from .sectioning import _split_sections
 
 logger = logging.getLogger("mantisfetch_docreader")
+
+
+#: A worksheet row, in the transitional and the strict SpreadsheetML namespace.
+#: Not any element named "row": DrawingML anchors (``xdr:row``) are cell
+#: coordinates, and counting them would refuse a workbook for its pictures.
+_SHEET_ROW_TAGS = frozenset(
+    {
+        "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row",
+        "{http://purl.oclc.org/ooxml/spreadsheetml/main}row",
+    }
+)
+
+
+def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
+    """Refuse a workbook with more than ``limit`` rows before it is converted.
+
+    MarkItDown reads every sheet whole into memory before anything can look at
+    how big it is: measured, a 5 MB workbook of 100,000 rows x 10 columns (50 MB
+    of sheet XML) peaked at 2 GB RSS and took 30 s, and the upload limit admits
+    workbooks many times that. So the rows are counted first, by streaming the
+    XML — each element dropped from its parent as soon as it ends, so a part
+    of any size costs about its nesting depth — and the count stops as soon as
+    it passes the limit.
+
+    Every XML part is counted, not just ``xl/worksheets/``: the reader finds its
+    sheets through the package relationships, so a sheet can live at any path.
+    Only worksheets hold ``row`` elements, so the others add nothing but the
+    time to stream them. A part that cannot be read is skipped rather than
+    ending the count — the converter cannot read it either, so it cannot be
+    where an oversized sheet gets through.
+
+    Rows, not cells: it is the knob the service already had. A wide sheet under
+    the row limit is bounded by the per-entry unzip budget instead.
+    """
+    total = 0
+    try:
+        zf = zipfile.ZipFile(filepath)
+    except (zipfile.BadZipFile, OSError):
+        return  # not an archive: the parser says what is wrong with it
+    with zf:
+        for info in zf.infolist():
+            if not info.filename.lower().endswith(".xml"):
+                continue
+            try:
+                with zf.open(info) as part:
+                    open_elements: list[ET.Element] = []
+                    for event, element in ET.iterparse(part, events=("start", "end")):
+                        if event == "start":
+                            open_elements.append(element)
+                            continue
+                        open_elements.pop()
+                        if open_elements:
+                            # Not "delete the last child": the parser runs a
+                            # buffer ahead of the events, so later siblings are
+                            # already attached. This one is near the front.
+                            with contextlib.suppress(ValueError):
+                                open_elements[-1].remove(element)
+                        if element.tag not in _SHEET_ROW_TAGS:
+                            continue
+                        total += 1
+                        if total > limit:
+                            raise HTTPException(
+                                422,
+                                f"{filename} has more than {limit} rows across its "
+                                f"sheets (MANTISFETCH_MAX_PARSE_ROWS). Split the "
+                                f"workbook, or raise the limit if this host has the "
+                                f"memory to convert it",
+                            )
+            except HTTPException:
+                raise
+            except Exception:  # noqa: BLE001 - unreadable part: see the docstring
+                continue
 
 
 def parse_xlsx(filepath: Path) -> ParsedDocument:
@@ -90,15 +167,10 @@ def parse_xlsx(filepath: Path) -> ParsedDocument:
             else []
         )
 
-    # A size report, not a limit. Nothing here truncates: MarkItDown converts the
-    # whole workbook before this line runs, so the old `truncated=True` described
-    # a guess about length while every row was still in the output — and it named
-    # a row limit that had not been applied to anything. An agent that read it
-    # could not find out which rows were missing, because none were.
-    #
-    # A real budget (refuse, or return a stated range) is a contract decision to
-    # make before coding it. Until then: say how big it came out, and do not
-    # claim a cut that did not happen.
+    # A size report, not a limit: nothing here truncates. The row limit is
+    # enforced before conversion by refusing the workbook
+    # (_check_xlsx_row_budget, from /parse), so what reaches this point is whole
+    # and this only says how big it came out.
     large_output = len(markdown_text) > MAX_PARSE_ROWS * 100
 
     if large_output:

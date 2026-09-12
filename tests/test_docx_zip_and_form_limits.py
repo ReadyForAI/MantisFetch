@@ -11,7 +11,7 @@ from starlette.testclient import TestClient
 
 # ── B6: DOCX zip-bomb pre-flight ────────────────────────────────────────────
 def test_docx_budget_rejects_oversized_entry(tmp_path: Path) -> None:
-    from mantisfetch_docreader.word import _check_docx_unzip_budget
+    from mantisfetch_docreader.word import _check_ooxml_unzip_budget
 
     path = tmp_path / "bomb.docx"
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -19,7 +19,7 @@ def test_docx_budget_rejects_oversized_entry(tmp_path: Path) -> None:
         zf.writestr("word/document.xml", b"\x00" * (80 * 1024 * 1024))
 
     with pytest.raises(HTTPException) as exc:
-        _check_docx_unzip_budget(path)
+        _check_ooxml_unzip_budget(path)
     assert exc.value.status_code == 422
 
 
@@ -35,7 +35,7 @@ def test_docx_budget_rejects_oversized_total(tmp_path: Path, monkeypatch) -> Non
             zf.writestr(f"word/media/img{i}.bin", b"\x00" * (8 * 1024 * 1024))
 
     with pytest.raises(HTTPException) as exc:
-        word._check_docx_unzip_budget(path)
+        word._check_ooxml_unzip_budget(path)
     assert exc.value.status_code == 422
 
 
@@ -53,12 +53,12 @@ def test_count_refs_also_enforces_budget(tmp_path: Path) -> None:
 
 
 def test_docx_budget_allows_normal_document(tmp_path: Path) -> None:
-    from mantisfetch_docreader.word import _check_docx_unzip_budget
+    from mantisfetch_docreader.word import _check_ooxml_unzip_budget
 
     path = tmp_path / "ok.docx"
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("word/document.xml", b"<w:document/>")
-    _check_docx_unzip_budget(path)  # must not raise
+    _check_ooxml_unzip_budget(path)  # must not raise
 
 
 # ── B7: /doc/parse numeric Form ranges ──────────────────────────────────────

@@ -733,13 +733,15 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | `422 <file> is empty (0 bytes)`                    | The upload had no bytes        | **Do not retry.** Nothing was stored and no `doc_id` was taken             |
 | `422 <file> is not a valid docx/xlsx/pptx file`    | The OOXML formats are zips; this file is not one (wrong extension, or a truncated upload) | **Do not retry.** Nothing was stored. Check what was actually uploaded |
 | `422 <file> is not a valid pdf file`               | No `%PDF-` marker anywhere in the file — it is not a PDF at all | **Do not retry.** Nothing was stored, and no `doc_id` was taken |
+| `422 <file> has more than N rows across its sheets` | The workbook is over `MANTISFETCH_MAX_PARSE_ROWS` (default 100000); refused before conversion | **Do not retry the same file.** Nothing was stored. Split the workbook, or ask the operator to raise the limit |
+| `422 XLSX/PPTX/DOCX entry … uncompresses to N bytes` | An entry inside the zip expands past the unzip budget | **Do not retry the same file.** Nothing was stored |
 | `422 parse failed`                                 | The file claims its format and fails once opened — a PDF with a header but a broken body | **Do not retry.** A parse was attempted, so the reserved id keeps a `.parse-failed.json` record of it; re-upload the real file |
 | `500 parse failed`                                 | The server could not read a document it should have been able to — a missing converter, a parser fault | Retry; if it persists it is a service problem, not the file |
 | `500 RuntimeError` about missing LLM credentials   | LLM provider credentials not configured | Check the active LLM provider settings and restart service        |
 | Parsing takes too long                             | Large file + OCR               | Use `generate_summary=false` for fast extraction first, generate summary later |
 | Table is empty                                     | Tables are images or complex layouts | First confirm text OCR was ingested; if critical table content is missing, retry only relevant pages with `ocr_pages`, or use `force_ocr=true` only when the extra cost is acceptable |
 | OCR output looks like `No image provided`          | Vision model / image input mode mismatch | Check the active OCR model, vendor profile, and OCR image input mode before retrying |
-| `metadata.large_output` on an XLSX                 | The converted workbook is over `MANTISFETCH_MAX_PARSE_ROWS × 100` characters | Informational, **nothing was cut** — `metadata.output_chars` says how big. Read it by section rather than asking for the full text |
+| `metadata.large_output` on an XLSX                 | The converted workbook is over `MANTISFETCH_MAX_PARSE_ROWS × 100` characters | Informational, **nothing was cut** — `metadata.output_chars` says how big (a workbook over the row limit is refused, never cut). Read it by section rather than asking for the full text |
 
 ---
 
