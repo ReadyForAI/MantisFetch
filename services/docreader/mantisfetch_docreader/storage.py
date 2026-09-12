@@ -244,14 +244,12 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
     the doc_id was absent everywhere — callers treat both as success.
 
     The index commit decides whether the delete happened, and the products follow
-    it either way. They are renamed aside first (``{doc_id}.deleting``), the row
-    is deleted, and only then are they removed. A commit that fails renames them
-    back, so the caller is told the delete failed about a document that is still
-    whole — removing them first left an index row pointing at nothing, which no
-    retry, restore or export could repair. A cleanup that fails after the commit
-    is logged, not raised: the document is gone as far as any reader can tell,
-    and the leftover directory is cleared at the next start. So is a delete the
-    process died in the middle of (_finish_interrupted_deletes).
+    it. They are renamed aside first (``{doc_id}.deleting``), the row is deleted,
+    and only then are they removed. A rename or commit that fails puts them
+    back and raises, so a failed delete leaves the document whole. A cleanup
+    that fails after the commit is logged, not raised — the document is gone as
+    far as any reader can tell — and the leftover is cleared at the next start,
+    as is a delete the process died in the middle of (_finish_interrupted_deletes).
 
     The removal set is the index entry's own resolved storage_path (covers
     migrated/legacy layouts where it isn't one of the current content-type dirs)
@@ -336,10 +334,17 @@ def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
     """Settle the deletes a previous process did not finish; (restored, cleared).
 
     A ``{doc_id}.deleting`` directory is a delete that renamed its products
-    aside and then stopped. Whether it happened is whatever the index says:
-    a document still indexed and with nothing at the original path is put back,
-    because its delete never committed; anything else is cleared, because either
-    the delete committed or a live copy has taken the place since.
+    aside and then stopped. Whether it happened is whatever the index says. It
+    is put back only if the index still lists the document *at that path* and
+    nothing has taken the path since: that is a delete that never committed.
+    Anything else is cleared — the delete committed, or the id now names a
+    document somewhere else, which a restore here would shadow.
+
+    Found by walking the library's container directories rather than from the
+    index, because after a committed delete nothing in the index points at the
+    tombstone's parent any more (a migrated ``Archive/{doc_id}``, say). Product
+    directories — anything holding a manifest — are not descended into:
+    tombstones are their siblings, never their contents.
 
     Refuses to guess. If the database cannot be read, nothing is touched — an
     empty answer here would clear the products of every document whose delete
@@ -354,29 +359,39 @@ def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
         except Exception as exc:  # noqa: BLE001 - the sweep waits for a readable index
             logger.warning("Interrupted-delete sweep skipped, index unreadable: %s", exc)
             return 0, 0
-        indexed = {e["id"] for e in entries if isinstance(e.get("id"), str)}
-        parents = {docs_dir, *(docs_dir / ct for ct in CONTENT_TYPE_DIRS)}
-        for entry in entries:
-            resolved = _resolve_index_storage_path(docs_dir, entry.get("storage_path"))
-            if resolved is not None:
-                parents.add(resolved.parent)
-        for parent in parents:
-            if not parent.is_dir():
+        # doc_id -> where the index says it lives (None: no usable storage_path,
+        # so any of its layouts may be the one).
+        indexed = {
+            e["id"]: _resolve_index_storage_path(docs_dir, e.get("storage_path"))
+            for e in entries
+            if isinstance(e.get("id"), str)
+        }
+        tombstones: list[Path] = []
+        for parent, dirnames, filenames in os.walk(docs_dir):
+            if "manifest.json" in filenames and Path(parent) != docs_dir:
+                dirnames[:] = []
                 continue
-            for tombstone in parent.glob(f"*{_DELETING_SUFFIX}"):
-                if not tombstone.is_dir():
-                    continue
-                doc_id = tombstone.name[: -len(_DELETING_SUFFIX)]
-                original = tombstone.with_name(doc_id)
-                try:
-                    if doc_id in indexed and not original.exists():
-                        os.replace(tombstone, original)
-                        restored += 1
-                    else:
-                        shutil.rmtree(tombstone)
-                        cleared += 1
-                except OSError as exc:
-                    logger.warning("Could not settle %s: %s", tombstone, exc)
+            for name in list(dirnames):
+                if name.endswith(_DELETING_SUFFIX):
+                    tombstones.append(Path(parent) / name)
+                    dirnames.remove(name)
+        for tombstone in tombstones:
+            doc_id = tombstone.name[: -len(_DELETING_SUFFIX)]
+            original = tombstone.with_name(doc_id)
+            uncommitted = (
+                doc_id in indexed
+                and not original.exists()
+                and indexed[doc_id] in (None, original.resolve())
+            )
+            try:
+                if uncommitted:
+                    os.replace(tombstone, original)
+                    restored += 1
+                else:
+                    shutil.rmtree(tombstone)
+                    cleared += 1
+            except OSError as exc:
+                logger.warning("Could not settle %s: %s", tombstone, exc)
     return restored, cleared
 
 

@@ -210,3 +210,80 @@ def test_startup_runs_the_sweep(docs):
     asyncio.run(_start_and_stop())
     assert (doc_dir / "full.md").read_text() == "restored at startup"
     assert _tombstones(docs) == []
+
+
+def test_a_leftover_under_a_migrated_layout_is_found_after_the_commit(docs):
+    """Once the row is gone nothing in the index points at ``Archive/`` any more,
+    so the sweep cannot find the tombstone from the index — it walks the library."""
+    from mantisfetch_docreader import storage
+
+    _add(docs, "DOC-002")
+    leftover = docs / "Archive" / "DOC-500.deleting"
+    leftover.mkdir(parents=True)
+    (leftover / "full.md").write_text("committed, never cleared")
+
+    assert storage._finish_interrupted_deletes(docs) == (0, 1)
+    assert not leftover.exists()
+    assert (docs / "General" / "DOC-002" / "full.md").exists()
+
+
+def test_a_leftover_is_not_restored_over_an_id_that_now_lives_elsewhere(docs):
+    """Committed delete in General, cleanup failed; the id was later parsed into
+    Contract. The index lists the id, and the General path is free — but that is
+    not this tombstone's document, and restoring it would shadow the real one."""
+    from mantisfetch_docreader import storage
+    from mantisfetch_docreader.storage import _update_doc_index
+
+    leftover = docs / "General" / "DOC-001.deleting"
+    leftover.mkdir(parents=True)
+    (leftover / "full.md").write_text("deleted")
+    live = docs / "Contract" / "DOC-001"
+    live.mkdir(parents=True)
+    (live / "full.md").write_text("the document now")
+    (live / "manifest.json").write_text(json.dumps({"doc_id": "DOC-001"}))
+    _update_doc_index(
+        docs,
+        {
+            "doc_id": "DOC-001",
+            "filename": "c.txt",
+            "file_type": "txt",
+            "total_pages": 1,
+            "section_count": 1,
+            "created_at": "2026-09-12T00:00:00Z",
+        },
+        "digest",
+        content_type="Contract",
+    )
+
+    assert storage._finish_interrupted_deletes(docs) == (0, 1)
+    assert not (docs / "General" / "DOC-001").exists()
+    assert (live / "full.md").read_text() == "the document now"
+
+
+def test_startup_settles_deletes_before_retention_starts(docs, monkeypatch):
+    """Retention deletes too, and reads each document's age off its manifest.
+    With products still renamed aside it would see an undatable document, keep
+    it, and the sweep would then restore something retention meant to drop."""
+    import mantisfetch_docreader as dr
+
+    order: list[str] = []
+
+    async def _sweep() -> None:
+        order.append("sweep")
+
+    def _retention(days):
+        # Recorded when the task is created, not when it first runs — creating
+        # it is what lets it race the sweep.
+        order.append("retention")
+        return asyncio.sleep(0)
+
+    monkeypatch.setattr(dr, "_startup_finish_interrupted_deletes", _sweep)
+    monkeypatch.setattr(dr, "_retention_loop", _retention)
+    monkeypatch.setattr(dr, "LIBRARY_RETENTION_DAYS", 1)
+
+    async def _start_and_stop() -> None:
+        async with dr.lifespan(dr.app):
+            await asyncio.sleep(0)
+
+    asyncio.run(_start_and_stop())
+    assert order == ["sweep", "retention"]
