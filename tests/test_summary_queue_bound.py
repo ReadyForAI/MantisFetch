@@ -337,6 +337,7 @@ def test_a_web_refusal_does_not_overwrite_a_replacement(docs, monkeypatch) -> No
         summary_mode="defer",
     )
     doc_dir = docs / "General" / "WEB-31"
+    generation = web._web_doc_generation(doc_dir)
 
     # The document is replaced while this summary is still queued.
     import json
@@ -356,6 +357,7 @@ def test_a_web_refusal_does_not_overwrite_a_replacement(docs, monkeypatch) -> No
             "General",
             "T",
             "https://example.com/b",
+            generation,
         )
     finally:
         web._web_summary_sem.release()

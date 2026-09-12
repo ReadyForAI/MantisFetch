@@ -2200,13 +2200,16 @@ def _persist_web_capture(
     http_status: int | None = None,
     fetch_via: str = "html",
     actor: Actor | None = None,
-) -> None:
+) -> str:
     """Write a web capture to the document library and update doc-index.json.
 
     ``metadata`` (e.g. search provenance from /web/search_and_capture) is written
     verbatim into the manifest and, scalar-filtered, into the doc-index so it is
     filterable via ``?metadata.<key>=``. It is deliberately NOT part of the dedup
     cache key.
+
+    Returns the generation it wrote, which is what a deferred summary of this
+    capture has to be bound to (see _defer_web_summary).
     """
     normalized_content_type = _normalize_content_type(content_type)
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
@@ -2221,6 +2224,7 @@ def _persist_web_capture(
     tables_dir = staging_dir / "tables"
 
     now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    generation = _new_web_generation()
     text_sections = [s for s in sections if s.get("type") != "table"]
     table_sections = [s for s in sections if s.get("type") == "table"]
 
@@ -2319,7 +2323,7 @@ def _persist_web_capture(
                 # re-capture, a replacement through /doc/parse, or a delete and
                 # recreate all invalidate a summary that is still in the LLM.
                 # Same field and same purpose as docreader's (#212).
-                "generation": _new_web_generation(),
+                "generation": generation,
                 # Status the final URL was served with. Always written, so null
                 # (the navigation reported no response, e.g. same-document) stays
                 # distinguishable from a capture made before this was recorded,
@@ -2402,6 +2406,7 @@ def _persist_web_capture(
     finally:
         if staging_dir is not None and staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)
+    return generation
 
 
 def _new_web_generation() -> str:
@@ -2517,6 +2522,7 @@ def _defer_web_summary(
     content_type: str,
     title: str | None,
     url: str,
+    generation: str | None,
 ) -> None:
     """Background: generate an LLM digest + brief for a web capture and write them
     into its storage layout (three-tier parity with /doc). Reuses the docreader
@@ -2528,6 +2534,13 @@ def _defer_web_summary(
     under the document writer lock and behind a generation check, because
     ``/doc/parse`` accepts a WEB-* doc_id with replace=true and this thread can
     outlive the document it started on.
+
+    ``generation`` is the one the caller read together with ``sections`` — from
+    the persist that wrote them, or under the claim of a cache hit. It is not
+    read here: this thread can wait a long time for its slot, and a generation
+    read after that wait belongs to whatever is on disk by then. A document
+    replaced in the meantime would pass every check below, and get a summary of
+    the old ``sections``.
     """
     from mantisfetch_docreader import (  # noqa: PLC0415
         ParsedDocument,
@@ -2561,7 +2574,6 @@ def _defer_web_summary(
                 doc_id,
                 _WEB_SUMMARY_MAX_QUEUED,
             )
-            generation = _web_doc_generation(doc_dir)
             with _document_writer_lock(docs_dir, doc_id):
                 if _web_summary_target_intact(doc_dir, generation):
                     _set_web_summary_status(
@@ -2576,12 +2588,11 @@ def _defer_web_summary(
             with _web_summary_waiting_lock:
                 _web_summary_waiting -= 1
     try:
-        # The generation this summary belongs to. Everything below re-checks it
-        # under the cross-thread document lock — the same one docreader's writers
-        # take (#168) — because the LLM call in between is long enough for a
+        # Everything below re-checks the generation under the cross-thread
+        # document lock — the same one docreader's writers take (#168) — because
+        # the wait for a slot and the LLM call are both long enough for a
         # replacement to land, and this thread cannot take the request's asyncio
         # lock.
-        generation = _web_doc_generation(doc_dir)
         with _document_writer_lock(docs_dir, doc_id):
             if not _web_summary_target_intact(doc_dir, generation):
                 logger.info("web capture summary skipped (doc gone or replaced): %s", doc_id)
@@ -2936,10 +2947,19 @@ def _resolve_cached_summary(
     # BEFORE enqueueing, all under the lock. Otherwise a second cache hit in the
     # window before the worker acquires the semaphore would enqueue a duplicate
     # LLM job and /summary would disagree with the returned status.
-    with _web_summary_claim_lock:
+    #
+    # And under the document writer lock, like every other write to this
+    # manifest: the claim rewrites all of it, and the sections and the
+    # generation the worker is bound to have to come from the same document.
+    from mantisfetch_docreader import _document_writer_lock  # noqa: PLC0415
+
+    with _web_summary_claim_lock, _document_writer_lock(docs_dir, doc_id):
         status = _read_web_summary_status(doc_dir)
         if status in {"pending", "running", "completed"}:
             return status  # already generated, or one is already claimed/in flight
+        generation = _web_doc_generation(doc_dir)
+        if not _web_summary_target_intact(doc_dir, generation):
+            return status  # no longer a capture: nothing of ours to summarize
         sections = _load_web_capture_text_sections(doc_dir)
         if not sections:
             return status
@@ -2963,6 +2983,7 @@ def _resolve_cached_summary(
             content_type,
             entry.get("filename"),
             entry.get("source_url") or "",
+            generation,
         ),
         daemon=True,
         name=f"web-summary-{doc_id}",
@@ -3622,9 +3643,9 @@ async def _capture_fresh(
                             req.summary_mode,
                         )
 
-                    def _alloc_and_persist() -> str:
+                    def _alloc_and_persist() -> tuple[str, str]:
                         doc_id = _next_web_doc_id(docs_dir)
-                        _persist_web_capture(
+                        generation = _persist_web_capture(
                             doc_id=doc_id,
                             actor=actor,
                             url=url,
@@ -3642,14 +3663,14 @@ async def _capture_fresh(
                             summary_mode=req.summary_mode,
                             http_status=http_status,
                         )
-                        return doc_id
+                        return doc_id, generation
 
-                    doc_id = await asyncio.to_thread(_alloc_and_persist)
+                    doc_id, generation = await asyncio.to_thread(_alloc_and_persist)
             else:
 
-                def _alloc_and_persist_forced() -> str:
+                def _alloc_and_persist_forced() -> tuple[str, str]:
                     doc_id = _next_web_doc_id(docs_dir)
-                    _persist_web_capture(
+                    generation = _persist_web_capture(
                         doc_id=doc_id,
                         actor=actor,
                         url=url,
@@ -3667,15 +3688,15 @@ async def _capture_fresh(
                         summary_mode=req.summary_mode,
                         http_status=http_status,
                     )
-                    return doc_id
+                    return doc_id, generation
 
-                doc_id = await asyncio.to_thread(_alloc_and_persist_forced)
+                doc_id, generation = await asyncio.to_thread(_alloc_and_persist_forced)
 
             summary_status: str | None = None
             if req.summary_mode == "defer":
                 threading.Thread(
                     target=_defer_web_summary,
-                    args=(doc_id, sections, docs_dir, content_type, title, url),
+                    args=(doc_id, sections, docs_dir, content_type, title, url, generation),
                     daemon=True,
                     name=f"web-summary-{doc_id}",
                 ).start()
@@ -3776,19 +3797,19 @@ async def _capture_negotiated(
                 return await asyncio.to_thread(
                     _cached_capture_response, merged, hit_ct, docs_dir, req.summary_mode
                 )
-            doc_id = await asyncio.to_thread(
+            doc_id, generation = await asyncio.to_thread(
                 _persist_negotiated, req, doc, content_type, docs_dir, sections,
                 title, digest, content_hash, actor,
             )
             return _negotiated_response(
-                req, doc, content_type, docs_dir, sections, title, digest, doc_id
+                req, doc, content_type, docs_dir, sections, title, digest, doc_id, generation
             )
-    doc_id = await asyncio.to_thread(
+    doc_id, generation = await asyncio.to_thread(
         _persist_negotiated, req, doc, content_type, docs_dir, sections,
         title, digest, content_hash,
     )
     return _negotiated_response(
-        req, doc, content_type, docs_dir, sections, title, digest, doc_id
+        req, doc, content_type, docs_dir, sections, title, digest, doc_id, generation
     )
 
 
@@ -3802,12 +3823,13 @@ def _persist_negotiated(
     digest: str,
     content_hash: str,
     actor: Actor | None = None,
-) -> str:
-    """Mint an id and write a negotiated capture. Runs in a worker thread."""
+) -> tuple[str, str]:
+    """Mint an id and write a negotiated capture; (doc_id, generation). Runs in a
+    worker thread."""
 
-    def _alloc_and_persist() -> str:
+    def _alloc_and_persist() -> tuple[str, str]:
         doc_id = _next_web_doc_id(docs_dir)
-        _persist_web_capture(
+        generation = _persist_web_capture(
             doc_id=doc_id,
             actor=actor,
             url=doc.final_url,
@@ -3826,7 +3848,7 @@ def _persist_negotiated(
             http_status=doc.http_status,
             fetch_via=doc.fetch_via,
         )
-        return doc_id
+        return doc_id, generation
 
     return _alloc_and_persist()
 
@@ -3840,6 +3862,7 @@ def _negotiated_response(
     title: str | None,
     digest: str,
     doc_id: str,
+    generation: str,
 ) -> CaptureResponse:
     metrics.incr("capture_negotiated_hits")
 
@@ -3847,7 +3870,7 @@ def _negotiated_response(
     if req.summary_mode == "defer":
         threading.Thread(
             target=_defer_web_summary,
-            args=(doc_id, sections, docs_dir, content_type, title, doc.final_url),
+            args=(doc_id, sections, docs_dir, content_type, title, doc.final_url, generation),
             daemon=True,
             name=f"web-summary-{doc_id}",
         ).start()
