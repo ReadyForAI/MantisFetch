@@ -11,6 +11,7 @@ FTS5 table ``docs_fts`` is updated when search text caches are written so
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import threading
@@ -132,9 +133,17 @@ def upsert_document(docs_dir: Path, entry: dict[str, Any]) -> None:
 
 def delete_document(docs_dir: Path, doc_id: str) -> None:
     conn = _connect(docs_dir)
-    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
-    conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
-    conn.commit()
+    try:
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
+        conn.commit()
+    except BaseException:
+        # The connection is this thread's for good. Left open, a delete that
+        # failed to commit would be committed by the next write on the thread —
+        # after the caller has put the document's files back.
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        raise
 
 
 def get_document(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:

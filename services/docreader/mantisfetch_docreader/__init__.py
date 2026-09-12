@@ -508,6 +508,9 @@ from .storage import (
     _find_doc_index_entry as _find_doc_index_entry,
 )
 from .storage import (
+    _finish_interrupted_deletes as _finish_interrupted_deletes,
+)
+from .storage import (
     _indexable_metadata as _indexable_metadata,
 )
 from .storage import (
@@ -2573,6 +2576,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     server's lifespan_context; the referenced helpers are module globals resolved
     at startup, after the module has fully loaded."""
     await _startup_prewarm_local_ocr()
+    # Before anything reads or deletes: a delete the last process died inside
+    # has its products renamed aside, and the retention loop below deletes too.
+    await _startup_finish_interrupted_deletes()
     await _startup_backfill_manifest_tags()
     await _startup_reset_interrupted_summaries()
     # On the loop, not in a thread: the delete path takes an asyncio lock.
@@ -2664,6 +2670,22 @@ def _reset_interrupted_summaries(docs_dir: Path) -> int:
         with contextlib.suppress(Exception):
             dis.export_json(docs_dir)
     return reset
+
+
+async def _startup_finish_interrupted_deletes() -> None:
+    try:
+        restored, cleared = await asyncio.to_thread(
+            _finish_interrupted_deletes, _get_docs_dir()
+        )
+    except Exception as exc:  # noqa: BLE001 - never block startup on this
+        logger.warning("Interrupted-delete sweep skipped: %s", exc)
+        return
+    if restored or cleared:
+        logger.info(
+            "Settled deletes a previous process left unfinished: %d restored, %d cleared",
+            restored,
+            cleared,
+        )
 
 
 async def _startup_reset_interrupted_summaries() -> None:
