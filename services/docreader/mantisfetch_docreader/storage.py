@@ -359,13 +359,16 @@ def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
         except Exception as exc:  # noqa: BLE001 - the sweep waits for a readable index
             logger.warning("Interrupted-delete sweep skipped, index unreadable: %s", exc)
             return 0, 0
-        # doc_id -> where the index says it lives (None: no usable storage_path,
-        # so any of its layouts may be the one).
-        indexed = {
-            e["id"]: _resolve_index_storage_path(docs_dir, e.get("storage_path"))
-            for e in entries
-            if isinstance(e.get("id"), str)
-        }
+        # doc_id -> where the index says it lives. None when it says nothing
+        # usable — no storage_path, or one that does not name this document's
+        # own directory (the same distrust _delete_doc applies) — so any of its
+        # layouts may be the one.
+        indexed: dict[str, Path | None] = {}
+        for e in entries:
+            if not isinstance(e.get("id"), str):
+                continue
+            resolved = _resolve_index_storage_path(docs_dir, e.get("storage_path"))
+            indexed[e["id"]] = resolved if resolved is not None and resolved.name == e["id"] else None
         tombstones: list[Path] = []
         for parent, dirnames, filenames in os.walk(docs_dir):
             if "manifest.json" in filenames and Path(parent) != docs_dir:
@@ -377,6 +380,8 @@ def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
                     dirnames.remove(name)
         for tombstone in tombstones:
             doc_id = tombstone.name[: -len(_DELETING_SUFFIX)]
+            if not _DOC_ID_RE.match(doc_id):
+                continue  # not one of ours: _delete_doc only renames valid ids
             original = tombstone.with_name(doc_id)
             uncommitted = (
                 doc_id in indexed

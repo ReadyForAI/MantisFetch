@@ -287,3 +287,37 @@ def test_startup_settles_deletes_before_retention_starts(docs, monkeypatch):
 
     asyncio.run(_start_and_stop())
     assert order == ["sweep", "retention"]
+
+
+def test_a_malformed_indexed_path_does_not_decide_against_the_restore(docs):
+    """An index row whose storage_path does not name the document's own
+    directory ("General", say) is one _delete_doc already refuses to trust. The
+    sweep must not trust it either: comparing against it would clear the only
+    copy of a document whose delete never committed."""
+    from mantisfetch_docreader import storage
+
+    import mantisfetch_common.doc_index_store as dis
+
+    doc_dir = _add(docs, "DOC-001", body="the only copy")
+    entry = next(e for e in dis.list_documents(docs) if e["id"] == "DOC-001")
+    entry["storage_path"] = "General"
+    dis.upsert_document(docs, entry)
+    doc_dir.rename(doc_dir.with_name("DOC-001.deleting"))
+
+    assert storage._finish_interrupted_deletes(docs) == (1, 0)
+    assert (doc_dir / "full.md").read_text() == "the only copy"
+
+
+def test_a_directory_that_only_looks_like_a_tombstone_is_left_alone(docs):
+    """Nothing but _delete_doc makes these, and it only makes them for valid
+    ids. A stray ``.deleting`` must neither stop the sweep nor be removed."""
+    from mantisfetch_docreader import storage
+
+    stray = docs / "General" / ".deleting"
+    stray.mkdir(parents=True)
+    leftover = docs / "General" / "DOC-002.deleting"
+    leftover.mkdir()
+
+    assert storage._finish_interrupted_deletes(docs) == (0, 1)
+    assert stray.exists()
+    assert not leftover.exists()
