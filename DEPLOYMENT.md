@@ -104,6 +104,25 @@ is cut off at the ceiling.
 `/mcp` is not behind this. It has its own body limit derived from the inline
 document cap, and its transport reads the body itself.
 
+### Upload admission (`429` on `/doc/parse`)
+
+Before any of a `/doc/parse` body is read, the request is admitted by its
+`Content-Length` against `MANTISFETCH_PARSE_QUEUE_MAX_BYTES`, which counts
+uploads still arriving together with uploads already queued for parse. A
+request that does not fit gets `429` with `Retry-After: 30`, and none of it is
+read or stored. A request that declares no length is counted as the outer
+ceiling above. The reservation is handed back as soon as the handler has its
+own copy of the file, not when the parse finishes.
+
+This runs inside `doc_app`, so MCP ingests pass through it too, even though
+they skip the outer ceiling.
+
+So one number bounds what a burst of uploads can put on disk: the system temp
+dir, where the multipart body is spooled, plus `.upload-tmp` under the library,
+where queued uploads wait. A `429` here means the service is full, not that the
+file is bad; retry it. If it shows up under normal load, the budget is too small
+for the fan-in, and raising it means more disk at both places.
+
 ## Container hardening
 
 `docker-compose.yml` runs the service with:
