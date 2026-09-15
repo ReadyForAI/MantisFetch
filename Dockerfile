@@ -57,7 +57,7 @@ COPY requirements.txt requirements-ocr-linux-x86_64.txt requirements-ocr-arm64.t
 COPY scripts/install_ocr_deps.sh ./scripts/install_ocr_deps.sh
 # Local-OCR variant switch:
 #   WITH_LOCAL_OCR=true  (default) — bundle the offline PaddleOCR stack
-#     (paddlepaddle / opencv / onnxruntime, ~1 GB uncompressed).
+#     (paddlepaddle / opencv / onnxruntime + baked weights, ~1.5 GB uncompressed).
 #   WITH_LOCAL_OCR=false — skip it, for a ~1.5 GB smaller image. MANTISFETCH_LOCAL_OCR_ENABLED
 #     is baked to match so OCR routing skips the (absent) local worker entirely and
 #     uses the configured LLM/vision provider — including PDF page OCR, which has no
