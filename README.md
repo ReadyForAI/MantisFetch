@@ -66,13 +66,13 @@ python mantisfetch_server.py     # listens on port 9898
 
 The `docker-compose.yml` provides a single-service setup. By default, the document library is bind-mounted to the current user's `~/.mantisfetch/docs` directory on the host. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for container hardening, shared-volume ownership (SMB/NFS), and the single-process boundary.
 
-**Image variants (`WITH_LOCAL_OCR` build arg):** the offline PaddleOCR stack is ~1 GB of the image. Build with or without it:
+**Image variants (`WITH_LOCAL_OCR` build arg):** the offline PaddleOCR stack is ~1.5 GB of the image (v1.9.1 measured: full 4.66 GB, slim 3.20 GB uncompressed; 1.21 GB vs 0.88 GB as a gzipped `docker save`). Build with or without it:
 
 ```bash
 # Full — bundled offline OCR (default)
 docker build -t readyforai/mantisfetch:latest .
 
-# Slim — ~1 GB smaller, no local OCR; OCR runs via the configured LLM provider
+# Slim — ~1.5 GB smaller, no local OCR; OCR runs via the configured LLM provider
 docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
 ```
 
@@ -440,13 +440,13 @@ python mantisfetch_server.py     # 监听 9898 端口
 
 `docker-compose.yml` 提供单服务部署方案。默认会把文档库 bind mount 到宿主机当前用户的 `~/.mantisfetch/docs` 目录。
 
-**镜像变体（`WITH_LOCAL_OCR` 构建参数）：** 离线 PaddleOCR 栈约占镜像 1 GB。可选择带或不带：
+**镜像变体（`WITH_LOCAL_OCR` 构建参数）：** 离线 PaddleOCR 栈约占镜像 1.5 GB（v1.9.1 实测：未压缩时完整版 4.66 GB、精简版 3.20 GB；`docker save` 再 gzip 后分别为 1.21 GB 与 0.88 GB）。可选择带或不带：
 
 ```bash
 # 完整版 —— 内置离线 OCR（默认）
 docker build -t readyforai/mantisfetch:latest .
 
-# 精简版 —— 体积小约 1 GB，不含本地 OCR；OCR 走配置的 LLM provider
+# 精简版 —— 体积小约 1.5 GB，不含本地 OCR；OCR 走配置的 LLM provider
 docker build --build-arg WITH_LOCAL_OCR=false -t readyforai/mantisfetch:slim .
 ```
 
