@@ -229,3 +229,50 @@ def test_legacy_era_omits_the_cache_hints_entirely(client):
     assert result["tools"]
     assert "ttlMs" not in result
     assert "cacheScope" not in result
+
+
+def test_modern_era_promises_no_change_notifications(client):
+    """MantisFetch registers every tool at import, so its list cannot change
+    while the process runs and it never sends `list_changed`. The 2026-07-28
+    face derives `listChanged` (and `resources.subscribe`) purely from whether
+    `subscriptions/listen` is served, and the SDK registers a handler for it
+    unless one is removed — so this asserts the removal held. A client that
+    reads `listChanged: true` opens a listen stream that would wait forever."""
+    resp = client.post(
+        "/mcp",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _MODERN,
+            "mcp-method": "server/discover",
+        },
+        json={"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": _META}},
+    )
+    caps = _body(resp)["result"]["capabilities"]
+    # Served, so the key is there — it is the flags inside that must be off.
+    assert "tools" in caps
+    assert not caps["tools"].get("listChanged")
+    assert not caps.get("prompts", {}).get("listChanged")
+    assert not caps.get("resources", {}).get("listChanged")
+    assert not caps.get("resources", {}).get("subscribe")
+
+
+def test_modern_era_refuses_a_subscription_instead_of_holding_it_open(client):
+    """The other half: with the handler gone the method is unknown, so a client
+    that subscribes anyway gets -32601 straight away. While the SDK's handler
+    was in place this request never returned — the stream stayed open for a
+    notification this server will never send."""
+    resp = client.post(
+        "/mcp",
+        headers={
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": _MODERN,
+            "mcp-method": "subscriptions/listen",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "subscriptions/listen",
+            "params": {"_meta": _META, "notifications": {"toolsListChanged": True}},
+        },
+    )
+    assert _body(resp)["error"]["code"] == -32601

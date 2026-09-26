@@ -135,6 +135,29 @@ mcp = MCPServer(
     cache_hints={m: CacheHint(ttl_ms=_LIST_CACHE_TTL_MS) for m in _CACHED_LIST_METHODS},
 )
 
+# Stop declaring `listChanged` (and `resources.subscribe`) on the 2026-07-28
+# face. Every tool is registered at import, so this server's list cannot change
+# while it runs and it never sends a `list_changed` notification — and a client
+# that believes the declaration opens a `subscriptions/listen` stream that is
+# held open forever waiting for one (measured against this app). The modern
+# face derives all three flags from whether `subscriptions/listen` is served
+# (`lowlevel/server.py::get_capabilities`), and `MCPServer` always registers a
+# handler for it, with no constructor switch — so dropping the handler is the
+# only way to say what is true. The low-level server registers exactly the
+# handlers it was passed, so a missing entry is a shape it already supports:
+# the method answers -32601, which is the honest answer to "notify me when your
+# tools change". PrismCouncil and LarkScout declare nothing here either (their
+# Go SDK derives it the same way); this keeps MantisFetch's wire consistent
+# with theirs.
+#
+# It reaches into a private attribute, and the names are stable across every
+# 2.x on PyPI today (2.0.0 / 2.1.1 / 2.2.0, all three checked). A rename would
+# make this a silent no-op rather than an import error, which is why the
+# declaration itself is pinned by a test.
+getattr(getattr(mcp, "_lowlevel_server", None), "_request_handlers", {}).pop(
+    "subscriptions/listen", None
+)
+
 # In-process transports to the existing apps. Browser/docreader routes are
 # unprefixed (the unified server mounts them at /web and /doc), so paths here are
 # relative to each sub-app, e.g. "/session/distill", "/library/{id}/digest".
