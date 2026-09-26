@@ -169,26 +169,28 @@ def test_installed_sdk_still_offers_the_2026_07_28_protocol():
     assert _MODERN in MODERN_PROTOCOL_VERSIONS
 
 
-def test_modern_era_declares_its_tool_list_immediately_stale(client):
-    """SEP-2549 freshness hints on the 2026-07-28 face. `CacheableResult` defaults
-    to `ttl_ms=0` / `cache_scope="private"` and MantisFetch passes no
-    `cache_hints`, so the wire says "immediately stale, do not share across
-    authorization contexts" — a default speaking for the server. Pinned because
-    that declaration is what conformant clients act on, and a bump inside
-    `mcp>=2,<3` could change it without touching a line here. Whether the value
-    should stay 0 is docked to the 20260723 distribution IRP; this only pins what
-    is currently declared."""
+@pytest.mark.parametrize("method", mm._CACHED_LIST_METHODS)
+def test_modern_era_declares_a_non_zero_ttl_on_every_listing_face(client, method):
+    """SEP-2549 freshness hints on the 2026-07-28 face. Unconfigured, the SDK
+    sends `ttl_ms=0` ("immediately stale") on all five listing faces — not just
+    `tools/list`, which is what NodalOS reported as `ttl 0s`. MantisFetch now
+    passes `cache_hints`, because every tool is registered at import: the list a
+    process serves cannot change while it runs. Scope stays `private`, the SDK
+    default. Pinned per face because a client acts on each separately, and a
+    bump inside `mcp>=2,<3` could change any of them without touching a line
+    here."""
     resp = client.post(
         "/mcp",
         headers={
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": _MODERN,
-            "mcp-method": "tools/list",
+            "mcp-method": method,
         },
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": _META}},
+        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": {"_meta": _META}},
     )
     result = _body(resp)["result"]
-    assert result["ttlMs"] == 0
+    assert result["ttlMs"] == mm._LIST_CACHE_TTL_MS
+    assert result["ttlMs"] > 0
     assert result["cacheScope"] == "private"
 
 

@@ -44,6 +44,7 @@ from typing import Annotated, Any, Literal
 import httpx
 import mantisfetch_browser as _web_mod
 import mantisfetch_docreader as _doc_mod
+from mcp.server.caching import CacheHint
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field
@@ -101,13 +102,38 @@ def _transport_security() -> TransportSecuritySettings:
     )
 
 
+#: How long a client may treat one of the listing results as fresh, in ms
+#: (SEP-2549 `ttlMs`, 2026-07-28 only — the handshake era carries no cache
+#: hints). Every tool is registered at import, so a process serves one tool
+#: list for its whole life and the only staleness a TTL can cause is the window
+#: after a restart on a new version. Five minutes keeps that window short while
+#: taking this surface off "immediately stale", which is what the SDK sends
+#: unconfigured and what NodalOS reads as ttl 0 today.
+_LIST_CACHE_TTL_MS = 300_000
+
+#: The listing faces this applies to. `resources/read` is cacheable too and is
+#: deliberately absent: it is per-resource content, and MantisFetch registers
+#: no resources, so it has no policy to state. Scope stays the SDK's default
+#: (`private`): nothing has asked for results to be shared across callers.
+_CACHED_LIST_METHODS = (
+    "server/discover",
+    "tools/list",
+    "prompts/list",
+    "resources/list",
+    "resources/templates/list",
+)
+
 # Transport settings (stateless_http / path / transport_security) are not
 # constructor arguments in SDK v2 — they belong to streamable_http_app() at the
 # bottom of this module, which is what actually builds the ASGI app.
 # `version` defaults to "" in the SDK, which is what every tool result's
 # serverInfo carried until now — pass it so clients keying off the server
 # version see something.
-mcp = MCPServer("mantisfetch", version=__version__)
+mcp = MCPServer(
+    "mantisfetch",
+    version=__version__,
+    cache_hints={m: CacheHint(ttl_ms=_LIST_CACHE_TTL_MS) for m in _CACHED_LIST_METHODS},
+)
 
 # In-process transports to the existing apps. Browser/docreader routes are
 # unprefixed (the unified server mounts them at /web and /doc), so paths here are
