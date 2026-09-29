@@ -14,12 +14,13 @@ import logging
 import mimetypes
 import os
 import stat
-import urllib.parse
 from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
+
+from mantisfetch_common.http_headers import content_disposition
 
 logger = logging.getLogger("mantisfetch_deliverables")
 
@@ -140,19 +141,6 @@ def _iter_fd(fd: int) -> Iterator[bytes]:
             yield chunk
 
 
-def _content_disposition(disposition: str, filename: str) -> str:
-    """Build a Content-Disposition value with an ASCII fallback + RFC 5987 form.
-
-    Control characters are stripped from the ASCII fallback so an agent-chosen
-    filename with CR/LF can't split or corrupt the response headers; the RFC 5987
-    ``filename*`` form percent-encodes them already.
-    """
-    ascii_name = filename.encode("ascii", "replace").decode("ascii")
-    ascii_name = "".join(ch for ch in ascii_name if ch.isprintable()).replace('"', "")
-    quoted = urllib.parse.quote(filename)
-    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
-
-
 @deliverables_app.get("/{rel_path:path}")
 async def get_deliverable(
     rel_path: str,
@@ -197,7 +185,7 @@ async def get_deliverable(
             disposition = "attachment"  # never serve active content as same-origin inline
         headers = {
             "Content-Length": str(st.st_size),
-            "Content-Disposition": _content_disposition(disposition, target.name),
+            "Content-Disposition": content_disposition(disposition, target.name),
             "X-Content-Type-Options": "nosniff",
         }
         return StreamingResponse(_iter_fd(fd), media_type=media_type, headers=headers)

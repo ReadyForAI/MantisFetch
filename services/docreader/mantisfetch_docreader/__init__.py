@@ -40,6 +40,7 @@ from i18n import init_locale, t, tmpl_for_locale
 from mantisfetch_common import __version__
 from mantisfetch_common.actor import Actor, actor_from_headers, actor_label
 from mantisfetch_common.atomic import _write_json, _write_text
+from mantisfetch_common.http_headers import content_disposition
 from mantisfetch_common.paths import _mask_path
 from mantisfetch_common.storage import (
     DEFAULT_DOCS_DIR,
@@ -6303,7 +6304,12 @@ async def get_source_bytes(doc_id: str):
         # Content-Type and do not notice either header.
         headers={
             "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": f'attachment; filename="{_safe_source_filename(path.name)}"',
+            # Built rather than handed to FileResponse's `filename=`: it emits
+            # only the RFC 5987 form, and a client that does not read that form
+            # is left with no name at all. This also keeps FileResponse from
+            # writing the header itself (it only does so when given a filename),
+            # so there is exactly one writer.
+            "Content-Disposition": content_disposition("attachment", path.name),
         },
     )
 
