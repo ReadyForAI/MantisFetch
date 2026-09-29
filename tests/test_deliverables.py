@@ -203,10 +203,29 @@ def test_open_within_refuses_symlinked_parent(tmp_path: Path) -> None:
 
 def test_content_disposition_strips_control_chars() -> None:
     """CR/LF (and quotes) must not reach the filename= fallback and split headers."""
-    cd = md._content_disposition("attachment", 'a\r\nb"c.txt')
+    from mantisfetch_common.http_headers import content_disposition
+
+    cd = content_disposition("attachment", 'a\r\nb"c.txt')
     assert "\r" not in cd and "\n" not in cd
     assert 'filename="abc.txt"' in cd
     assert "filename*=UTF-8''" in cd  # RFC 5987 form carries the real (encoded) name
+
+
+def test_content_disposition_keeps_a_usable_ascii_fallback() -> None:
+    """The fallback is what a client that cannot read RFC 5987 saves as, so the
+    unwritable characters are dropped rather than replaced, and a name with no
+    ASCII stem left still keeps its extension (MantisFetch #294)."""
+    from mantisfetch_common.http_headers import content_disposition
+
+    cd = content_disposition("attachment", "ReadyForAI业务介绍.md")
+    assert 'filename="ReadyForAI.md"' in cd
+    assert "filename*=UTF-8''ReadyForAI%E4%B8%9A%E5%8A%A1%E4%BB%8B%E7%BB%8D.md" in cd
+    assert "?" not in cd
+
+    assert 'filename="source.md"' in content_disposition("attachment", "业务介绍.md")
+    assert 'filename="source"' in content_disposition("attachment", "介绍")
+    # Every byte of the value must survive the latin-1 encoding a header gets.
+    content_disposition("attachment", "报告.pdf").encode("latin-1")
 
 
 # ── auth wiring: the shared Bearer gate covers /deliverables ──────────────────

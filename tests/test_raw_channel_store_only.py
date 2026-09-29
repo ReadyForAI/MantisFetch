@@ -669,3 +669,34 @@ def test_the_mcp_tool_applies_the_raw_ceiling_before_reading(monkeypatch, tmp_pa
                 store_only=True,
             )
         )
+
+
+def test_a_source_with_a_non_ascii_name_can_be_fetched(client, docs_dir) -> None:
+    """HTTP headers are latin-1, so a stored original named in Chinese used to
+    500 while the response was being encoded — every media type, since one
+    handler serves them all (#294, hit by AULO's attachment view). The name now
+    rides in the RFC 5987 form, with an ASCII fallback for clients that ignore
+    it."""
+    doc_id = _store(client, name="ReadyForAI业务介绍.md").json()["doc_id"]
+
+    raw = client.get(f"/doc/library/{doc_id}/source")
+
+    assert raw.status_code == 200
+    assert raw.content == MD
+    cd = raw.headers["content-disposition"]
+    assert "filename*=UTF-8''ReadyForAI%E4%B8%9A%E5%8A%A1%E4%BB%8B%E7%BB%8D.md" in cd
+    assert 'filename="ReadyForAI.md"' in cd
+    # What actually broke: the header value has to survive latin-1 on the wire.
+    cd.encode("latin-1")
+
+
+def test_an_ascii_named_source_is_unchanged(client, docs_dir) -> None:
+    """The other half: the common path keeps working and keeps its real name in
+    the quoted form, so a client reading only that is unaffected."""
+    doc_id = _store(client, content=PNG, name="shot.png").json()["doc_id"]
+
+    raw = client.get(f"/doc/library/{doc_id}/source")
+
+    assert raw.status_code == 200
+    assert raw.headers["content-type"] == "image/png"
+    assert 'filename="shot.png"' in raw.headers["content-disposition"]
