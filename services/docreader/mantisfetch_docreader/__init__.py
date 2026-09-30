@@ -2481,6 +2481,12 @@ class SearchResult(BaseModel):
     summary_mode: str | None = None
     summary_status: str | None = None
     summary_error_code: str | None = None
+    # Web captures only: how much prose and table markdown the document holds,
+    # so a caller can tell an article from a page that distilled into nothing
+    # but navigation without fetching it back. None for uploads, and for
+    # captures made before the fields existed.
+    body_chars: int | None = None
+    table_chars: int | None = None
     sid: str | None = None
     section_title: str | None = None
     page_range: str | None = None
@@ -5331,6 +5337,8 @@ async def library_search(
             summary_mode=d.get("summary_mode") or None,
             summary_status=d.get("summary_status") or None,
             summary_error_code=d.get("summary_error_code") or None,
+            body_chars=d.get("body_chars"),
+            table_chars=d.get("table_chars"),
         )
         for d in documents
     ]
@@ -5448,6 +5456,8 @@ async def library_search_text(
                                     summary_mode=d.get("summary_mode") or None,
                                     summary_status=d.get("summary_status") or None,
                                     summary_error_code=d.get("summary_error_code") or None,
+                                    body_chars=d.get("body_chars"),
+                                    table_chars=d.get("table_chars"),
                                     snippet=_make_snippet(full_text, query),
                                 )
                             )
@@ -5491,6 +5501,8 @@ async def library_search_text(
                                     summary_mode=d.get("summary_mode") or None,
                                     summary_status=d.get("summary_status") or None,
                                     summary_error_code=d.get("summary_error_code") or None,
+                                    body_chars=d.get("body_chars"),
+                                    table_chars=d.get("table_chars"),
                                     sid=sec.get("sid"),
                                     section_title=title,
                                     page_range=sec.get("page_range"),
@@ -5547,6 +5559,8 @@ async def library_search_text(
                                     summary_mode=d.get("summary_mode") or None,
                                     summary_status=d.get("summary_status") or None,
                                     summary_error_code=d.get("summary_error_code") or None,
+                                    body_chars=d.get("body_chars"),
+                                    table_chars=d.get("table_chars"),
                                     sid=sec.get("sid"),
                                     section_title=title,
                                     page_range=sec.get("page_range"),

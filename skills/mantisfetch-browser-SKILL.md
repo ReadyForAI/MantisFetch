@@ -821,6 +821,8 @@ Response example:
   "digest": "Article covers Q3 revenue trends across regions...",
   "section_count": 8,
   "table_count": 2,
+  "body_chars": 7412,
+  "table_chars": 980,
   "reused": false,
   "cache_age_hours": null,
   "summary_status": null,
@@ -828,6 +830,16 @@ Response example:
   "http_status": 200
 }
 ```
+
+`body_chars` and `table_chars` say how much text the capture actually holds —
+prose and table markdown counted apart, as stored. A page can answer 200,
+distill into sections and still carry nothing but navigation: a verification
+challenge, a canvas document viewer, a docs landing page that is all table of
+contents. Its `section_count` looks like an article's; `body_chars` in the
+low hundreds is what gives it away. Tables are counted separately because a
+page that is almost all table is a real capture, not a thin one. Both are
+null on a capture stored before these fields existed. There is no threshold
+built in — the numbers are reported, the caller decides.
 
 **Key notes:**
 
@@ -838,6 +850,7 @@ Response example:
 - Rate-limited by a queue, not a door: captures wait for a slot (16 in flight by default) and only get `429` if no slot frees within `MANTISFETCH_CONCURRENCY_MAX_WAIT_SEC` (default 30s). Issue your captures in parallel — five agents fetching eight pages each all complete, in about 9s total. Do not serialise them to avoid a 429 you will not get.
 - URL validation: private IPs, localhost, and non-HTTP(S) schemes are blocked
 - **URL dedup (opt-in for `/web/capture`):** when `MANTISFETCH_CAPTURE_TTL_HOURS > 0`, a capture of the same `url` + `content_type` + `extract_tables` + `lang` made within that window is reused — the response has `reused: true` and `cache_age_hours`, and no re-fetch happens. Default (`0`) always re-fetches for plain capture. Pass `force_refresh: true` to bypass. Concurrent identical requests serialize per key.
+- **A top-ranked hit is not always readable:** `search_and_capture` stores whatever the ranked URLs yield, and search engines rank verification pages, canvas document viewers and video pages highly. Those capture as a document with a plausible `section_count` and a `body_chars` in the low hundreds. Check `body_chars` on the results before treating a hit as source material; measured on one deployment, 4 captures out of 74 were this.
 - **`/web/search_and_capture` URL TTL (default on):** uses `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS` (default **24**) so repeated research queries reuse recent hits without re-fetch. Independent of `CAPTURE_TTL_HOURS`.
 - **Content-hash reuse (always on after distill):** if the distilled body `content_hash` already exists in the library (same article via AMP / tracking-param URLs), returns that `doc_id` with `reused: true` and **merges** request tags (union) plus new metadata keys (first-touch keeps existing keys). `force_refresh: true` skips this too.
 - **Parallel searches queue, they do not fail:** the operator sets a minimum interval between calls to a search backend (`MANTISFETCH_SEARCH_MIN_INTERVAL_SEC`, default 2s) to protect a paid quota. Issuing several searches in one turn is fine — they take turns and all return; eight parallel searches at the default take about 14s in total. Only a burst big enough that a call would wait past `MANTISFETCH_SEARCH_MAX_WAIT_SEC` (default 30s) is refused, and that `429` says how many seconds to wait. Do not serialise your searches to avoid it.

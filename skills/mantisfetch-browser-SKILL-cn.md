@@ -809,12 +809,21 @@ Readability，所以文档的 `h1`/`h2`/`h3` 结构会保留下来、成为可�
   "digest": "Article covers Q3 revenue trends across regions...",
   "section_count": 8,
   "table_count": 2,
+  "body_chars": 7412,
+  "table_chars": 980,
   "reused": false,
   "cache_age_hours": null,
   "final_url": "https://example.com/article",
   "http_status": 200
 }
 ```
+
+`body_chars` 与 `table_chars` 表示这次抓取到底存下了多少文字：正文与表格 markdown
+分开计数，按落盘后的内容算。一个页面可能返回 200、也切出了 section，但内容全是导航 ——
+滑动验证页、把文档画在 canvas 里的阅读器、只有目录的文档站着陆页都属于这类。它们的
+`section_count` 看起来和正经文章一样，只有 `body_chars` 低到几百才露馅。表格单独计数，
+是因为几乎全是表格的页面同样是一次有效抓取，不该被当成空壳。字段在这两个键出现之前
+存下的抓取上为 null。**服务端不设阈值**：只报数字，由调用方判断。
 
 **关键说明：**
 
@@ -826,6 +835,7 @@ Readability，所以文档的 `h1`/`h2`/`h3` 结构会保留下来、成为可�
 - URL 校验：私有 IP、localhost、非 HTTP(S) 协议都会被拦截
 - **URL 去重（`/web/capture` 默认关闭）：** 当 `MANTISFETCH_CAPTURE_TTL_HOURS > 0` 时，在该时间窗内对同一 `url` + `content_type` + `extract_tables` + `lang` 的抓取会被复用 —— 响应里 `reused: true` 并带 `cache_age_hours`，不再重抓。默认（`0`）普通 capture 每次重抓。单次绕过传 `force_refresh: true`。并发同键请求按 key 串行。
 - **并行搜索会排队，不会失败：** 运维会设一个搜索后端的最小调用间隔（`MANTISFETCH_SEARCH_MIN_INTERVAL_SEC`，默认 2s）来保护付费配额。一轮里发好几个搜索没问题——它们轮流执行、全部返回；默认配置下 8 个并行搜索总共约 14s。只有当突发大到某一个要等过`MANTISFETCH_SEARCH_MAX_WAIT_SEC`（默认 30s）才会被拒，那个 `429` 会告诉你等几秒。不要为了躲它而把搜索串行化。
+- **排名靠前不等于抓得到正文：** `search_and_capture` 会把排名命中的 URL 原样抓下来存库，而搜索引擎常把滑动验证页、canvas 文档阅读器、视频页排在前面。这类页面存进来后 `section_count` 看着正常，但 `body_chars` 只有几百。把命中当素材用之前先看 `body_chars`；某部署实测 74 篇抓取里有 4 篇属于这种。
 - **`/web/search_and_capture` URL TTL（默认开启）：** 使用 `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS`（默认 **24**），重复研究查询会复用近期命中，无需重抓；与 `CAPTURE_TTL_HOURS` 独立。
 - **内容哈希复用（distill 后始终开启）：** 若库中已有相同 body `content_hash`（同一文章经 AMP / 跟踪参数 URL），返回该 `doc_id`（`reused: true`），并**合并** tags（并集）与新 metadata 键（已有键 first-touch 保留）。`force_refresh: true` 同样跳过。
 
