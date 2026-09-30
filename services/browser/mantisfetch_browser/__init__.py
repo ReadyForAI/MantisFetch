@@ -4219,6 +4219,8 @@ async def search_and_capture(
                 digest=cap.digest,
                 reused=cap.reused,
                 rank=rank,
+                body_chars=cap.body_chars,
+                table_chars=cap.table_chars,
             )
         )
 

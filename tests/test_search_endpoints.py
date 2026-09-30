@@ -181,6 +181,39 @@ def test_search_and_capture_serial_with_skip(client: TestClient) -> None:
     assert all(t == 24.0 for t in seen_ttls)
 
 
+def test_search_and_capture_reports_how_much_each_hit_yielded(client: TestClient) -> None:
+    """The face that needs the counts most: a search engine ranks verification
+    pages, canvas viewers and video pages highly, and this endpoint captures
+    whatever it is handed. A hit that yielded nothing but chrome has to be
+    distinguishable here, not only after fetching the document back. A reused
+    capture stored before the fields existed reports null."""
+    provider = _FakeSearchProvider(results=[_sr("https://thin.com"), _sr("https://old.com")])
+
+    async def fake_capture(req, *, url_ttl_hours=None, actor=None):
+        if req.url == "https://thin.com":
+            return CaptureResponse(
+                doc_id="WEB-101",
+                digest="dg",
+                section_count=1,
+                table_count=0,
+                body_chars=31,
+                table_chars=0,
+            )
+        return CaptureResponse(
+            doc_id="WEB-102", digest="dg", section_count=4, table_count=0, reused=True
+        )
+
+    with (
+        patch("mantisfetch_browser.create_search_provider", return_value=provider),
+        patch("mantisfetch_browser._capture_impl", new=fake_capture),
+    ):
+        resp = client.post("/web/search_and_capture", json={"query": "q", "capture_top": 2})
+
+    captured = resp.json()["captured"]
+    assert [c["body_chars"] for c in captured] == [31, None]
+    assert [c["table_chars"] for c in captured] == [0, None]
+
+
 def test_search_and_capture_caps_top_at_3(client: TestClient) -> None:
     provider = _FakeSearchProvider(results=[_sr(f"https://{i}.com") for i in range(10)])
     calls = []

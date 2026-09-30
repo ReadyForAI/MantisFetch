@@ -366,6 +366,12 @@ class CapturedItem(BaseModel):
     digest: str
     reused: bool
     rank: int
+    # Carried from the capture: how much text the hit actually yielded. This is
+    # the face that needs it most — a search engine ranks verification pages,
+    # canvas viewers and video pages highly, and this endpoint captures whatever
+    # it is handed. None on a reused capture stored before the fields existed.
+    body_chars: int | None = None
+    table_chars: int | None = None
 
 
 class SkippedItem(BaseModel):
