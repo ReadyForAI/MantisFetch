@@ -303,6 +303,16 @@ class CaptureResponse(BaseModel):
     # /doc/library/{doc_id}/summary for progress. None otherwise.
     summary_status: str | None = None
 
+    # How much text the capture actually holds, prose and table markdown apart.
+    # A page can answer 200, distill into sections and still carry nothing but
+    # navigation — a verification challenge, a canvas document viewer, a docs
+    # landing page that is all table of contents. Section counts do not show
+    # that; these do. Tables are counted separately because a page that is
+    # almost all table is a real capture, not a thin one. None on a capture
+    # made before this field existed.
+    body_chars: int | None = None
+    table_chars: int | None = None
+
 
 class SearchRequest(BaseModel):
     """Request body for POST /search (pure web search)."""

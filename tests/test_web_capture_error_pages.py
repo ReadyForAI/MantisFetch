@@ -390,3 +390,54 @@ def test_a_table_only_page_is_still_a_document(client: TestClient) -> None:
         body = resp.json()
         assert body["table_count"] == 1
         assert (docs_dir / "General" / body["doc_id"] / "manifest.json").exists()
+
+
+# ── how much there is to read, reported rather than judged ──────────────────────
+def test_capture_reports_how_much_text_it_holds(client: TestClient) -> None:
+    """A page that answers 200 and distills into nothing but chrome — a slider
+    verification page, a canvas document viewer, a docs landing page that is all
+    table of contents — still produces a section, so #240's guard passes it and
+    the section count looks like an article's. Four of 74 captures on the
+    deployed instance were exactly that. The counts say so; the caller decides."""
+    thin = [{"sid": "s1", "h": "访问验证", "t": "请滑动完成验证", "type": "text"}]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        resp = _capture(client, docs_dir, _goto_mock(200), sections=thin)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["body_chars"] == len("请滑动完成验证")
+        assert body["table_chars"] == 0
+        assert body["section_count"] == 1  # what made it look like a document
+
+        import json as _json
+
+        manifest = _json.loads(
+            (docs_dir / body["storage_path"] / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert manifest["body_chars"] == len("请滑动完成验证")
+        assert manifest["table_chars"] == 0
+
+        index = _json.loads((docs_dir / "doc-index.json").read_text(encoding="utf-8"))
+        entry = next(d for d in index["documents"] if d["id"] == body["doc_id"])
+        assert entry["body_chars"] == len("请滑动完成验证")
+        assert entry["table_chars"] == 0
+
+
+def test_table_markdown_is_counted_apart_from_prose(client: TestClient) -> None:
+    """A page can be almost all table and still be a real capture (#240 kept
+    that half deliberately). Counting its tables as prose would hide a thin
+    page; counting them nowhere would make one look thin."""
+    mixed = [
+        {"sid": "s1", "h": "H", "t": "short lead", "type": "text"},
+        {"sid": "t1", "h": "T", "t": "| a | b |\n| - | - |\n| 1 | 2 |", "type": "table"},
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        docs_dir = Path(tmp)
+        resp = _capture(client, docs_dir, _goto_mock(200), sections=mixed)
+
+        body = resp.json()
+        assert body["body_chars"] == len("short lead")
+        assert body["table_chars"] == len("| a | b |\n| - | - |\n| 1 | 2 |")

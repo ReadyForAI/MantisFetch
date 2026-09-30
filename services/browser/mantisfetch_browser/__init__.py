@@ -1974,6 +1974,20 @@ def _safe_heading(h: str | None, max_len: int = 40) -> str:
     return (safe[:max_len] if len(safe) > max_len else safe) or "section"
 
 
+def _section_char_counts(sections: list[dict[str, Any]]) -> tuple[int, int]:
+    """How many characters of prose and of table markdown a capture holds.
+
+    Counted on the sections as stored (already cut to CAPTURE_PERSIST_BUDGET),
+    so the numbers describe what a reader will get back, not what the page
+    rendered. Prose and tables are counted apart because a page can legitimately
+    be almost all table — a reader deciding whether a capture is worth loading
+    has to see both.
+    """
+    body = sum(len(s.get("t") or "") for s in sections if s.get("type") != "table")
+    table = sum(len(s.get("t") or "") for s in sections if s.get("type") == "table")
+    return body, table
+
+
 def _build_manifest_sections(
     text_sections: list[dict[str, Any]],
     table_sections: list[dict[str, Any]],
@@ -2224,6 +2238,7 @@ def _persist_web_capture(
     generation = _new_web_generation()
     text_sections = [s for s in sections if s.get("type") != "table"]
     table_sections = [s for s in sections if s.get("type") == "table"]
+    body_chars, table_chars = _section_char_counts(sections)
 
     try:
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -2289,6 +2304,13 @@ def _persist_web_capture(
             "storage_path": storage_path,
             "tags": list(tags) if tags else [],
             "metadata": dict(metadata) if metadata else {},
+            # How much there actually is to read. A page that answers 200 and
+            # renders only navigation — a verification challenge, a canvas
+            # document viewer, a docs landing page that is all table of
+            # contents — still produces a section or two of chrome, so a caller
+            # cannot tell it from an article by the section count alone.
+            "body_chars": body_chars,
+            "table_chars": table_chars,
             "paths": {
                 "digest": "digest.md",
                 "brief": "brief.md",
@@ -2374,6 +2396,8 @@ def _persist_web_capture(
                     "sections": len(text_sections),
                     "ocr_pages": 0,
                     "tables": len(table_sections),
+                    "body_chars": body_chars,
+                    "table_chars": table_chars,
                     "digest": digest[:200],
                     "digest_path": f"docs/{storage_path}/digest.md",
                     "tags": tags,
@@ -3043,6 +3067,10 @@ def _cached_capture_response(
         cache_age_hours=age_hours,
         final_url=entry.get("source_url"),
         http_status=_stored_http_status(docs_dir, storage_path),
+        # Absent on a capture stored before these were recorded; None then, not
+        # 0, so "nobody counted" stays distinct from "counted, there is nothing".
+        body_chars=entry.get("body_chars"),
+        table_chars=entry.get("table_chars"),
         summary_status=_resolve_cached_summary(entry, docs_dir, content_type, summary_mode),
     )
 
@@ -3574,6 +3602,11 @@ async def _capture_fresh(
             table_sections = [s for s in sections if s.get("type") == "table"]
             digest = _build_web_digest(title, sections)
 
+            # What the response and the manifest both report: the same count,
+            # from the same sections, so a caller comparing them cannot find a
+            # disagreement.
+            body_chars, table_chars = _section_char_counts(sections)
+
             # Title alone is not content: challenge and error pages routinely
             # share a "Just a moment..." title over an empty body.
             meaningful_body = any(
@@ -3704,6 +3737,8 @@ async def _capture_fresh(
                 digest=digest,
                 section_count=len(sections),
                 table_count=len(table_sections),
+                body_chars=body_chars,
+                table_chars=table_chars,
                 summary_status=summary_status,
                 final_url=url,
                 http_status=http_status,
@@ -3878,6 +3913,10 @@ def _negotiated_response(
         digest=digest,
         section_count=len(sections),
         table_count=0,
+        # The negotiated ladder returns markdown, so there are no table sections
+        # to count apart (fetch_via records which rung produced this).
+        body_chars=_section_char_counts(sections)[0],
+        table_chars=0,
         summary_status=summary_status,
         # The markdown URL, which after a .md rewrite or an llms.txt follow is
         # not what the caller asked for. requested_url keeps that.
