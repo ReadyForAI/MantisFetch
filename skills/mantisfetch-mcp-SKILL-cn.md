@@ -133,6 +133,7 @@ capture 正文，snippet 会原样带出页面文字。
 
 说明：
 
+- **结果体积。** 任何工具结果都不会超过一次 MCP 工具返回的上限（`MANTISFETCH_MCP_RESULT_BUDGET_BYTES`，默认线上 60000 字节）。上面分页、分窗的工具会自动拆开；其他工具超限时返回工具错误，说明改用什么方式（例如 `doc_sections_batch` 少传几个 `sids`、检索调低 `limit`），不会发出被半截切断的结果。
 - **†** `web_search` / `web_search_capture` **仅在服务端配置了搜索 provider 时注册**
   （`MANTISFETCH_SEARCH_PROVIDER`）。若工具列表里没有它们，说明该部署未启用搜索——回退到用
   `web_capture` 直接给 URL。
@@ -156,15 +157,15 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_sections` | 列出 sections（sid + 标题，以及标出各节所含表格的 `table_refs`）以做定向检索。**分页**，保证每页都放得进一次工具返回：`total`、`next_offset`（列表读完时为 null）、`truncated`（还有剩余时为 true）——用 `offset=next_offset` 继续读。小文档第一次调用就会完整返回。 | `doc_id`、`offset=0`、`limit?` |
 | `doc_section` | Section 级：按 sid 读取单个 section 全文。 | `doc_id`、`sid` |
 | `doc_sections_batch` | 一次调用按 sid 读取多个 section（比反复 `doc_section` 少往返）；返回找到的 + 缺失的 sid。 | `doc_id`、`sids[]` |
-| `doc_full` | 全文 —— 昂贵；优先用上面的层级。 | `doc_id` |
+| `doc_full` | 全文 —— 昂贵；优先用上面的层级。放得进一次工具返回就整篇返回；更长的文档分窗返回：`total` 行数、`next_offset`（读完为 null）、`truncated`——用 `offset=next_offset` 继续读。 | `doc_id`、`offset=0`、`limit?` |
 | `doc_search` | 跨库搜 **metadata**——文件名、digest、tags、自定义 metadata。**不看正文**：只出现在正文里的词在这里返回 `total: 0`，那**不等于**「库里没有」。零结果会带一条 `hint` 说明。 | `q`、`tags?`、`limit=20` |
 | `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
 | `doc_search_sections` | 在单个文档的 sections 内搜索；返回 sid/页码 provenance。 | `doc_id`、`q`、`include_content=false` |
-| `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
+| `doc_table` | 读取单个提取出的表格（含数值列统计）。一次工具返回放不下的表按行分窗（`total`、`next_offset`、`truncated`）；`md` 每窗都重复表头行，`json` 的分窗是 `table.rows`。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`）、`offset=0`、`limit?` |
 | `doc_tables` | 列出文档的表格（`table_id`、页码、行列数）——即 `doc_table` 要用的 id。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）。 | `doc_id`、`offset=0`、`limit?` |
-| `doc_chunks` | 面向下游 RAG 的检索友好分块。 | `doc_id`、`include_text=false` |
+| `doc_chunks` | 面向下游 RAG 的检索友好分块。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）；带 `include_text` 时长文档要分几页。 | `doc_id`、`include_text=false`、`offset=0`、`limit?` |
 | `doc_manifest` | provenance manifest（来源、hash、时间戳）。`truncated` 恒在：若某文档的 manifest 放不进一次工具返回，它为 `true`，逐条列表（`sections`、`tables`、`images`、逐页质量明细）被省略并在 `omitted` 中列出，计数仍保留，放得下时 `table_ids` 列出可传给 `doc_table` 的表格 id。`doc_sections` 与 `doc_tables`（都分页）能列出全部。 | `doc_id` |
-| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、单窗口 64 KiB、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 对它 `doc_full` / `doc_section` 都是 404。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
+| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、每窗按能放进一次工具返回来定大小（中文文本行数会少一些）、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 对它 `doc_full` / `doc_section` 都是 404。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
 | `doc_summary` | 文档的三级生成摘要 / 状态。 | `doc_id` |
 
 manifest 里 `kind` 为 `"raw"` 的文档没有 digest / brief / sections / 全文 ——

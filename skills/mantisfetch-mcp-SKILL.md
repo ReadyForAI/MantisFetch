@@ -151,6 +151,7 @@ bodies, so its snippets can carry page text verbatim.
 
 Notes:
 
+- **Result size.** No tool result is sent larger than one MCP tool result may carry (`MANTISFETCH_MCP_RESULT_BUDGET_BYTES`, default 60000 bytes on the wire). The paged/windowed tools above split instead; any other tool over it answers with a tool error saying how to ask instead (e.g. fewer `sids` for `doc_sections_batch`, a lower `limit` for searches) — not a result cut off mid-way.
 - **†** `web_search` / `web_search_capture` are registered **only when the server has a
   search provider configured** (`MANTISFETCH_SEARCH_PROVIDER`). If they are absent from the
   tool list, search is disabled on that deployment — fall back to `web_capture` with a URL.
@@ -177,15 +178,15 @@ Notes:
 | `doc_sections` | List sections (sid + title, plus `table_refs` naming each section's tables) for targeted retrieval. **Paged** so a page always fits in one tool result: `total`, `next_offset` (null when the list is complete), `truncated` (true while more remain) — call again with `offset=next_offset`. Small documents come back whole on the first call. | `doc_id`, `offset=0`, `limit?` |
 | `doc_section` | Section tier: full text of one section by sid. | `doc_id`, `sid` |
 | `doc_sections_batch` | Read several sections by sid in one call (fewer round-trips than repeated `doc_section`); returns found + missing sids. | `doc_id`, `sids[]` |
-| `doc_full` | Full document text — expensive; prefer the tiers above. | `doc_id` |
+| `doc_full` | Full document text — expensive; prefer the tiers above. Comes back whole when it fits in one tool result; a longer document comes in windows: `total` lines, `next_offset` (null at the end), `truncated` — call again with `offset=next_offset`. | `doc_id`, `offset=0`, `limit?` |
 | `doc_search` | Search library **metadata** — filename, digest, tags, custom metadata. Does NOT look inside bodies: a word that appears only in the text returns `total: 0` here, which is not the same as "not in the library". A zero result carries a `hint` saying so. | `q`, `tags?`, `limit=20` |
 | `doc_search_text` | **Full-text** search across document bodies; returns doc_id + sid + a snippet per hit. Use this when the term appears only in the text. | `q`, `tags?`, `doc_id?`, `scope="all"` (`all` \| `full` \| `section`), `limit=20` |
 | `doc_search_sections` | Search within one document's sections; returns sid/page provenance. | `doc_id`, `q`, `include_content=false` |
-| `doc_table` | Read one extracted table (with numeric column stats). | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`) |
+| `doc_table` | Read one extracted table (with numeric column stats). A table too large for one tool result comes in row windows (`total`, `next_offset`, `truncated`); in `md` every window repeats the header row, in `json` the window is `table.rows`. | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`), `offset=0`, `limit?` |
 | `doc_tables` | List a document's tables (`table_id`, pages, row/column counts) — the ids for `doc_table`. Paged like `doc_sections` (`total`, `next_offset`, `truncated`). | `doc_id`, `offset=0`, `limit?` |
-| `doc_chunks` | Retrieval-friendly chunks for downstream RAG. | `doc_id`, `include_text=false` |
+| `doc_chunks` | Retrieval-friendly chunks for downstream RAG. Paged like `doc_sections` (`total`, `next_offset`, `truncated`); with `include_text` a long document takes several pages. | `doc_id`, `include_text=false`, `offset=0`, `limit?` |
 | `doc_manifest` | Provenance manifest (source, hash, timestamps). `truncated` is always present: on a document whose manifest would not fit in one tool result it is `true`, the per-entry lists (`sections`, `tables`, `images`, per-page quality detail) are left out and named in `omitted`, the counts stay, and `table_ids` lists the ids to pass to `doc_table` when they fit. `doc_sections` and `doc_tables` (both paged) list everything. | `doc_id` |
-| `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, 64 KiB per window, `next_offset` to continue. The only reader for a raw document — `doc_full` / `doc_section` 404 on it. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
+| `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, each window sized to fit in one tool result (fewer lines for Chinese text), `next_offset` to continue. The only reader for a raw document — `doc_full` / `doc_section` 404 on it. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
 | `doc_summary` | The document's three-tier generated summary / status. | `doc_id` |
 
 A document whose manifest says `kind: "raw"` has no digest, brief, sections or full

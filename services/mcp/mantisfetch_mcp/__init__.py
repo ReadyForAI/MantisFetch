@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import functools
 import inspect
 import json
 import os
@@ -124,11 +125,27 @@ _CACHED_LIST_METHODS = (
     "resources/templates/list",
 )
 
-#: How large one tool result may be once it is on the wire (#290). NodalOS cuts
-#: every tool return at 65,536 bytes, mid-string, leaving JSON that will not
-#: parse — or parses into a list that looks complete and is not. This leaves
-#: room under that for the JSON-RPC envelope around the result.
-_MCP_RESULT_BUDGET = 60_000
+#: How large one tool result may be once it is on the wire (#290, #315). NodalOS
+#: cuts every tool return at 65,536 bytes, mid-string, leaving JSON that will
+#: not parse — or parses into a list that looks complete and is not. The
+#: default leaves room under that for the JSON-RPC envelope around the result.
+#: One value governs every page, window and refusal on this face, so a
+#: deployment whose client has no such wall can raise it in one place. There is
+#: no "off": a very large value simply means nothing is ever split, while 0 or
+#: a typo falls back to the default rather than to "unlimited".
+_DEFAULT_RESULT_BUDGET = 60_000
+_MIN_RESULT_BUDGET = 4_096
+
+
+def _result_budget() -> int:
+    raw = os.environ.get("MANTISFETCH_MCP_RESULT_BUDGET_BYTES", "").strip()
+    try:
+        value = int(raw) if raw else _DEFAULT_RESULT_BUDGET
+    except ValueError:
+        value = _DEFAULT_RESULT_BUDGET
+    if value <= 0:
+        value = _DEFAULT_RESULT_BUDGET
+    return max(_MIN_RESULT_BUDGET, value)
 
 
 def _wire_bytes(result: Any) -> int:
@@ -686,7 +703,43 @@ async def web_distill(
             "total_output_budget_chars": total_output_budget_chars,
         },
     )
-    return _wrap_web_result(out, out.get("url", "") if isinstance(out, dict) else "")
+    return _fit_distill(_wrap_web_result(out, out.get("url", "") if isinstance(out, dict) else ""))
+
+
+def _fit_distill(out: Any) -> Any:
+    """Trim a distill result to fit, rather than refuse it (#315).
+
+    The browser service has already taken this distill as the session's
+    baseline by the time the result is measured, so refusing it would leave the
+    next distill diffing against a snapshot the caller never received. Instead
+    sections are dropped from the end — the page's order, least prominent last —
+    and listed in ``omitted_sids`` for web_read_sections; actions likewise.
+    """
+    if not isinstance(out, dict):
+        return out
+    budget = _result_budget()
+    if _wire_bytes(out) <= budget:
+        return out
+    lists = {k: list(out[k]) for k in ("sections", "actions") if isinstance(out.get(k), list)}
+    omitted: list[str] = []
+
+    def assembled() -> dict[str, Any]:
+        # Measured with the omission metadata included: added afterwards, it
+        # could push a result that had just fitted back over the budget.
+        d = {**out, **lists, "truncated": True}
+        if omitted:
+            d["omitted_sids"] = list(reversed(omitted))
+        return d
+
+    for key in lists:
+        while lists[key] and _wire_bytes(assembled()) > budget:
+            dropped = lists[key].pop()
+            if key == "sections" and isinstance(dropped, dict) and dropped.get("sid"):
+                omitted.append(str(dropped["sid"]))
+    result = assembled()
+    if _wire_bytes(result) > budget:
+        result = _shrink_entry(result, lambda d: _wire_bytes(d) <= budget, ())
+    return result
 
 
 @mcp.tool()
@@ -938,14 +991,19 @@ def _page_entries(
     limit: int | None,
     *,
     trim: tuple[str, ...] = (),
+    shape: Any = None,
 ) -> dict[str, Any]:
     """One page of ``data[key]`` that fits in a tool result (#290).
+
+    ``shape`` turns the page into what the tool returns, when that is not the
+    flat dict — sizes are measured on the result as it will be sent.
 
     The page holds at least one entry, so walking ``next_offset`` always moves.
     An entry too large to fit even on its own has its ``trim`` list fields cut
     to what fits, each marked ``<field>_truncated: true`` on that entry — the
     page must never go out larger than the client will deliver.
     """
+    budget = _result_budget()
     entries = data[key]
     total = len(entries)
     if offset < 0 or offset > total:
@@ -959,7 +1017,7 @@ def _page_entries(
 
     def page(end: int, items: list[Any] | None = None) -> dict[str, Any]:
         more = end < total
-        return {
+        flat = {
             **data,
             key: entries[offset:end] if items is None else items,
             "total": total,
@@ -967,21 +1025,22 @@ def _page_entries(
             "next_offset": end if more else None,
             "truncated": more,
         }
+        return shape(flat) if shape else flat
 
     # Grow by each entry's own cost, then check the real page and back off —
     # measuring the whole page on every step would be quadratic on a long list.
     end, used = offset, _wire_bytes(page(offset))
     while end < stop:
         cost = _wire_bytes(entries[end]) + 32  # nesting indent + separator
-        if end > offset and used + cost > _MCP_RESULT_BUDGET:
+        if end > offset and used + cost > budget:
             break
         used += cost
         end += 1
-    while end > offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
+    while end > offset + 1 and _wire_bytes(page(end)) > budget:
         end -= 1
-    if end == offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
+    if end == offset + 1 and _wire_bytes(page(end)) > budget:
         def fits(candidate: dict[str, Any]) -> bool:
-            return _wire_bytes(page(end, [candidate])) <= _MCP_RESULT_BUDGET
+            return _wire_bytes(page(end, [candidate])) <= budget
 
         return page(end, [_shrink_entry(dict(entries[offset]), fits, trim)])
     return page(end)
@@ -1027,6 +1086,113 @@ def _shrink_entry(
     if not fits(stub):
         stub = {k: v for k, v in stub.items() if k != "title"}
     return stub
+
+
+def _text_units(text: str, budget: int) -> list[str]:
+    """The text as windowable units: its lines, with any line too long to share
+    a window split into pieces. OCR output and minified pages can be one line
+    of hundreds of kilobytes, and a window that must hold at least one unit
+    would otherwise be as large as that line."""
+    piece = max(64, budget // 16)  # a CJK char is ~7 bytes once double-escaped
+    units: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if len(line) <= piece:
+            units.append(line)
+        else:
+            units.extend(line[i : i + piece] for i in range(0, len(line), piece))
+    return units
+
+
+def _window_text(
+    base: dict[str, Any],
+    key: str,
+    text: str,
+    offset: int,
+    limit: int | None,
+    *,
+    head_lines: int = 0,
+    whole_lines: bool = False,
+) -> dict[str, Any]:
+    """One window of ``text`` that fits in a tool result (#315).
+
+    Units are lines (an over-long line is split into pieces), and ``offset`` /
+    ``limit`` count them after the first ``head_lines``, which are repeated at
+    the top of every window — a Markdown table's header and separator, so each
+    window is a table on its own. With no arguments a text that fits comes back
+    whole, exactly as before; one that does not comes back as its first window
+    with ``truncated: true`` and ``next_offset``. A window holds at least one
+    unit, so walking ``next_offset`` always moves.
+
+    ``whole_lines`` keeps every line one unit — a table row split across two
+    windows is no longer a row in either. A row too large for a window on its
+    own is then sent alone and cut, with ``<key>_truncated: true``.
+    """
+    budget = _result_budget()
+    lines = text.splitlines(keepends=True)
+    head = lines[:head_lines]  # never split: the header has to stay a header
+    rest = "".join(lines[head_lines:])
+    body = rest.splitlines(keepends=True) if whole_lines else _text_units(rest, budget)
+    total = len(body)
+    if offset < 0 or offset > total:
+        raise ToolError(
+            f"offset {offset} is outside this text's {total} lines; start at 0, or pass "
+            "the next_offset the previous window returned"
+        )
+    if limit is not None and limit < 1:
+        raise ToolError("limit must be at least 1")
+    stop = total if limit is None else min(total, offset + limit)
+    head_text = "".join(head)
+    marks: dict[str, bool] = {}
+
+    def window(end: int, content: str | None = None) -> dict[str, Any]:
+        more = end < total
+        return {
+            **base,
+            key: head_text + "".join(body[offset:end]) if content is None else content,
+            "total": total,
+            "offset": offset,
+            "next_offset": end if more else None,
+            "truncated": more,
+            **marks,
+        }
+
+    # A header so large that not even one row fits beside it is cut — repeated
+    # unchanged it would make every window too large, limit=1 included. Only
+    # then, and only its longest lines: the separator stays, so each window is
+    # still a Markdown table.
+    first = min(offset + 1, total)
+    if head and _wire_bytes(window(first)) > budget:
+        marks["header_truncated"] = True
+        cut = list(head)
+        editable = range(len(cut) - 1) if len(cut) > 1 else range(len(cut))
+        while _wire_bytes(window(offset, "".join(cut))) > budget // 2:
+            longest = max(editable, key=lambda i: len(cut[i]))
+            line = cut[longest].rstrip("\n")
+            if len(line) <= 8:
+                break
+            cut[longest] = line[: len(line) // 2] + " …|\n"
+        head_text = "".join(cut)
+
+    end, used = offset, _wire_bytes(window(offset))
+    while end < stop:
+        cost = _wire_bytes(body[end]) - 2
+        if end > offset and used + cost > budget:
+            break
+        used += cost
+        end += 1
+    while end > offset + 1 and _wire_bytes(window(end)) > budget:
+        end -= 1
+    result = window(end)
+    if end == offset + 1 and _wire_bytes(result) > budget:
+        marks[f"{key}_truncated"] = True  # measured with the marker on
+        unit, keep = body[offset], len(body[offset])
+        while keep and _wire_bytes(window(end, head_text + unit[:keep])) > budget:
+            keep //= 2
+        result = window(end, head_text + unit[:keep])
+    if _wire_bytes(result) > budget:
+        # Last line, so a window fits by construction whatever made it large.
+        result = _shrink_entry(result, lambda d: _wire_bytes(d) <= budget, ())
+    return result
 
 
 @mcp.tool()
@@ -1088,9 +1254,18 @@ async def doc_sections_batch(doc_id: str, sids: list[str]) -> Any:
 
 
 @mcp.tool()
-async def doc_full(doc_id: str) -> Any:
-    """Full document text — expensive; prefer digest/brief/section first."""
-    return await _doc_get(f"/library/{doc_id}/full")
+async def doc_full(doc_id: str, offset: int = 0, limit: int | None = None) -> Any:
+    """Full document text — expensive; prefer digest/brief/section first.
+
+    A document that fits in one tool result comes back whole. A larger one
+    comes back in windows: `total` lines, `next_offset` where the next window
+    starts (null at the end), `truncated` while more remain — call again with
+    offset=next_offset. `limit` caps the lines per window."""
+    data = await _doc_get(f"/library/{doc_id}/full")
+    if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+        return data
+    base = {k: v for k, v in data.items() if k != "content"}
+    return _window_text(base, "content", data["content"], offset, limit)
 
 
 @mcp.tool()
@@ -1136,16 +1311,86 @@ async def doc_search_sections(doc_id: str, q: str, include_content: bool = False
 
 
 @mcp.tool()
-async def doc_table(doc_id: str, table_id: str, fmt: _TableFormat = "md") -> Any:
-    """Read one extracted table (with numeric column stats). fmt = md | json."""
-    suffix = "/json" if fmt == "json" else ""
-    return await _doc_get(f"/library/{doc_id}/table/{table_id}{suffix}")
+async def doc_table(
+    doc_id: str,
+    table_id: str,
+    fmt: _TableFormat = "md",
+    offset: int = 0,
+    limit: int | None = None,
+) -> Any:
+    """Read one extracted table (with numeric column stats). fmt = md | json.
+
+    A table that fits in one tool result comes back whole; a larger one comes
+    back in row windows — `total` rows, `next_offset` (null at the end),
+    `truncated` while more remain; call again with offset=next_offset. In md
+    every window repeats the header row, so each is a table on its own; in json
+    the window is table.rows."""
+    if fmt == "json":
+        data = await _doc_get(f"/library/{doc_id}/table/{table_id}/json")
+        table = data.get("table") if isinstance(data, dict) else None
+        if not isinstance(table, dict) or not isinstance(table.get("rows"), list):
+            return data
+        meta = {k: v for k, v in table.items() if k != "rows"}
+        flat = {**{k: v for k, v in data.items() if k != "table"}, "rows": table["rows"]}
+        budget = _result_budget()
+
+        def with_meta(m: dict[str, Any], rows: list[Any]) -> int:
+            return _wire_bytes({**flat, "rows": [], "table": {**m, "rows": rows}})
+
+        first_row = table["rows"][offset : offset + 1] if 0 <= offset < len(table["rows"]) else []
+        if with_meta(meta, first_row) > budget:
+            # Header, caption and column stats repeat on every page. Only when
+            # not even one row fits beside them are they cut — first, marked,
+            # so that fewer rows can then make a page fit. A table that fits
+            # keeps all of its metadata.
+            meta = _shrink_entry(dict(meta), lambda m: with_meta(m, []) <= budget // 2, ())
+
+        def nest(page: dict[str, Any]) -> dict[str, Any]:
+            page = dict(page)
+            page["table"] = {**meta, "rows": page.pop("rows")}
+            return page
+
+        return _page_entries(flat, "rows", offset, limit, trim=("cells",), shape=nest)
+    data = await _doc_get(f"/library/{doc_id}/table/{table_id}")
+    if not isinstance(data, dict) or not isinstance(data.get("content"), str):
+        return data
+    base = {k: v for k, v in data.items() if k != "content"}
+    return _window_text(base, "content", data["content"], offset, limit,
+                        head_lines=_table_head_lines(data["content"]), whole_lines=True)
+
+
+def _table_head_lines(markdown: str) -> int:
+    """How many leading lines every window of this table repeats.
+
+    Stored tables open with a title and a blank line (``# Table 3 (page 12)``)
+    before the header row, so the separator is not on the second line: the
+    head runs through the first separator that follows a table row. No such
+    pair — not a Markdown table — repeats nothing.
+    """
+    lines = markdown.splitlines()
+    for i in range(len(lines) - 1):
+        if "|" in lines[i] and _MD_TABLE_SEPARATOR.match(lines[i + 1]):
+            return i + 2
+    return 0
+
+
+#: The line under a Markdown table's header row: | --- | :---: | ---: |
+_MD_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 
 
 @mcp.tool()
-async def doc_chunks(doc_id: str, include_text: bool = False) -> Any:
-    """Return retrieval-friendly chunks for the document (for downstream RAG)."""
-    return await _doc_post(f"/library/{doc_id}/chunks", {"include_text": include_text})
+async def doc_chunks(
+    doc_id: str, include_text: bool = False, offset: int = 0, limit: int | None = None
+) -> Any:
+    """Return retrieval-friendly chunks for the document (for downstream RAG).
+
+    Paged like doc_sections: `total`, `next_offset` (null at the end),
+    `truncated`. With include_text the chunks carry the document's whole text,
+    so a long document takes several pages."""
+    data = await _doc_post(f"/library/{doc_id}/chunks", {"include_text": include_text})
+    if not isinstance(data, dict) or not isinstance(data.get("chunks"), list):
+        return data
+    return _page_entries(data, "chunks", offset, limit)
 
 
 @mcp.tool()
@@ -1184,8 +1429,9 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
     """The manifest, or a projection of it that fits in one tool result (#290)."""
     if not isinstance(manifest, dict):
         return manifest
+    budget = _result_budget()
     fitted = {**manifest, "truncated": False}
-    if _wire_bytes(fitted) <= _MCP_RESULT_BUDGET:
+    if _wire_bytes(fitted) <= budget:
         return fitted
     omitted: list[str] = []
     tables = fitted.get("tables")
@@ -1218,7 +1464,7 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
         f"paged); GET /doc/library/{doc_id}/manifest for the whole manifest"
     )
     # Belt and braces: drop whatever is largest until it fits.
-    while _wire_bytes(fitted) > _MCP_RESULT_BUDGET:
+    while _wire_bytes(fitted) > budget:
         candidates = [k for k in fitted if k not in _MANIFEST_KEEP]
         if not candidates:
             break
@@ -1227,10 +1473,8 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
         omitted.append(largest)
     # And if what identifies the document is itself too long (a filename of
     # any length is accepted), cut its strings the way an oversized entry is.
-    if _wire_bytes(fitted) > _MCP_RESULT_BUDGET:
-        fitted = _shrink_entry(
-            fitted, lambda m: _wire_bytes(m) <= _MCP_RESULT_BUDGET, ()
-        )
+    if _wire_bytes(fitted) > budget:
+        fitted = _shrink_entry(fitted, lambda m: _wire_bytes(m) <= budget, ())
     return fitted
 
 
@@ -1256,7 +1500,27 @@ async def doc_source(
         params["offset"] = offset
     if limit is not None:
         params["limit"] = limit
-    return await _doc_get(f"/library/{doc_id}/source/info", params or None)
+    info = await _doc_get(f"/library/{doc_id}/source/info", params or None)
+    if not params or not isinstance(info, dict) or not isinstance(info.get("text"), str):
+        return info
+    # The server caps a window at 64 KiB of UTF-8, which is not what reaches
+    # the client: a CJK character is three bytes there and about seven on the
+    # wire, so a full window of Chinese came to ~132 KB (#314). Ask again for
+    # fewer lines, scaled by how far over it was, until the window fits.
+    budget = _result_budget()
+    start = int(info.get("offset") or 0)
+    while (size := _wire_bytes(info)) > budget:
+        end = info.get("next_offset") or info.get("total_lines") or start + 1
+        lines = int(end) - start
+        if lines <= 1:
+            break
+        params["limit"] = max(1, min(lines - 1, int(lines * budget / size * 0.95)))
+        info = await _doc_get(f"/library/{doc_id}/source/info", params)
+    if _wire_bytes(info) > budget:
+        # One line too long to fit on its own: cut it, and say so.
+        info = _shrink_entry(dict(info), lambda d: _wire_bytes(d) <= budget, ())
+        info["truncated"] = True
+    return info
 
 
 
@@ -1319,6 +1583,52 @@ class _McpAuthGate:
                 await send({"type": "http.response.body", "body": body})
                 return
         await self.app(scope, receive, send)
+
+
+# ── last line: no tool result goes out larger than the client delivers ─────────
+
+#: What to tell the caller when a tool's result does not fit: a way to ask that
+#: does. Tools that page or window (doc_manifest, doc_sections, doc_tables,
+#: doc_full, doc_table, doc_chunks, doc_source) never get here by construction.
+_OVER_BUDGET_HINTS = {
+    "doc_sections_batch": "pass fewer sids per call",
+    "web_read_sections": "pass fewer section_ids per call",
+    "doc_section": "read this part through doc_full with offset/limit",
+    "doc_search": "pass a lower limit",
+    "doc_search_text": "pass a lower limit",
+    "doc_search_sections": "set include_content=false, or narrow q",
+}
+
+
+def _refuse_what_does_not_fit(name: str, fn: Any) -> Any:
+    """Wrap one tool so a result over the budget is a clear tool error (#315).
+
+    Sent anyway, the client cuts it mid-string — JSON that will not parse, or
+    content that looks complete and is not, with isError false. A refusal that
+    says how to ask instead is the honest answer.
+    """
+
+    @functools.wraps(fn)
+    async def guarded(*args: Any, **kwargs: Any) -> Any:
+        result = await fn(*args, **kwargs)
+        size, budget = _wire_bytes(result), _result_budget()
+        if size > budget:
+            hint = _OVER_BUDGET_HINTS.get(name, "use a paged or windowed tool for this")
+            raise ToolError(
+                f"{name}: the result is {size} bytes on the wire, over the {budget} bytes "
+                "one tool result may carry (MANTISFETCH_MCP_RESULT_BUDGET_BYTES); sent "
+                f"anyway it would be cut off mid-way by the client. Instead, {hint}."
+            )
+        return result
+
+    return guarded
+
+
+# After registration, on the registered tool rather than on each function: the
+# schema the SDK built from the signature stays exactly as it was, and a tool
+# added later is covered without anyone remembering to.
+for _name, _tool in getattr(getattr(mcp, "_tool_manager", None), "_tools", {}).items():
+    _tool.fn = _refuse_what_does_not_fit(_name, _tool.fn)
 
 
 mcp_app = _McpAuthGate(

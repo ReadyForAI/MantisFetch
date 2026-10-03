@@ -360,6 +360,7 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp`, `/web`, `/doc` and `/deliverables` surfaces; without it they are **loopback-only** (non-loopback callers get 403) |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | Extra hosts/origins (comma-separated) for the DNS-rebinding guard on `/mcp` and on token-less loopback `/web` `/doc` requests |
 | `MANTISFETCH_MCP_PARSE_BUDGET_SEC` | `45` | Seconds an MCP `doc_parse` or `web_search_capture` call may take before it answers with what fits (a refusal, or a partial capture). Sized under the MCP client's per-request timeout — NodalOS caps upstream calls at 60 s — because a call that outlives it is dropped as a transport failure, which takes every tool of this server off the client until it reconnects. Raise it only with that cap |
+| `MANTISFETCH_MCP_RESULT_BUDGET_BYTES` | `60000` | How large one MCP tool result may be on the wire (measured ASCII-escaped, as the 2026-07-28 face sends it). Larger results are paged or windowed (`doc_manifest`, `doc_sections`, `doc_tables`, `doc_full`, `doc_table`, `doc_chunks`, `doc_source`), and any other tool over it answers with a tool error saying how to ask instead — never a result the client cuts off mid-way. The default sits under NodalOS's 65,536-byte cut; a deployment whose client has no such limit can raise it. There is no off: 0 or an invalid value means the default |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | Allowlist roots for the MCP `doc_parse` `rel_path` source; unset disables local-path parsing over MCP |
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | Fence root for the read-only `GET /deliverables/{rel_path}` byte face; unset disables it (every request 404s). Must not overlap `MANTISFETCH_DOCS_DIR` or `MANTISFETCH_ALLOWED_DOC_ROOTS` |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | Size cap for a single deliverable download; larger files get 413 |
@@ -719,6 +720,7 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_MCP_TOKEN` | — | `/mcp` 接口的 bearer token；不设置则 `/mcp` 仅 loopback 可达 |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | DNS-rebinding 防护的额外 host/origin（逗号分隔），作用于 `/mcp` 以及不带 token 的 loopback `/web` `/doc` 请求 |
 | `MANTISFETCH_MCP_PARSE_BUDGET_SEC` | `45` | MCP 的 `doc_parse` 与 `web_search_capture` 单次调用的时间上限，到点就用当时能给的结果回复（拒绝，或部分抓取结果）。它要小于 MCP 客户端的单请求超时（NodalOS 对上游调用封顶 60 秒）：超时的调用会被当作传输失败断开，客户端在重连前会丢掉本服务的全部工具。只能和那个上限一起调大 |
+| `MANTISFETCH_MCP_RESULT_BUDGET_BYTES` | `60000` | 单个 MCP 工具结果在线上的体积上限（按 2026-07-28 协议代的 ASCII 转义形态计）。超过的结果会分页或分窗（`doc_manifest`、`doc_sections`、`doc_tables`、`doc_full`、`doc_table`、`doc_chunks`、`doc_source`），其他工具超限则返回说明改用什么方式的工具错误，绝不发出会被客户端半截切断的结果。默认值低于 NodalOS 的 65,536 字节截断线；客户端没有这类上限的部署可以调大。没有关闭选项：0 或无效值都按默认值处理 |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | MCP `doc_parse` `rel_path` source 的 allowlist 根目录；不设置则禁用 MCP 上的本地路径解析 |
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | 只读 `GET /deliverables/{rel_path}` 字节接口的围栏根目录；不设置则禁用（所有请求返回 404）。不得与 `MANTISFETCH_DOCS_DIR` 或 `MANTISFETCH_ALLOWED_DOC_ROOTS` 重叠 |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | 单个交付物下载的大小上限；超出返回 413 |
