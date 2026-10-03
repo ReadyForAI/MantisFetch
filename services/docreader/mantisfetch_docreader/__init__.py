@@ -1273,6 +1273,24 @@ _FTS_BEFORE = ".fts-before.txt"
 _INDEX_BEFORE = ".index-before.json"
 
 
+def _refuse_over_unsettled_stash(doc_dir: Path) -> None:
+    """Refuse a replacement while a stash from an earlier one is still here.
+
+    `_stash_source` starts by deleting whatever stash it finds, and by the time
+    a replacement reaches it the only stash that can be there belongs to a
+    rewrite the startup sweep could not settle — the one copy of a source
+    that recovery is still waiting to put back. Checked before anything in the
+    directory changes, and outside the failure recorders, which would move
+    that stash around themselves.
+    """
+    if (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+        raise HTTPException(
+            500,
+            f"document directory {doc_dir.name} still holds a replacement that could "
+            "not be settled; resolve it (see the startup log) before replacing it again",
+        )
+
+
 def _stash_source(doc_dir: Path) -> None:
     """Move the stored source aside so a failed replacement can put it back.
 
@@ -1301,6 +1319,12 @@ def _restore_stashed_source(doc_dir: Path) -> None:
     source = doc_dir / "source"
     shutil.rmtree(source, ignore_errors=True)
     shutil.move(str(stash), str(source))
+
+
+def _discard_stashed_source_locked(docs_dir: Path, doc_id: str, doc_dir: Path) -> None:
+    """`_discard_stashed_source` under the document's writer lock."""
+    with _document_writer_lock(docs_dir, doc_id):
+        _discard_stashed_source(doc_dir)
 
 
 def _discard_stashed_source(doc_dir: Path) -> None:
@@ -1496,12 +1520,17 @@ def _settle_interrupted_rewrite(
             # Removes the marker itself, and only once nothing is left for it
             # to speak for.
             _discard_stashed_source(doc_dir)
-        elif not backup.exists():
-            # The previous rewrite is fully settled, so its marker has to go —
-            # the caller is about to stage a new one, and a marker left here
-            # would make that rewrite's own backup look committed.
-            with contextlib.suppress(OSError):
-                marker.unlink(missing_ok=True)
+        else:
+            # The caller is about to stage a new rewrite, so the previous one's
+            # marker has to be gone first — left here, it would make the new
+            # backup look committed. Either one that will not go means the old
+            # rewrite is not settled, and the new one must not start.
+            if not backup.exists():
+                with contextlib.suppress(OSError):
+                    marker.unlink(missing_ok=True)
+            if backup.exists() or marker.exists():
+                logger.warning("Left %s staged: the previous commit would not clear", doc_dir)
+                return "incomplete"
         return "committed"
 
     if backup.exists():
@@ -4720,6 +4749,7 @@ def _store_raw_serialized(
         # or a disk error would destroy a document that was perfectly readable a
         # moment ago.
         if will_replace:
+            _refuse_over_unsettled_stash(doc_dir)
             _stash_source(doc_dir)
         with _restore_on_failure(
             doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
@@ -5358,6 +5388,8 @@ async def api_parse_doc(
             # Resolved outside the try so the failure recorders below always have
             # a directory to write into — it is a pure path computation.
             doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
+            if will_replace and STORE_SOURCE_FILES:
+                _refuse_over_unsettled_stash(doc_storage_dir)
             try:
                 tmp_dir = doc_storage_dir / ".tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -5582,6 +5614,13 @@ async def api_parse_doc(
                         ),
                     )
                     if summary_mode == "defer":
+                        # Before the worker exists: it rewrites this document,
+                        # and a stash still here would read as its own — a
+                        # summary rewrite that then died would put the
+                        # previous upload's source back under this one.
+                        await loop.run_in_executor(
+                            None, _discard_stashed_source_locked, docs_dir, d_id, doc_storage_dir
+                        )
                         worker = threading.Thread(
                             target=_generate_deferred_summary,
                             args=(

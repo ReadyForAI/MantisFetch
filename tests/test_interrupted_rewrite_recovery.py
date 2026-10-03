@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import mantisfetch_docreader as dr
@@ -656,3 +657,85 @@ def test_an_unsettled_document_refuses_the_next_rewrite(
     assert (doc / ".rollback" / ".fts-before.txt").exists(), "the repair snapshot was deleted"
     assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert search_fts(docs_dir, "Zarquonium") == ["DOC-7117"]
+
+
+# ── Round 5: no new rewrite starts on top of an unsettled one ─────────────────
+
+
+def _parse(client, content: bytes, doc_id: str, **extra):
+    return client.post(
+        "/parse",
+        files={"file": ("doc.html", content, "text/html")},
+        data={"doc_id": doc_id, "summary_mode": "off", **extra},
+    )
+
+
+def test_a_replacement_is_refused_before_it_touches_a_leftover_stash(
+    docs_dir: Path,
+) -> None:
+    """`_stash_source` deletes the stash it finds — here, the only copy."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _parse(client, b"<p>ORIGINAL</p>", "DOC-7118").status_code == 200
+    doc = docs_dir / "General" / "DOC-7118"
+    stash = doc / ".rollback-source"
+    stash.mkdir()
+    (stash / "doc.html").write_bytes(b"<p>THE ONLY COPY</p>")
+
+    response = _parse(client, b"<p>REPLACEMENT</p>", "DOC-7118", replace="true")
+
+    assert response.status_code == 500
+    assert "could not be settled" in response.text
+    assert (stash / "doc.html").read_bytes() == b"<p>THE ONLY COPY</p>"
+
+
+def test_a_previous_marker_that_will_not_clear_blocks_the_next_rewrite(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7119", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7119"
+    (doc / ".rewrite-committed").touch()
+
+    real_unlink = Path.unlink
+
+    def refuse_the_marker(self, *a, **k):
+        if self.name == ".rewrite-committed":
+            raise OSError("read-only file system")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", refuse_the_marker)
+    with pytest.raises(RuntimeError, match="could not be settled"):
+        with dr._restore_on_failure(
+            doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7119"
+        ):
+            pass
+    monkeypatch.undo()
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
+
+
+def test_the_committed_stash_is_gone_before_the_deferred_summary_starts(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker rewrites the document; a stash it found would read as its own."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _parse(client, b"<p>ORIGINAL</p>", "DOC-7120").status_code == 200
+    doc = docs_dir / "General" / "DOC-7120"
+
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        dr,
+        "_generate_deferred_summary",
+        lambda *a, **k: seen.append((doc / ".rollback-source").exists()),
+    )
+    response = _parse(
+        client, b"<p>REPLACEMENT</p>", "DOC-7120", replace="true", summary_mode="defer"
+    )
+    assert response.status_code == 200
+    for _ in range(100):
+        if seen:
+            break
+        time.sleep(0.02)
+    assert seen == [False], "the deferred rewrite started with the previous stash still here"
