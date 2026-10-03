@@ -777,6 +777,7 @@ async def _parse_slot(
     budget_seconds: float | None,
     t_entry: float,
     estimate: dict[str, Any] | None,
+    queued_since: float | None = None,
 ) -> AsyncGenerator[None, None]:
     """Hold a parse slot, waiting for one within whatever time the caller has.
 
@@ -819,7 +820,10 @@ async def _parse_slot(
                 ) from None
     else:
         ceiling = _parse_queue_max_wait_sec()
-        if ceiling <= 0:
+        # One deadline for the whole queue: time already spent waiting for this
+        # doc_id's lock comes out of the same ceiling.
+        left = ceiling if queued_since is None else ceiling - (time.monotonic() - queued_since)
+        if ceiling <= 0 or left <= 0:
             if _parse_sem.locked():
                 raise HTTPException(
                     429,
@@ -833,7 +837,7 @@ async def _parse_slot(
                 _parse_sem.release()
             return
         try:
-            await asyncio.wait_for(_parse_sem.acquire(), timeout=ceiling)
+            await asyncio.wait_for(_parse_sem.acquire(), timeout=left)
         except TimeoutError:
             raise HTTPException(
                 429,
@@ -846,8 +850,85 @@ async def _parse_slot(
         _parse_sem.release()
 
 
+_WAITING_FOR_SAME_DOC = "another parse of this doc_id to finish"
+
+
+@contextlib.asynccontextmanager
+async def _doc_id_lock_within(
+    lock: asyncio.Lock,
+    *,
+    budget_seconds: float | None,
+    t_entry: float,
+    estimate: dict[str, Any] | None,
+) -> AsyncGenerator[float, None]:
+    """Hold this doc_id's parse lock, waiting no longer than the caller can.
+
+    The lock was taken with a bare ``async with``, ahead of the parse slot and
+    its budget: a call that declared ``budget_seconds`` while an earlier parse
+    of the same doc_id was running waited for that parse however long it took,
+    and then started its own with the budget already gone. The same rules as
+    `_parse_slot` apply, against the same clock — a declared budget bounds the
+    wait (minus what the parse is estimated to need), none means the queue
+    ceiling, and a free lock is never refused on a guess.
+
+    Yields the moment queueing began, so the slot wait after it shares one
+    ceiling instead of starting a second.
+    """
+    queued_since = time.monotonic()
+    if budget_seconds is not None and budget_seconds > 0:
+        spent = queued_since - t_entry
+        reserve = float(estimate["estimated_seconds"]) if estimate else 0.0
+        remaining = budget_seconds - spent - reserve
+        if remaining <= 0:
+            # An unlocked asyncio.Lock acquires without suspending, so the
+            # check and the acquire cannot be split by another task.
+            if lock.locked():
+                raise HTTPException(
+                    422,
+                    _budget_refusal(budget_seconds, spent, estimate, 0.0, _WAITING_FOR_SAME_DOC),
+                )
+            await lock.acquire()
+        else:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=remaining)
+            except TimeoutError:
+                raise HTTPException(
+                    422,
+                    _budget_refusal(
+                        budget_seconds, spent, estimate, remaining, _WAITING_FOR_SAME_DOC
+                    ),
+                ) from None
+    else:
+        ceiling = _parse_queue_max_wait_sec()
+        if ceiling <= 0:
+            if lock.locked():
+                raise HTTPException(
+                    429,
+                    "this doc_id is already being parsed",
+                    headers={"Retry-After": "30"},
+                )
+            await lock.acquire()
+        else:
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=ceiling)
+            except TimeoutError:
+                raise HTTPException(
+                    429,
+                    f"this doc_id is still being parsed by an earlier request after {ceiling:g}s",
+                    headers={"Retry-After": str(math.ceil(min(ceiling, 300)))},
+                ) from None
+    try:
+        yield queued_since
+    finally:
+        lock.release()
+
+
 def _budget_refusal(
-    budget_seconds: float, spent: float, estimate: dict[str, Any] | None, queued: float
+    budget_seconds: float,
+    spent: float,
+    estimate: dict[str, Any] | None,
+    queued: float,
+    waiting_for: str = "a parse slot",
 ) -> dict[str, Any]:
     """The 422 body, saying which half of the budget ran out.
 
@@ -858,7 +939,7 @@ def _budget_refusal(
     body: dict[str, Any] = {
         "error": "parse_budget_exceeded",
         "message": (
-            f"waited {queued:.1f}s for a parse slot without getting one, inside the "
+            f"waited {queued:.1f}s for {waiting_for} without getting it, inside the "
             f"{budget_seconds}s budget this call declared ({spent:.1f}s already spent). "
             f"The document was not parsed. Ingest it through a path that can wait for it."
         ),
@@ -5319,9 +5400,15 @@ async def api_parse_doc(
         d_id, d_id_lock = await _reserve_doc_id(docs_dir, filename, doc_id, id_strategy)
 
         # Lock outside _parse_sem so waiters don't burn a parse slot — otherwise
-        # unrelated documents get 429'd while one same-id queue drains.
-        async with d_id_lock, _parse_slot(
-            budget_seconds=budget_seconds, t_entry=t_entry, estimate=estimate
+        # unrelated documents get 429'd while one same-id queue drains. Both
+        # waits come out of the same budget, or the same queue ceiling.
+        async with _doc_id_lock_within(
+            d_id_lock, budget_seconds=budget_seconds, t_entry=t_entry, estimate=estimate
+        ) as queued_since, _parse_slot(
+            budget_seconds=budget_seconds,
+            t_entry=t_entry,
+            estimate=estimate,
+            queued_since=queued_since,
         ):
             t0 = time.time()
             # Guard against silent overwrite when the caller pins an explicit
