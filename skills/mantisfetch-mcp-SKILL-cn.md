@@ -161,8 +161,9 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
 | `doc_search_sections` | 在单个文档的 sections 内搜索；返回 sid/页码 provenance。 | `doc_id`、`q`、`include_content=false` |
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
+| `doc_tables` | 列出文档的表格（`table_id`、页码、行列数）——即 `doc_table` 要用的 id。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）。 | `doc_id`、`offset=0`、`limit?` |
 | `doc_chunks` | 面向下游 RAG 的检索友好分块。 | `doc_id`、`include_text=false` |
-| `doc_manifest` | provenance manifest（来源、hash、时间戳）。`truncated` 恒在：若某文档的 manifest 放不进一次工具返回，它为 `true`，逐条列表（`sections`、`tables`、`images`、逐页质量明细）被省略并在 `omitted` 中列出，计数仍保留，`table_ids` 列出可传给 `doc_table` 的表格 id。section 列表用 `doc_sections` 读。 | `doc_id` |
+| `doc_manifest` | provenance manifest（来源、hash、时间戳）。`truncated` 恒在：若某文档的 manifest 放不进一次工具返回，它为 `true`，逐条列表（`sections`、`tables`、`images`、逐页质量明细）被省略并在 `omitted` 中列出，计数仍保留，放得下时 `table_ids` 列出可传给 `doc_table` 的表格 id。`doc_sections` 与 `doc_tables`（都分页）能列出全部。 | `doc_id` |
 | `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、单窗口 64 KiB、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 对它 `doc_full` / `doc_section` 都是 404。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
 | `doc_summary` | 文档的三级生成摘要 / 状态。 | `doc_id` |
 

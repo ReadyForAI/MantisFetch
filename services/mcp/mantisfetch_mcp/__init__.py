@@ -931,36 +931,37 @@ async def doc_brief(doc_id: str) -> Any:
     return await _doc_get(f"/library/{doc_id}/brief")
 
 
-@mcp.tool()
-async def doc_sections(doc_id: str, offset: int = 0, limit: int | None = None) -> Any:
-    """List a document's sections (sid + title, plus table_refs naming the
-    tables in each) for targeted retrieval.
+def _page_entries(
+    data: dict[str, Any],
+    key: str,
+    offset: int,
+    limit: int | None,
+    *,
+    trim: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """One page of ``data[key]`` that fits in a tool result (#290).
 
-    Paged so the list always fits in one tool result: `total` is the number of
-    sections, `next_offset` is where the next page starts — null once the list
-    is complete — and `truncated` is true while more remain. Call again with
-    offset=next_offset to read on. `limit` caps the entries per page; the page
-    also stops before it would outgrow a tool result, but always holds at least
-    one entry. Small documents come back whole on the first call."""
-    data = await _doc_get(f"/library/{doc_id}/sections")
-    if not isinstance(data, dict) or not isinstance(data.get("sections"), list):
-        return data
-    sections = data["sections"]
-    total = len(sections)
+    The page holds at least one entry, so walking ``next_offset`` always moves.
+    An entry too large to fit even on its own has its ``trim`` list fields cut
+    to what fits, each marked ``<field>_truncated: true`` on that entry — the
+    page must never go out larger than the client will deliver.
+    """
+    entries = data[key]
+    total = len(entries)
     if offset < 0 or offset > total:
         raise ToolError(
-            f"offset {offset} is outside this document's {total} sections; start at 0, or "
+            f"offset {offset} is outside this document's {total} {key}; start at 0, or "
             "pass the next_offset the previous page returned"
         )
     if limit is not None and limit < 1:
         raise ToolError("limit must be at least 1")
     stop = total if limit is None else min(total, offset + limit)
 
-    def page(end: int) -> dict[str, Any]:
+    def page(end: int, items: list[Any] | None = None) -> dict[str, Any]:
         more = end < total
         return {
             **data,
-            "sections": sections[offset:end],
+            key: entries[offset:end] if items is None else items,
             "total": total,
             "offset": offset,
             "next_offset": end if more else None,
@@ -971,14 +972,60 @@ async def doc_sections(doc_id: str, offset: int = 0, limit: int | None = None) -
     # measuring the whole page on every step would be quadratic on a long list.
     end, used = offset, _wire_bytes(page(offset))
     while end < stop:
-        cost = _wire_bytes(sections[end]) + 32  # nesting indent + separator
+        cost = _wire_bytes(entries[end]) + 32  # nesting indent + separator
         if end > offset and used + cost > _MCP_RESULT_BUDGET:
             break
         used += cost
         end += 1
     while end > offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
         end -= 1
+    if end == offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
+        entry = dict(entries[offset])
+        for field in trim:
+            values = entry.get(field)
+            if not isinstance(values, list) or not values:
+                continue
+            keep = len(values)
+            while keep and _wire_bytes(page(end, [{**entry, field: values[:keep]}])) > _MCP_RESULT_BUDGET:
+                keep //= 2
+            entry[field] = values[:keep]
+            entry[f"{field}_truncated"] = True
+            if _wire_bytes(page(end, [entry])) <= _MCP_RESULT_BUDGET:
+                break
+        return page(end, [entry])
     return page(end)
+
+
+@mcp.tool()
+async def doc_sections(doc_id: str, offset: int = 0, limit: int | None = None) -> Any:
+    """List a document's sections (sid + title, plus table_refs naming the
+    tables in each) for targeted retrieval.
+
+    Paged so the list always fits in one tool result: `total` is the number of
+    sections, `next_offset` is where the next page starts — null once the list
+    is complete — and `truncated` is true while more remain. Call again with
+    offset=next_offset to read on. `limit` caps the entries per page; the page
+    also stops before it would outgrow a tool result, but always holds at least
+    one entry. Small documents come back whole on the first call. A section
+    whose own table_refs would not fit has them cut and table_refs_truncated
+    set; doc_tables lists every table."""
+    data = await _doc_get(f"/library/{doc_id}/sections")
+    if not isinstance(data, dict) or not isinstance(data.get("sections"), list):
+        return data
+    return _page_entries(data, "sections", offset, limit, trim=("table_refs", "image_refs"))
+
+
+@mcp.tool()
+async def doc_tables(doc_id: str, offset: int = 0, limit: int | None = None) -> Any:
+    """List a document's tables (table_id, pages, row/column counts) — the ids
+    to pass to doc_table. Paged exactly like doc_sections: `total`,
+    `next_offset` (null when complete), `truncated`."""
+    manifest = await _doc_get(f"/library/{doc_id}/manifest")
+    if not isinstance(manifest, dict):
+        return manifest
+    tables = manifest.get("tables")
+    data = {"doc_id": doc_id, "tables": tables if isinstance(tables, list) else []}
+    return _page_entries(data, "tables", offset, limit)
 
 
 @mcp.tool()
@@ -1066,8 +1113,8 @@ async def doc_manifest(doc_id: str) -> Any:
     `truncated` is always present. On a document whose manifest would not fit in
     one tool result it is true, and the per-entry lists are left out — named in
     `omitted`, with their counts (section_count, table_count, image_count) still
-    here. `table_ids` lists the ids to pass to doc_table; read the section
-    list with doc_sections (paged)."""
+    here. `table_ids` lists the ids to pass to doc_table when they fit;
+    doc_sections and doc_tables (both paged) list everything."""
     return _fit_manifest(await _doc_get(f"/library/{doc_id}/manifest"), doc_id)
 
 
@@ -1117,8 +1164,8 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
     fitted["truncated"] = True
     fitted["omitted"] = omitted
     fitted["see"] = (
-        "doc_sections for the section list (paged); table_ids (or table_refs on each "
-        f"section) for doc_table; GET /doc/library/{doc_id}/manifest for the whole manifest"
+        "doc_sections for the section list and doc_tables for the table ids (both "
+        f"paged); GET /doc/library/{doc_id}/manifest for the whole manifest"
     )
     # Belt and braces: drop whatever is largest until it fits.
     while _wire_bytes(fitted) > _MCP_RESULT_BUDGET:

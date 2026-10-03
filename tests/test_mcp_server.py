@@ -41,6 +41,7 @@ EXPECTED_TOOLS = {
     "doc_search_text",
     "doc_search_sections",
     "doc_table",
+    "doc_tables",
     "doc_chunks",
     "doc_manifest",
     "doc_source",

@@ -180,3 +180,48 @@ def test_a_projection_keeps_every_table_id_reachable(client, library) -> None:
     manifest = _payload(result)
     assert manifest["truncated"] is True
     assert manifest["table_ids"] == [f"t_{i:04d}" for i in range(100)]
+
+
+def _docx_shape(n_tables: int) -> dict:
+    """Many tables, and section table_refs left empty on purpose (a
+    multi-section DOCX collapses onto page 1)."""
+    doc = _big_document(n_sections=20, n_tables=0)
+    doc["tables"] = [
+        {"table_id": f"table-{i:04d}", "page": 1, "row_count": 3, "column_count": 4}
+        for i in range(n_tables)
+    ]
+    doc["table_count"] = n_tables
+    return doc
+
+
+def test_table_ids_stay_reachable_when_even_the_id_list_does_not_fit(client, library) -> None:
+    """Codex round 2: with 4,000 tables the last-resort pass dropped table_ids,
+    and nothing else listed them. doc_tables pages through all of them."""
+    library["DOC-9291"] = _docx_shape(4000)
+    manifest = _payload(_call(client, "doc_manifest", {"doc_id": "DOC-9291"})[0])
+    assert "doc_tables" in manifest["see"]
+
+    seen: list[str] = []
+    offset = 0
+    while offset is not None:
+        result, size = _call(client, "doc_tables", {"doc_id": "DOC-9291", "offset": offset})
+        assert size < WALL, f"tables page at {offset} is {size} bytes"
+        page = _payload(result)
+        assert page["tables"]
+        seen += [t["table_id"] for t in page["tables"]]
+        offset = page["next_offset"]
+    assert seen == [f"table-{i:04d}" for i in range(4000)]
+
+
+def test_one_section_too_big_for_a_page_has_its_refs_cut_and_says_so(client, library) -> None:
+    """Codex round 2: the at-least-one-entry rule let a single oversized section
+    out at 100 KB, marked truncated: false."""
+    doc = _big_document(n_sections=1, n_tables=0)
+    doc["sections"][0]["table_refs"] = [f"table-{i:04d}" for i in range(4000)]
+    library["DOC-9292"] = doc
+    result, size = _call(client, "doc_sections", {"doc_id": "DOC-9292"})
+
+    assert size < WALL, f"{size} bytes"
+    entry = _payload(result)["sections"][0]
+    assert entry["table_refs_truncated"] is True
+    assert 0 < len(entry["table_refs"]) < 4000
