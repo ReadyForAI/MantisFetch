@@ -1495,6 +1495,22 @@ def _gone(path: Path) -> bool:
     return not path.exists()
 
 
+def _forget_staging_then_remove(backup: Path) -> None:
+    """Delete a finished rollback's backup, staging record first.
+
+    The tree goes in whatever order rmtree walks it. Die after the search-text
+    snapshot is gone but with `.staged.json` still there, and the next sweep
+    reads "staging finished, no snapshot" as "this document had no indexed
+    text" — and deletes the row it has just put back. With the record gone
+    first, an interrupted delete reads as an unfinished staging instead, which
+    puts back nothing that is already in place and leaves the search text
+    alone.
+    """
+    with contextlib.suppress(OSError):
+        (backup / _STAGED_MANIFEST).unlink(missing_ok=True)
+    _gone(backup)
+
+
 def _put_back_staged(doc_dir: Path, backup: Path, names: list[str]) -> None:
     """Undo one rewrite's staging: every staged name back the way it was.
 
@@ -1701,7 +1717,7 @@ def _settle_interrupted_rewrite(
                 "Left %s staged: its indexed text could not be put back", doc_dir
             )
             return "incomplete"
-        _gone(backup)
+        _forget_staging_then_remove(backup)
     if include_stash:
         _restore_stashed_source(doc_dir)
     return "rolled_back"
@@ -1762,8 +1778,13 @@ def _restore_on_failure(
 
     def _put_back() -> None:
         _put_back_staged(doc_dir, backup, moved + copied)
-        shutil.rmtree(backup, ignore_errors=True)
+        # The text before the backup goes, and the backup goes staging record
+        # first (see _forget_staging_then_remove). If the restore below fails
+        # — it only logs — the row keeps the replacement's text, and a later
+        # sweep leaves it rather than deleting it: a stale entry is repairable
+        # by the next write, a missing one is not noticed by anyone.
         _restore_search_index(docs_dir, doc_id, fts_before)
+        _forget_staging_then_remove(backup)
 
     try:
         if doc_dir.exists():

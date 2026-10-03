@@ -858,3 +858,59 @@ def test_a_marker_that_will_not_clear_stops_the_stash_before_it_moves_anything(
 
     assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
     assert not (doc / ".rollback-source").exists()
+
+
+def _a_rollback_delete_that_dies_after_the_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rmtree of a backup that removes `.fts-before.txt` and then stops — the
+    process dying partway through the delete."""
+    import shutil as shutil_module
+
+    real_rmtree = shutil_module.rmtree
+
+    def dies_partway(path, *a, **k):
+        if Path(path).name == ".rollback":
+            (Path(path) / ".fts-before.txt").unlink(missing_ok=True)
+            return None
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(dr.shutil, "rmtree", dies_partway)
+
+
+def test_a_sweep_that_dies_deleting_its_backup_keeps_the_search_text(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7126", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7126"
+    assert _child(docs_dir, "DOC-7126", "_update_doc_index") == 73
+
+    _a_rollback_delete_that_dies_after_the_snapshot(monkeypatch)
+    dr._finish_interrupted_rewrites(docs_dir)
+    monkeypatch.undo()
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7126"]
+
+    dr._finish_interrupted_rewrites(docs_dir)  # the next start
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7126"], (
+        "the second sweep deleted the search text the first one put back"
+    )
+    assert not (doc / ".rollback").exists()
+
+
+def test_an_in_process_rollback_that_dies_deleting_its_backup_keeps_the_search_text(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7127", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7127"
+
+    _a_rollback_delete_that_dies_after_the_snapshot(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with dr._restore_on_failure(
+            doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7127"
+        ):
+            raise RuntimeError("the rewrite fails")
+    monkeypatch.undo()
+
+    dr._finish_interrupted_rewrites(docs_dir)  # the next start
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7127"], (
+        "the sweep deleted the search text the in-process rollback put back"
+    )
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
