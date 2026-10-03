@@ -355,6 +355,11 @@ class SearchAndCaptureRequest(BaseModel):
     lang: str = DEFAULT_LANG
     freshness: str | None = None
     provider: str | None = None  # None → default provider/chain; else target one addressable provider
+    # Wall-clock seconds the caller can wait, counted from arrival. None keeps
+    # the call unbounded. With a budget, hits that no longer fit are returned
+    # in ``uncaptured`` instead of attempted, and each capture gets a fair
+    # share of what is left, so one dead origin cannot spend all of it.
+    budget_seconds: float | None = Field(default=None, gt=0)
 
 
 class CapturedItem(BaseModel):
@@ -382,6 +387,20 @@ class SkippedItem(BaseModel):
     rank: int
 
 
+class UncapturedItem(BaseModel):
+    """A search hit the budget left no time to attempt — a plain search result.
+
+    Distinct from ``SkippedItem``, which was attempted and failed. title and
+    snippet are untrusted content; the MCP layer wraps them per hit.
+    """
+
+    url: str
+    title: str | None = None
+    snippet: str = ""
+    rank: int
+    reason: str = "budget_exhausted"
+
+
 class SearchAndCaptureResponse(BaseModel):
     """Response from POST /search_and_capture."""
 
@@ -390,3 +409,4 @@ class SearchAndCaptureResponse(BaseModel):
     captured: list[CapturedItem]
     skipped: list[SkippedItem]
     searched_at: str
+    uncaptured: list[UncapturedItem] = []

@@ -359,6 +359,7 @@ MantisFetch is configured entirely through environment variables. See the table 
 | `MANTISFETCH_TLS_KEYFILE` | — | TLS private key path (paired with `MANTISFETCH_TLS_CERTFILE`) |
 | `MANTISFETCH_MCP_TOKEN` | — | Bearer token for the `/mcp`, `/web`, `/doc` and `/deliverables` surfaces; without it they are **loopback-only** (non-loopback callers get 403) |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | Extra hosts/origins (comma-separated) for the DNS-rebinding guard on `/mcp` and on token-less loopback `/web` `/doc` requests |
+| `MANTISFETCH_MCP_PARSE_BUDGET_SEC` | `45` | Seconds an MCP `doc_parse` or `web_search_capture` call may take before it answers with what fits (a refusal, or a partial capture). Sized under the MCP client's per-request timeout — NodalOS caps upstream calls at 60 s — because a call that outlives it is dropped as a transport failure, which takes every tool of this server off the client until it reconnects. Raise it only with that cap |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | Allowlist roots for the MCP `doc_parse` `rel_path` source; unset disables local-path parsing over MCP |
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | Fence root for the read-only `GET /deliverables/{rel_path}` byte face; unset disables it (every request 404s). Must not overlap `MANTISFETCH_DOCS_DIR` or `MANTISFETCH_ALLOWED_DOC_ROOTS` |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | Size cap for a single deliverable download; larger files get 413 |
@@ -717,6 +718,7 @@ MantisFetch 所有配置均通过环境变量管理。LLM 相关配置见上方 
 | `MANTISFETCH_TLS_KEYFILE` | — | TLS 私钥路径（与 `MANTISFETCH_TLS_CERTFILE` 配对） |
 | `MANTISFETCH_MCP_TOKEN` | — | `/mcp` 接口的 bearer token；不设置则 `/mcp` 仅 loopback 可达 |
 | `MANTISFETCH_MCP_ALLOWED_HOSTS` | — | DNS-rebinding 防护的额外 host/origin（逗号分隔），作用于 `/mcp` 以及不带 token 的 loopback `/web` `/doc` 请求 |
+| `MANTISFETCH_MCP_PARSE_BUDGET_SEC` | `45` | MCP 的 `doc_parse` 与 `web_search_capture` 单次调用的时间上限，到点就用当时能给的结果回复（拒绝，或部分抓取结果）。它要小于 MCP 客户端的单请求超时（NodalOS 对上游调用封顶 60 秒）：超时的调用会被当作传输失败断开，客户端在重连前会丢掉本服务的全部工具。只能和那个上限一起调大 |
 | `MANTISFETCH_ALLOWED_DOC_ROOTS` | — | MCP `doc_parse` `rel_path` source 的 allowlist 根目录；不设置则禁用 MCP 上的本地路径解析 |
 | `MANTISFETCH_DELIVERABLES_ROOT` | — | 只读 `GET /deliverables/{rel_path}` 字节接口的围栏根目录；不设置则禁用（所有请求返回 404）。不得与 `MANTISFETCH_DOCS_DIR` 或 `MANTISFETCH_ALLOWED_DOC_ROOTS` 重叠 |
 | `MANTISFETCH_DELIVERABLES_MAX_MB` | `200` | 单个交付物下载的大小上限；超出返回 413 |

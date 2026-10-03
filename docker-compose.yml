@@ -18,6 +18,9 @@ services:
       # which guards /mcp and the token-less loopback path of /web and /doc.
       MANTISFETCH_MCP_TOKEN: ${MANTISFETCH_MCP_TOKEN:-}
       MANTISFETCH_MCP_ALLOWED_HOSTS: ${MANTISFETCH_MCP_ALLOWED_HOSTS:-}
+      # Seconds an MCP doc_parse / web_search_capture call may take; keep it under
+      # the MCP client's per-request timeout (NodalOS: 60s).
+      MANTISFETCH_MCP_PARSE_BUDGET_SEC: ${MANTISFETCH_MCP_PARSE_BUDGET_SEC:-45}
       # TLS (opt-in): set these in .env to serve https. Bearer over an encrypted
       # line (#702: https + bearer, no mTLS client cert). Unset → plain http.
       MANTISFETCH_TLS_CERTFILE: ${MANTISFETCH_TLS_CERTFILE:-}
