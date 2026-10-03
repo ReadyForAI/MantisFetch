@@ -191,3 +191,20 @@ async def test_the_mcp_tool_always_sends_its_budget_and_wraps_uncaptured_hits(
     for field in ("title", "snippet"):
         assert hit[field].startswith("⟦mantisfetch:web-content")
         assert "origin=" in hit[field]
+
+
+async def test_a_throttle_queue_longer_than_the_budget_is_refused_at_once(monkeypatch) -> None:
+    """Codex round 1: the throttle slept out its queue before the deadline was
+    looked at — 0.6 s of queue on a 0.1 s budget answered after 0.6 s."""
+    monkeypatch.setenv("MANTISFETCH_SEARCH_MIN_INTERVAL_SEC", "0.6")
+    lb._next_search_allowed = {"fake": time.monotonic() + 0.6}
+
+    response, took = await _post(
+        {"query": "q", "budget_seconds": 0.1}, _Provider(), _capture_taking({}, [], [])
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["error"] == "search_budget_exceeded"
+    assert took < 0.3, f"answered after {took:.2f}s on a 0.1s budget"
+    # Refused without taking a turn: the queue is exactly as it was.
+    assert lb._next_search_allowed["fake"] - time.monotonic() < 0.6
