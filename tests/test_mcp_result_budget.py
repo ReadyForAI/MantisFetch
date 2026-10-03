@@ -225,3 +225,28 @@ def test_one_section_too_big_for_a_page_has_its_refs_cut_and_says_so(client, lib
     entry = _payload(result)["sections"][0]
     assert entry["table_refs_truncated"] is True
     assert 0 < len(entry["table_refs"]) < 4000
+
+
+def test_a_table_entry_with_a_long_block_list_is_listed_without_it(client, library) -> None:
+    """Codex round 3: an OCR table's ocr_block_refs grow with the table, and a
+    single such entry went out at 92 KB."""
+    doc = _docx_shape(1)
+    doc["tables"][0]["ocr_block_refs"] = [f"p1-b{i:05d}" for i in range(4000)]
+    library["DOC-9293"] = doc
+    result, size = _call(client, "doc_tables", {"doc_id": "DOC-9293"})
+
+    assert size < WALL, f"{size} bytes"
+    entry = _payload(result)["tables"][0]
+    assert entry["table_id"] == "table-0000" and "ocr_block_refs" not in entry
+
+
+def test_a_projected_web_capture_keeps_its_counts(client, library) -> None:
+    """Codex round 3: a capture's manifest has sections and tables but no
+    *_count fields, so dropping the lists dropped the only record of how many."""
+    doc = _big_document()
+    for key in ("section_count", "table_count", "image_count"):
+        del doc[key]
+    library["WEB-9294"] = doc
+    manifest = _payload(_call(client, "doc_manifest", {"doc_id": "WEB-9294"})[0])
+    assert manifest["truncated"] is True
+    assert (manifest["section_count"], manifest["table_count"]) == (500, 100)

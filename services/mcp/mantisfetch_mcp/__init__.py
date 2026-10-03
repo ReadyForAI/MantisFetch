@@ -1024,8 +1024,21 @@ async def doc_tables(doc_id: str, offset: int = 0, limit: int | None = None) -> 
     if not isinstance(manifest, dict):
         return manifest
     tables = manifest.get("tables")
-    data = {"doc_id": doc_id, "tables": tables if isinstance(tables, list) else []}
-    return _page_entries(data, "tables", offset, limit)
+    # The discovery fields only: an OCR-derived table also carries a list of
+    # layout block references that grows with the table, and doc_table is
+    # where the detail lives.
+    listed = [
+        {k: t[k] for k in _TABLE_LISTING_FIELDS if k in t}
+        for t in (tables if isinstance(tables, list) else [])
+        if isinstance(t, dict)
+    ]
+    return _page_entries({"doc_id": doc_id, "tables": listed}, "tables", offset, limit)
+
+
+_TABLE_LISTING_FIELDS = (
+    "table_id", "type", "source", "page", "page_start", "page_end",
+    "row_count", "column_count", "has_header", "continued_from", "continued_to",
+)
 
 
 @mcp.tool()
@@ -1145,6 +1158,10 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
     tables = fitted.get("tables")
     for key in _MANIFEST_DROP_FIRST:
         if key in fitted:
+            # Counts survive the drop. A parsed document's manifest carries them
+            # already; a web capture's does not, so derive them first.
+            if isinstance(fitted[key], list):
+                fitted.setdefault(f"{key[:-1]}_count", len(fitted[key]))
             del fitted[key]
             omitted.append(key)
     if isinstance(tables, list) and tables:
