@@ -260,3 +260,37 @@ def test_a_stash_that_never_settles_is_given_up_on(
     ) is None
     assert (doc / "digest.md").read_bytes() == digest_before
     assert not (doc / ".rewrite-committed").exists()
+
+
+def test_waiting_on_one_document_does_not_hold_a_summary_slot(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 2. The worker's "running" placeholder is written while it
+    holds a summary slot; waiting there for one document's replacement stalled
+    every other document's summary, with no LLM call running."""
+    real_worker = dr._generate_deferred_summary
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    captured: list = []
+    monkeypatch.setattr(dr, "_generate_deferred_summary", lambda *a, **k: captured.append(a))
+    assert client.post(
+        "/parse", files={"file": ("doc.html", b"<p>ORIGINAL</p>", "text/html")},
+        data={"doc_id": DOC, "summary_mode": "defer"},
+    ).status_code == 200
+    monkeypatch.setattr(dr, "_DEFERRED_WRITE_POLL_SEC", 0.05, raising=False)
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(dr, "_deferred_summary_sem", sem)
+    monkeypatch.setattr(dr, "generate_summaries", lambda *a, **k: ("A digest", "A brief", None))
+    doc = docs_dir / "General" / DOC
+    (doc / ".rollback-source").mkdir()  # a replacement of A is in flight
+
+    worker = threading.Thread(target=real_worker, args=captured[0], daemon=True)
+    worker.start()
+
+    assert sem.acquire(timeout=2), "document A's wait is holding the only summary slot"
+    sem.release()
+    assert worker.is_alive(), "A's result should still be waiting for its replacement"
+
+    (doc / ".rollback-source").rmdir()  # the replacement rolled back
+    worker.join(10)
+    assert not worker.is_alive()
+    assert "A digest" in (doc / "digest.md").read_text(encoding="utf-8")
