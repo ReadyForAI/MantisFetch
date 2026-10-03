@@ -1424,7 +1424,7 @@ def _rewrite_committed(
         snapshot = json.loads((backup / _INDEX_BEFORE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    if not isinstance(snapshot, dict):
+    if not isinstance(snapshot, dict) or snapshot == _INDEX_UNKNOWN:
         return False
     try:
         from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
@@ -1471,7 +1471,9 @@ def _settle_interrupted_rewrite(
     stash it would find is the live one. Only the startup sweep, which runs
     before any request, sees a stash that can only be a leftover.
 
-    Returns "committed", "rolled_back", or None when there was nothing to do.
+    Returns "committed", "rolled_back", "incomplete" — settled as far as it
+    safely could, evidence kept for the next attempt — or None when there was
+    nothing to do.
     """
     backup = doc_dir / _ROLLBACK_DIR
     stash = doc_dir / _SOURCE_ROLLBACK_DIR
@@ -1487,7 +1489,8 @@ def _settle_interrupted_rewrite(
             with contextlib.suppress(OSError):
                 marker.touch()
             if not marker.exists():
-                return None  # not recorded: leave everything exactly as it is
+                logger.warning("Left %s staged: its commit could not be recorded", doc_dir)
+                return "incomplete"
         _gone(backup)
         if include_stash:
             # Removes the marker itself, and only once nothing is left for it
@@ -1503,12 +1506,24 @@ def _settle_interrupted_rewrite(
 
     if backup.exists():
         staged: list[str] | None = None
-        try:
-            recorded = json.loads((backup / _STAGED_MANIFEST).read_text(encoding="utf-8"))
+        manifest_path = backup / _STAGED_MANIFEST
+        if manifest_path.exists():
+            try:
+                recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                # There and unreadable is not the same as never written. Taking
+                # it for an interrupted staging would restore only the moved
+                # artifacts, leave the copied ones from the replacement in
+                # place, and then delete the backup holding the rest.
+                logger.warning(
+                    "Left %s staged: its staging record could not be read: %s", doc_dir, exc
+                )
+                return "incomplete"
             if isinstance(recorded, dict) and isinstance(recorded.get("staged"), list):
                 staged = [n for n in recorded["staged"] if isinstance(n, str)]
-        except (OSError, ValueError):
-            staged = None
+            else:
+                logger.warning("Left %s staged: its staging record is not usable", doc_dir)
+                return "incomplete"
         staging_finished = staged is not None
         if staged is None:
             # Staging never finished, so nothing new has been written yet.
@@ -1535,7 +1550,7 @@ def _settle_interrupted_rewrite(
             logger.warning(
                 "Left %s staged: its indexed text could not be put back", doc_dir
             )
-            return "rolled_back"
+            return "incomplete"
         _gone(backup)
     if include_stash:
         _restore_stashed_source(doc_dir)
@@ -1574,9 +1589,21 @@ def _restore_on_failure(
     # Not a blind rmtree: scaffolding already here belongs to a rewrite an
     # earlier process did not finish, and it may be the only copy of the
     # document's previous version. Settle it first, then start.
-    _settle_interrupted_rewrite(
-        doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=False
-    )
+    if (
+        _settle_interrupted_rewrite(
+            doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=False
+        )
+        == "incomplete"
+    ):
+        # Settling kept the backup because something it needed would not read
+        # or would not write. Staging over it would delete that evidence and
+        # leave nothing to repair the document from, so this rewrite is the
+        # one that gives way: a refused write is recoverable, a lost previous
+        # version is not.
+        raise RuntimeError(
+            f"{doc_dir} still holds a rewrite that could not be settled; "
+            "resolve it before writing this document again"
+        )
     shutil.rmtree(backup, ignore_errors=True)
     moved: list[str] = []
     copied: list[str] = []
@@ -1597,7 +1624,7 @@ def _restore_on_failure(
             # entry" is an answer, and a first write that commits and then dies
             # before its marker has to be recognisable as committed. Absent and
             # empty are different things here.
-            _write_json(backup / _INDEX_BEFORE, index_before or {})
+            _write_json(backup / _INDEX_BEFORE, index_before)
             names = list(_REGENERATED_TREES) + list(_REGENERATED_FILES)
             if include_extracted:
                 names += list(_EXTRACTED_TREES) + list(_EXTRACTED_FILES)
@@ -1646,17 +1673,29 @@ def _restore_on_failure(
             (doc_dir / _REWRITE_COMMITTED).unlink(missing_ok=True)
 
 
-def _read_index_entry(docs_dir: Path | None, doc_id: str | None) -> dict[str, Any] | None:
-    """The document's index row as it stands, or None if there is none to read."""
+#: What the staging snapshot says when the index could not be read at all.
+#: Distinct from `{}`, which says the document had no row — a snapshot that
+#: cannot be compared must not be read as one that compared equal.
+_INDEX_UNKNOWN = {"snapshot": "unavailable"}
+
+
+def _read_index_entry(docs_dir: Path | None, doc_id: str | None) -> dict[str, Any]:
+    """The document's index row, `{}` for no row, or `_INDEX_UNKNOWN` if unread.
+
+    The three are different answers and the recovery decision turns on which
+    one it got: a row that still carries the snapshot's write_id is a commit
+    that never landed, no row at all is a first write, and a read that failed
+    settles nothing — the only safe reading of it is to roll back.
+    """
     if not docs_dir or not doc_id:
-        return None
+        return {}
     try:
         from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
 
-        return get_document(docs_dir, doc_id)
-    except Exception as exc:  # pragma: no cover - defensive
+        return get_document(docs_dir, doc_id) or {}
+    except Exception as exc:  # noqa: BLE001 - recorded as unknown, not as absent
         logger.warning("Could not read the index entry for %s: %s", doc_id, exc)
-        return None
+        return dict(_INDEX_UNKNOWN)
 
 
 def _read_search_index(docs_dir: Path | None, doc_id: str | None) -> str | None:
@@ -3102,8 +3141,10 @@ def _reset_interrupted_summaries(docs_dir: Path) -> int:
     return reset
 
 
-def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int]:
-    """Settle every rewrite a previous process died inside; (rolled_back, committed).
+def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int, int]:
+    """Settle every rewrite a previous process died inside.
+
+    Returns (rolled_back, committed, incomplete).
 
     Found by walking the library for the scaffolding itself rather than from
     the index: a rewrite that was interrupted before its commit has an index
@@ -3112,7 +3153,7 @@ def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int]:
     leftovers. The directory holding them is the document's own, and its name
     is the doc_id — the same thing `_resolve_doc_dir` would hand back.
     """
-    rolled_back = committed = 0
+    rolled_back = committed = incomplete = 0
     seen: set[Path] = set()
     for parent, dirnames, filenames in os.walk(docs_dir):
         here = Path(parent)
@@ -3137,6 +3178,8 @@ def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int]:
             rolled_back += 1
         elif outcome == "committed":
             committed += 1
+        elif outcome == "incomplete":
+            incomplete += 1
     if rolled_back:
         from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
 
@@ -3144,12 +3187,12 @@ def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int]:
         # the JSON export is rebuilt from the database and may have been.
         with contextlib.suppress(Exception):
             dis.export_json(docs_dir)
-    return rolled_back, committed
+    return rolled_back, committed, incomplete
 
 
 async def _startup_finish_interrupted_rewrites() -> None:
     try:
-        rolled_back, committed = await asyncio.to_thread(
+        rolled_back, committed, incomplete = await asyncio.to_thread(
             _finish_interrupted_rewrites, _get_docs_dir()
         )
     except Exception as exc:  # noqa: BLE001 - never block startup on this
@@ -3161,6 +3204,14 @@ async def _startup_finish_interrupted_rewrites() -> None:
             "%d rolled back, %d finished committing",
             rolled_back,
             committed,
+        )
+    if incomplete:
+        # Loud, and left alone: these documents keep their scaffolding, refuse
+        # further writes, and need the disk or the database looked at.
+        logger.error(
+            "%d document(s) hold a rewrite that could not be settled; "
+            "they will refuse further writes until it is resolved",
+            incomplete,
         )
 
 

@@ -109,8 +109,8 @@ def test_a_rewrite_killed_before_its_commit_is_undone_on_the_next_start(
     assert _child(docs_dir, "DOC-7001", "_update_doc_index") == 73
     assert (doc / ".rollback").exists(), "the child did not reach the staged state"
 
-    rolled_back, committed = dr._finish_interrupted_rewrites(docs_dir)
-    assert (rolled_back, committed) == (1, 0)
+    rolled_back, committed, incomplete = dr._finish_interrupted_rewrites(docs_dir)
+    assert (rolled_back, committed, incomplete) == (1, 0, 0)
 
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
     assert "REPLACEMENT" not in (doc / "full.md").read_text(encoding="utf-8")
@@ -133,8 +133,8 @@ def test_a_rewrite_killed_after_its_commit_keeps_the_new_version(docs_dir: Path)
     assert (doc / ".rewrite-committed").exists(), "the commit marker was never written"
     assert (doc / ".rollback-source").exists(), "the child did not reach the stashed state"
 
-    rolled_back, committed = dr._finish_interrupted_rewrites(docs_dir)
-    assert (rolled_back, committed) == (0, 1)
+    rolled_back, committed, incomplete = dr._finish_interrupted_rewrites(docs_dir)
+    assert (rolled_back, committed, incomplete) == (0, 1, 0)
 
     assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
     assert not (doc / ".rollback-source").exists()
@@ -151,7 +151,7 @@ def test_a_stashed_source_alone_goes_back_when_nothing_committed(docs_dir: Path)
     (doc / "source").mkdir(parents=True, exist_ok=True)
     (doc / "source" / "new.html").write_bytes(b"<p>REPLACEMENT</p>")
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
     assert not (doc / "source" / "new.html").exists()
     assert not (doc / ".rollback-source").exists()
@@ -163,19 +163,19 @@ def test_a_marker_left_without_scaffolding_is_just_cleared(docs_dir: Path) -> No
     doc = docs_dir / "General" / "DOC-7004"
     (doc / ".rewrite-committed").touch()
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert not (doc / ".rewrite-committed").exists()
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
 
 
 def test_the_sweep_is_idempotent_and_leaves_a_settled_library_alone(docs_dir: Path) -> None:
     _write(docs_dir, "DOC-7005", "ORIGINAL")
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0, 0)
 
     assert _child(docs_dir, "DOC-7005", "_update_doc_index") == 73
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0)
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0, 0)
     doc = docs_dir / "General" / "DOC-7005"
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
 
@@ -220,7 +220,7 @@ def test_staging_interrupted_halfway_puts_back_only_what_moved(docs_dir: Path) -
     (backup / ".cache").mkdir()
     (backup / ".cache" / "search_full.lower.txt").write_text("old", encoding="utf-8")
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert json.loads((doc / "sections.json").read_text(encoding="utf-8"))
     assert (cache / "ocr_p0001.abc.txt").read_text(encoding="utf-8") == "a page nothing staged"
     assert not backup.exists()
@@ -245,7 +245,7 @@ def test_a_restore_interrupted_halfway_can_be_resumed(docs_dir: Path) -> None:
     assert (doc / "sections.json").exists()
     assert not (backup / "sections.json").exists()
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert (doc / "sections.json").exists(), "the resumed sweep deleted what it had restored"
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
 
@@ -279,7 +279,7 @@ def test_a_commit_with_no_marker_is_still_read_as_committed(docs_dir: Path) -> N
         docs_dir, doc, "digest REPLACEMENT", manifest["provenance"]["content_hash"]
     )
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8"), (
         "a committed rewrite was rolled back under the index"
     )
@@ -303,7 +303,7 @@ def test_a_commit_that_did_not_change_the_content_is_still_a_commit(
         docs_dir, doc, "a freshly written digest", was["provenance"]["content_hash"]
     )
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
 
 
@@ -322,7 +322,7 @@ def test_a_commit_with_no_content_hash_at_all_is_still_a_commit(
 
     _commit_the_index_the_child_never_reached(docs_dir, doc, "digest REPLACEMENT", "")
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
 
 
@@ -345,7 +345,7 @@ def test_a_status_update_on_the_row_is_not_mistaken_for_a_commit(
     row["summary_status"] = "completed"
     upsert_document(docs_dir, row)
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
     assert (doc / "sections.json").exists()
 
@@ -381,7 +381,7 @@ def test_a_stash_that_will_not_move_keeps_its_marker(
     assert (doc / ".rewrite-committed").exists(), "the marker went while the stash stayed"
 
     # The next start settles it, and the committed source is the one that survives.
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert (doc / "source" / "new.html").read_bytes() == b"<p>REPLACEMENT</p>"
 
 
@@ -399,7 +399,7 @@ def test_staging_interrupted_before_its_snapshot_leaves_the_text_searchable(
 
     (doc / ".rollback").mkdir()  # created, nothing written into it yet
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert search_fts(docs_dir, "Zarquonium") == ["DOC-7104"], (
         "the sweep dropped a search row it had no snapshot for"
     )
@@ -435,7 +435,7 @@ def test_the_committed_verdict_is_written_down_before_its_evidence_goes(
     monkeypatch.undo()
 
     assert (doc / ".rewrite-committed").exists(), "the verdict was not recorded"
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert (doc / "source" / "new.html").read_bytes() == b"<p>REPLACEMENT</p>"
 
 
@@ -478,7 +478,7 @@ def test_a_marker_the_last_write_could_not_clear_does_not_condemn_the_next(
     # The next rewrite stages, then dies before its own commit.
     assert _child(docs_dir, "DOC-7110", "_update_doc_index") == 73
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8"), (
         "the stale marker finalized a rewrite that never committed"
     )
@@ -542,7 +542,7 @@ def test_a_first_write_that_commits_is_not_rolled_back(docs_dir: Path) -> None:
     dr._write_json(backup / ".index-before.json", {})
     dr._write_json(backup / ".staged.json", {"staged": []})
 
-    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1, 0)
     assert search_fts(docs_dir, "Zarquonium") == ["DOC-7112"], (
         "a committed first write lost its searchable text"
     )
@@ -562,10 +562,97 @@ def test_a_search_index_that_will_not_write_keeps_the_backup_for_a_retry(
         raise RuntimeError("the search table will not take it")
 
     monkeypatch.setattr(dis, "upsert_fts", refuse_the_write)
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0, 1)
     monkeypatch.undo()
 
     assert (doc / ".rollback").exists(), "nothing is left to retry from"
-    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
     assert search_fts(docs_dir, "Zarquonium") == ["DOC-7113"]
     assert not (doc / ".rollback").exists()
+
+
+# ── A read that failed is not a read that found nothing ───────────────────────
+
+
+def test_an_index_that_could_not_be_read_at_staging_settles_nothing(
+    docs_dir: Path,
+) -> None:
+    """An unread snapshot used to be written as "no row".
+
+    The existing row's write_id then compared unequal to the missing one, and
+    a replacement that died before committing was finalized — the backup with
+    the only copy of the original deleted.
+    """
+    _write(docs_dir, "DOC-7114", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7114"
+    assert _child(docs_dir, "DOC-7114", "_update_doc_index") == 73
+    # What staging records when the index read fails.
+    dr._write_json(doc / ".rollback" / ".index-before.json", dr._INDEX_UNKNOWN)
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
+    assert (doc / "sections.json").exists()
+
+
+def test_staging_records_an_unreadable_index_as_unknown(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7115", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7115"
+    import mantisfetch_common.doc_index_store as dis
+
+    def the_index_will_not_read(*a, **k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(dis, "get_document", the_index_will_not_read)
+    with dr._restore_on_failure(doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7115"):
+        recorded = json.loads((doc / ".rollback" / ".index-before.json").read_text(encoding="utf-8"))
+    assert recorded == dr._INDEX_UNKNOWN, "an unread index was recorded as an absent row"
+
+
+def test_a_staging_record_that_will_not_read_leaves_the_backup_alone(
+    docs_dir: Path,
+) -> None:
+    """There and unreadable is not "staging never finished".
+
+    Taken for an interrupted staging, the sweep restored only the moved
+    artifacts, left the replacement's full.md in place, and deleted the backup
+    holding the original one.
+    """
+    _write(docs_dir, "DOC-7116", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7116"
+    assert _child(docs_dir, "DOC-7116", "_update_doc_index") == 73
+    (doc / ".rollback" / ".staged.json").write_text("{not json", encoding="utf-8")
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 0, 1)
+    assert (doc / ".rollback" / "full.md").exists(), "the backup holding the original went"
+
+
+def test_an_unsettled_document_refuses_the_next_rewrite(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staging over evidence the sweep chose to keep would destroy it.
+
+    A refused write is recoverable; the snapshot needed to repair the
+    document's search text, once deleted, is not.
+    """
+    _write(docs_dir, "DOC-7117", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7117"
+    assert _child(docs_dir, "DOC-7117", "_update_doc_index") == 73
+
+    import mantisfetch_common.doc_index_store as dis
+
+    def refuse_the_write(*a, **k):
+        raise RuntimeError("the search table will not take it")
+
+    monkeypatch.setattr(dis, "upsert_fts", refuse_the_write)
+    with pytest.raises(RuntimeError, match="could not be settled"):
+        with dr._restore_on_failure(
+            doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7117"
+        ):
+            pass
+    monkeypatch.undo()
+
+    assert (doc / ".rollback" / ".fts-before.txt").exists(), "the repair snapshot was deleted"
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0, 0)
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7117"]
