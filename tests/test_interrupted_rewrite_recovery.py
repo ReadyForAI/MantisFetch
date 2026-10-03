@@ -670,24 +670,104 @@ def _parse(client, content: bytes, doc_id: str, **extra):
     )
 
 
-def test_a_replacement_is_refused_before_it_touches_a_leftover_stash(
-    docs_dir: Path,
-) -> None:
-    """`_stash_source` deletes the stash it finds — here, the only copy."""
+def _store(client, content: bytes, doc_id: str, **extra):
+    return client.post(
+        "/parse",
+        files={"file": ("notes.md", content, "text/markdown")},
+        data={"doc_id": doc_id, "store_only": "true", **extra},
+    )
+
+
+def _leave_a_committed_replacement_with_its_stash(doc: Path) -> None:
+    """What a cleanup failure most often leaves: the commit landed, the marker
+    says so, and the stash of the source it replaced was never dropped."""
+    stash = doc / ".rollback-source"
+    stash.mkdir()
+    (stash / "previous.md").write_bytes(b"# the source this one replaced")
+    (doc / ".rewrite-committed").touch()
+
+
+def _leave_something_that_cannot_be_settled(doc: Path) -> None:
+    """A backup whose staging record will not read: recovery must not guess."""
+    stash = doc / ".rollback-source"
+    stash.mkdir()
+    (stash / "notes.md").write_bytes(b"# THE ONLY COPY")
+    (doc / ".rollback").mkdir()
+    (doc / ".rollback" / ".staged.json").write_text("{not json", encoding="utf-8")
+
+
+def _source_bytes(doc: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted((doc / "source").iterdir())}
+
+
+def test_a_raw_replace_settles_a_committed_leftover_and_goes_ahead(docs_dir: Path) -> None:
+    """Codex's round-6 P1 scenario. It used to answer 500 — and the failure
+    recorder still put the stale stash back over the committed source."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _store(client, b"# first", "DOC-7121").status_code == 200
+    doc = docs_dir / "General" / "DOC-7121"
+    _leave_a_committed_replacement_with_its_stash(doc)
+
+    response = _store(client, b"# second", "DOC-7121", replace="true")
+
+    assert response.status_code == 200, response.text
+    assert _source_bytes(doc)["notes.md"] == b"# second"
+    for leftover in (".rollback", ".rollback-source", ".rewrite-committed"):
+        assert not (doc / leftover).exists(), leftover
+
+
+def test_a_raw_replace_that_cannot_settle_leaves_the_document_alone(docs_dir: Path) -> None:
+    """Refused means untouched: same source bytes, same stash, same backup."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _store(client, b"# first", "DOC-7122").status_code == 200
+    doc = docs_dir / "General" / "DOC-7122"
+    _leave_something_that_cannot_be_settled(doc)
+    before = _source_bytes(doc)
+
+    response = _store(client, b"# second", "DOC-7122", replace="true")
+
+    assert response.status_code == 500
+    assert "could not be settled" in response.text
+    assert _source_bytes(doc) == before, "a refused replace changed the source"
+    assert (doc / ".rollback-source" / "notes.md").read_bytes() == b"# THE ONLY COPY"
+    assert (doc / ".rollback" / ".staged.json").exists()
+
+
+def test_a_parsed_replace_settles_a_committed_leftover_and_goes_ahead(docs_dir: Path) -> None:
     from starlette.testclient import TestClient
 
     client = TestClient(dr.app, raise_server_exceptions=False)
     assert _parse(client, b"<p>ORIGINAL</p>", "DOC-7118").status_code == 200
     doc = docs_dir / "General" / "DOC-7118"
-    stash = doc / ".rollback-source"
-    stash.mkdir()
-    (stash / "doc.html").write_bytes(b"<p>THE ONLY COPY</p>")
+    _leave_a_committed_replacement_with_its_stash(doc)
 
     response = _parse(client, b"<p>REPLACEMENT</p>", "DOC-7118", replace="true")
 
+    assert response.status_code == 200, response.text
+    assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
+    for leftover in (".rollback", ".rollback-source", ".rewrite-committed"):
+        assert not (doc / leftover).exists(), leftover
+
+
+def test_a_parsed_replace_that_cannot_settle_leaves_the_document_alone(docs_dir: Path) -> None:
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _parse(client, b"<p>ORIGINAL</p>", "DOC-7123").status_code == 200
+    doc = docs_dir / "General" / "DOC-7123"
+    _leave_something_that_cannot_be_settled(doc)
+    before = _source_bytes(doc)
+
+    response = _parse(client, b"<p>REPLACEMENT</p>", "DOC-7123", replace="true")
+
     assert response.status_code == 500
-    assert "could not be settled" in response.text
-    assert (stash / "doc.html").read_bytes() == b"<p>THE ONLY COPY</p>"
+    assert _source_bytes(doc) == before
+    assert (doc / ".rollback-source" / "notes.md").read_bytes() == b"# THE ONLY COPY"
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
 
 
 def test_a_previous_marker_that_will_not_clear_blocks_the_next_rewrite(

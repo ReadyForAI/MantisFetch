@@ -1359,21 +1359,40 @@ _FTS_BEFORE = ".fts-before.txt"
 _INDEX_BEFORE = ".index-before.json"
 
 
-def _refuse_over_unsettled_stash(doc_dir: Path) -> None:
-    """Refuse a replacement while a stash from an earlier one is still here.
+def _settle_before_replacing(docs_dir: Path, doc_id: str, doc_dir: Path) -> None:
+    """Settle whatever an earlier rewrite of this document left, or refuse.
 
-    `_stash_source` starts by deleting whatever stash it finds, and by the time
-    a replacement reaches it the only stash that can be there belongs to a
-    rewrite the startup sweep could not settle — the one copy of a source
-    that recovery is still waiting to put back. Checked before anything in the
-    directory changes, and outside the failure recorders, which would move
-    that stash around themselves.
+    `_stash_source` opens by deleting the stash it finds, and staging starts
+    from whatever marker and backup are lying around, so leftovers have to be
+    dealt with before a replacement touches anything. Held under the writer
+    lock, nothing else is rewriting this document — a deferred summary writes
+    its marker and backup only while holding it — so anything found here is a
+    leftover, and it is settled exactly as the startup sweep would settle it:
+    a committed rewrite finishes cleaning up, an uncommitted one is rolled
+    back. A refusal used to be all this did; the leftover a cleanup failure
+    most often leaves (marker plus stash: committed, stash not yet dropped) is
+    perfectly decidable.
+
+    Whatever is still here afterwards refuses the replacement, without the
+    document having been touched. Callers run this outside their failure
+    recorders, which move the stash themselves.
     """
-    if (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+    with _document_writer_lock(docs_dir, doc_id):
+        _settle_interrupted_rewrite(doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=True)
+        # Checked under the same hold, not trusted from the return value: a
+        # committed settle reports "committed" even when dropping the stash
+        # failed and left the marker in place.
+        remaining = [
+            name
+            for name in (_ROLLBACK_DIR, _SOURCE_ROLLBACK_DIR, _REWRITE_COMMITTED)
+            if (doc_dir / name).exists()
+        ]
+    if remaining:
         raise HTTPException(
             500,
-            f"document directory {doc_dir.name} still holds a replacement that could "
-            "not be settled; resolve it (see the startup log) before replacing it again",
+            f"document directory {doc_dir.name} still holds {', '.join(remaining)} from a "
+            "rewrite that could not be settled; resolve it (see the log) before "
+            "replacing it again",
         )
 
 
@@ -4808,6 +4827,10 @@ async def _store_only_ingest(
         storage_path = _doc_storage_rel_path(d_id, selected_content_type)
         doc_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
         doc_dir.mkdir(parents=True, exist_ok=True)
+        if will_replace:
+            # Ahead of the try: a refusal must not reach the failure recorder,
+            # which puts a stash back over the current source.
+            await asyncio.to_thread(_settle_before_replacing, docs_dir, d_id, doc_dir)
         try:
             return await asyncio.to_thread(
                 _store_raw_serialized,
@@ -4870,7 +4893,6 @@ def _store_raw_serialized(
         # or a disk error would destroy a document that was perfectly readable a
         # moment ago.
         if will_replace:
-            _refuse_over_unsettled_stash(doc_dir)
             _stash_source(doc_dir)
         with _restore_on_failure(
             doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
@@ -5520,8 +5542,8 @@ async def api_parse_doc(
             # Resolved outside the try so the failure recorders below always have
             # a directory to write into — it is a pure path computation.
             doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
-            if will_replace and STORE_SOURCE_FILES:
-                _refuse_over_unsettled_stash(doc_storage_dir)
+            if will_replace:
+                await asyncio.to_thread(_settle_before_replacing, docs_dir, d_id, doc_storage_dir)
             try:
                 tmp_dir = doc_storage_dir / ".tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)

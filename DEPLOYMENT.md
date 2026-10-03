@@ -120,11 +120,16 @@ is reporting work, not an error.
 
 The exception is a document the sweep could not settle — a staging record or
 snapshot that will not read, or a search-index write that fails. It keeps its
-`.rollback/` rather than guess, the start logs an ERROR naming how many, and
-further writes to that document are refused (500) until it is settled, because
-staging over the kept backup would delete the only copy of the previous
-version. Fix the underlying disk or database problem and restart: the sweep
-retries on every start.
+`.rollback/` rather than guess, and the start logs an ERROR naming how many.
+
+A replacement settles leftovers itself before it starts, by the same rules,
+under the document's writer lock — so a leftover the process left behind
+mid-run (a cleanup that failed after the commit, say) does not wait for a
+restart. Only what cannot be settled refuses the replacement (500, naming what
+is still there: `.rollback`, `.rollback-source` or `.rewrite-committed`), and
+the document is left exactly as it was, because staging over the kept backup
+would delete the only copy of the previous version. Fix the underlying disk or
+database problem: the next replacement, or the next start, retries.
 
 ## Request size
 
