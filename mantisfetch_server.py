@@ -26,6 +26,11 @@ import uvicorn
 from fastapi import FastAPI
 
 from mantisfetch_common import __version__
+from mantisfetch_common.allowed_hosts import (
+    allowed_hosts_and_origins,
+    host_allowed,
+    origin_allowed,
+)
 from mantisfetch_deliverables import deliverables_app
 
 logger = logging.getLogger("mantisfetch")
@@ -165,9 +170,13 @@ class _RestAuthGate:
     (needed for cross-host MCP) those would otherwise be wide open. Behavior
     (loopback-only by default, matching the MCP gate):
 
-    - loopback peer (127.0.0.1 / ::1): always allowed — same-host callers,
-      including Skeleton-Doc over the Docker bridge when it shares the host, are
-      unaffected.
+    - loopback peer (127.0.0.1 / ::1): allowed without a token, *if* its Host
+      is a loopback name (or listed in ``MANTISFETCH_MCP_ALLOWED_HOSTS``) and any
+      Origin it sends is one of those. A loopback socket is not proof the caller
+      is a local application: a page in a local browser reaching this port
+      through DNS rebinding arrives from 127.0.0.1 with the attacker's domain
+      in Host, and the surface it reaches reads documents, replaces them and
+      drives the browser. A request without Origin (curl, SDKs) is unaffected.
     - ``MANTISFETCH_MCP_TOKEN`` set: require that bearer for non-loopback peers
       (constant-time compare; else 401). A cross-host / cross-bridge Agent reaches
       the surface by presenting the token.
@@ -194,6 +203,21 @@ class _RestAuthGate:
         client = scope.get("client")
         peer = client[0] if client else None
         if peer in self._LOOPBACK:
+            # Only on this path: it is the one that trusts by location. A
+            # bearer-authenticated caller has a different basis for trust, and
+            # checking its Host would break every off-host deployment whose
+            # name nobody listed.
+            headers = dict(scope.get("headers") or [])
+            hosts, origins = allowed_hosts_and_origins()
+            host = headers.get(b"host", b"").decode("latin-1")
+            origin = headers.get(b"origin", b"").decode("latin-1") or None
+            if not host_allowed(host, hosts):
+                return 403, (
+                    b'{"error":"forbidden: Host is not a loopback name; add it to '
+                    b'MANTISFETCH_MCP_ALLOWED_HOSTS if this host is reached by it"}'
+                )
+            if not origin_allowed(origin, origins):
+                return 403, b'{"error":"forbidden: Origin is not allowed"}'
             return None
         token = os.environ.get("MANTISFETCH_MCP_TOKEN")
         if not token:

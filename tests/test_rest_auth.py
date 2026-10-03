@@ -21,9 +21,11 @@ def _drive(client_addr, headers=None, path="/session/new"):
         await send({"type": "http.response.body", "body": b"ok"})
 
     gate = ms._RestAuthGate(inner)
+    # What a local client sends unless a test says otherwise.
+    headers = {"host": "127.0.0.1:9898", **(headers or {})}
     scope = {
         "type": "http", "path": path, "client": client_addr,
-        "headers": [(k.encode(), v.encode()) for k, v in (headers or {}).items()],
+        "headers": [(k.encode(), v.encode()) for k, v in headers.items() if v is not None],
     }
     sent = []
 
@@ -97,3 +99,95 @@ def test_integration_gate_mounted_on_doc(monkeypatch):
     assert off_host.get("/doc/library/DOC-X/digest").status_code == 401
     ok = off_host.get("/doc/library/DOC-X/digest", headers={"Authorization": "Bearer s3cret"})
     assert ok.status_code not in (401, 403)
+
+
+# ── Host / Origin on the token-less loopback path (F03) ───────────────────────
+# A loopback socket is not proof the caller is a local application: a page in
+# a local browser reaching this port through DNS rebinding arrives from
+# 127.0.0.1 with the attacker's domain in Host.
+
+
+def test_a_loopback_peer_naming_a_foreign_host_is_refused(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
+    status, reached = _drive(("127.0.0.1", 5555), {"host": "untrusted.example:9898"})
+    assert status == 403 and not reached
+
+
+def test_a_loopback_peer_sending_a_foreign_origin_is_refused(monkeypatch):
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    status, reached = _drive(
+        ("127.0.0.1", 5555), {"origin": "http://untrusted.example:9898"}, path="/parse"
+    )
+    assert status == 403 and not reached
+
+
+def test_an_opaque_null_origin_is_refused(monkeypatch):
+    """Sandboxed iframes and file:// pages send `Origin: null`."""
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    status, _ = _drive(("127.0.0.1", 5555), {"origin": "null"})
+    assert status == 403
+
+
+def test_a_loopback_peer_with_no_host_is_refused(monkeypatch):
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    status, _ = _drive(("127.0.0.1", 5555), {"host": None})
+    assert status == 403
+
+
+def test_local_clients_without_an_origin_are_unaffected(monkeypatch):
+    """curl, the SDK and same-host services send a loopback Host and no Origin."""
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    for host in ("127.0.0.1:9898", "localhost:9898", "LOCALHOST:9898", "[::1]:9898", "localhost"):
+        status, reached = _drive(("127.0.0.1", 5555), {"host": host})
+        assert status == 200 and reached, host
+    status, _ = _drive(("::1", 5555), {"host": "[::1]:9898"})
+    assert status == 200
+
+
+def test_a_local_page_on_this_service_is_allowed(monkeypatch):
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    for origin in ("http://127.0.0.1:9898", "https://localhost:9898"):
+        status, _ = _drive(("127.0.0.1", 5555), {"origin": origin})
+        assert status == 200, origin
+
+
+def test_listed_extra_hosts_are_honoured_with_the_mcp_syntax(monkeypatch):
+    """`MANTISFETCH_MCP_ALLOWED_HOSTS` means the same thing on both surfaces."""
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("MANTISFETCH_MCP_ALLOWED_HOSTS", "mf.internal:*, proxy.lan:8443")
+    assert _drive(("127.0.0.1", 5555), {"host": "mf.internal:9000"})[0] == 200
+    assert _drive(("127.0.0.1", 5555), {"host": "proxy.lan:8443"})[0] == 200
+    assert _drive(("127.0.0.1", 5555), {"host": "proxy.lan:9999"})[0] == 403
+    assert _drive(
+        ("127.0.0.1", 5555), {"host": "proxy.lan:8443", "origin": "https://proxy.lan:8443"}
+    )[0] == 200
+
+
+def test_the_bearer_path_does_not_check_host(monkeypatch):
+    """A token is a different basis for trust. Checking Host there would break
+    every off-host deployment whose name nobody listed."""
+    monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
+    status, reached = _drive(
+        ("10.0.0.9", 5555),
+        {"host": "buildhost.lan:9898", "authorization": "Bearer s3cret"},
+    )
+    assert status == 200 and reached
+
+
+def test_health_stays_ungated_whatever_the_host(monkeypatch):
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    status, _ = _drive(("127.0.0.1", 5555), {"host": "untrusted.example"}, path="/health")
+    assert status == 200
+
+
+def test_the_unified_app_refuses_a_rebound_library_read(monkeypatch):
+    """The report's repro, through the real app: 200 before, 403 now."""
+    monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
+    rebound = TestClient(
+        ms.app, base_url="http://untrusted.example:9898", client=("127.0.0.1", 5555),
+        raise_server_exceptions=False,
+    )
+    response = rebound.get(
+        "/doc/library/search", headers={"Origin": "http://untrusted.example:9898"}
+    )
+    assert response.status_code == 403

@@ -70,7 +70,11 @@ def _surface(name):
 
 
 def _client(app):
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
+    # A loopback name: the unified app's REST gate refuses a loopback peer
+    # whose Host is not one (DNS rebinding).
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:9898"
+    )
 
 
 @pytest.mark.parametrize("surface", ["unified", "in-process"])

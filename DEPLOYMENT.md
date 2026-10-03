@@ -30,6 +30,18 @@ So a same-host client configured with the *wrong* token sees REST succeed and
 MCP answer 401. Send the bearer on every call — it is the only configuration
 that is correct on both faces.
 
+**The token-less loopback allowance is bound to loopback names.** A loopback
+socket is not proof the caller is a local application: a page open in a local
+browser can reach this port through DNS rebinding, arriving from `127.0.0.1`
+with its own domain in `Host`. So a loopback peer is let in without a token
+only when its `Host` is `127.0.0.1`, `localhost` or `[::1]` (with or without
+the port) or listed in `MANTISFETCH_MCP_ALLOWED_HOSTS`, and any `Origin` it
+sends is one of those. No `Origin` — curl, the SDK, server-side callers — is
+fine. A reverse proxy on the same host that forwards under another name must
+either have that name listed or present the bearer; requests carrying the
+bearer are judged by the token, not by `Host`. This is the same list `/mcp`
+uses for its DNS-rebinding check, and the same `host:*` syntax applies.
+
 ## Two provider slots, and when the second one is used
 
 With `MANTISFETCH_LLM_DEFAULT` / `MANTISFETCH_LLM_EXTRA` configured, a failure

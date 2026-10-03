@@ -14,7 +14,8 @@ services:
       # loopback-only — and a host request to the published port reaches the
       # container from the Docker bridge (a NON-loopback peer), so it is denied
       # (403). SET THIS to use /web and /doc against the container. ALLOWED_HOSTS
-      # adds extra Host values (host:* = any port) past the DNS-rebinding check.
+      # adds extra Host values (host:* = any port) past the DNS-rebinding check,
+      # which guards /mcp and the token-less loopback path of /web and /doc.
       MANTISFETCH_MCP_TOKEN: ${MANTISFETCH_MCP_TOKEN:-}
       MANTISFETCH_MCP_ALLOWED_HOSTS: ${MANTISFETCH_MCP_ALLOWED_HOSTS:-}
       # TLS (opt-in): set these in .env to serve https. Bearer over an encrypted

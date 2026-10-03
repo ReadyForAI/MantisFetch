@@ -174,7 +174,8 @@ def test_a_refused_chunked_upload_closes_what_it_spooled(monkeypatch) -> None:
                 "root_path": "",
                 "client": ("127.0.0.1", 50000),
                 "headers": [
-                    (b"content-type", f"multipart/form-data; boundary={boundary}".encode())
+                    (b"host", b"127.0.0.1:9898"),
+                    (b"content-type", f"multipart/form-data; boundary={boundary}".encode()),
                 ],
             },
             receive,
