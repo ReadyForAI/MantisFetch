@@ -183,7 +183,7 @@ Notes:
 | `doc_search_sections` | Search within one document's sections; returns sid/page provenance. | `doc_id`, `q`, `include_content=false` |
 | `doc_table` | Read one extracted table (with numeric column stats). | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`) |
 | `doc_chunks` | Retrieval-friendly chunks for downstream RAG. | `doc_id`, `include_text=false` |
-| `doc_manifest` | Provenance manifest (source, hash, timestamps). `truncated` is always present: on a document whose manifest would not fit in one tool result it is `true`, the per-entry lists (`sections`, `tables`, `images`, per-page quality detail) are left out and named in `omitted`, and the counts stay. Read sections with `doc_sections`; their `table_refs` give the table ids for `doc_table`. | `doc_id` |
+| `doc_manifest` | Provenance manifest (source, hash, timestamps). `truncated` is always present: on a document whose manifest would not fit in one tool result it is `true`, the per-entry lists (`sections`, `tables`, `images`, per-page quality detail) are left out and named in `omitted`, the counts stay, and `table_ids` lists the ids to pass to `doc_table`. Read sections with `doc_sections`. | `doc_id` |
 | `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, 64 KiB per window, `next_offset` to continue. The only reader for a raw document — `doc_full` / `doc_section` 404 on it. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
 | `doc_summary` | The document's three-tier generated summary / status. | `doc_id` |
 

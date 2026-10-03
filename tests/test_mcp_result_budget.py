@@ -165,3 +165,18 @@ def test_paging_edges(client, library) -> None:
     two = _payload(_call(client, "doc_sections", {"doc_id": "DOC-1", "offset": 1, "limit": 2})[0])
     assert [s["sid"] for s in two["sections"]] == ["s_0001", "s_0002"]
     assert (two["next_offset"], two["truncated"]) == (3, True)
+
+
+def test_a_projection_keeps_every_table_id_reachable(client, library) -> None:
+    """Codex round 1. A multi-section DOCX leaves every section's table_refs
+    empty on purpose; with the tables list dropped, doc_table had no ids."""
+    doc = _big_document()
+    for section in doc["sections"]:
+        section["table_refs"] = []
+    library["DOC-9290"] = doc
+    result, size = _call(client, "doc_manifest", {"doc_id": "DOC-9290"})
+
+    assert size < WALL
+    manifest = _payload(result)
+    assert manifest["truncated"] is True
+    assert manifest["table_ids"] == [f"t_{i:04d}" for i in range(100)]

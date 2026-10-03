@@ -1066,8 +1066,8 @@ async def doc_manifest(doc_id: str) -> Any:
     `truncated` is always present. On a document whose manifest would not fit in
     one tool result it is true, and the per-entry lists are left out — named in
     `omitted`, with their counts (section_count, table_count, image_count) still
-    here. Read the section list with doc_sections (paged; each entry's
-    table_refs name the table ids to pass to doc_table)."""
+    here. `table_ids` lists the ids to pass to doc_table; read the section
+    list with doc_sections (paged)."""
     return _fit_manifest(await _doc_get(f"/library/{doc_id}/manifest"), doc_id)
 
 
@@ -1095,10 +1095,19 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
     if _wire_bytes(fitted) <= _MCP_RESULT_BUDGET:
         return fitted
     omitted: list[str] = []
+    tables = fitted.get("tables")
     for key in _MANIFEST_DROP_FIRST:
         if key in fitted:
             del fitted[key]
             omitted.append(key)
+    if isinstance(tables, list) and tables:
+        # The ids alone, so doc_table stays reachable. Section table_refs are
+        # not enough: a multi-section DOCX leaves every one empty on purpose
+        # (its sections all collapse onto page 1), and dropping the list
+        # would leave such a document with no route to its tables at all.
+        fitted["table_ids"] = [
+            t["table_id"] for t in tables if isinstance(t, dict) and t.get("table_id")
+        ]
     parse_metadata = fitted.get("parse_metadata")
     if isinstance(parse_metadata, dict) and "quality_assessment" in parse_metadata:
         fitted["parse_metadata"] = {
@@ -1108,8 +1117,8 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
     fitted["truncated"] = True
     fitted["omitted"] = omitted
     fitted["see"] = (
-        "doc_sections for the section list (paged; table_refs on each entry name the "
-        f"tables for doc_table); GET /doc/library/{doc_id}/manifest for the whole manifest"
+        "doc_sections for the section list (paged); table_ids (or table_refs on each "
+        f"section) for doc_table; GET /doc/library/{doc_id}/manifest for the whole manifest"
     )
     # Belt and braces: drop whatever is largest until it fits.
     while _wire_bytes(fitted) > _MCP_RESULT_BUDGET:
