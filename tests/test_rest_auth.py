@@ -191,3 +191,45 @@ def test_the_unified_app_refuses_a_rebound_library_read(monkeypatch):
         "/doc/library/search", headers={"Origin": "http://untrusted.example:9898"}
     )
     assert response.status_code == 403
+
+
+def test_a_valid_bearer_from_loopback_is_not_held_to_the_host_list(monkeypatch):
+    """A same-host reverse proxy forwarding under its own name, with the token."""
+    monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
+    status, reached = _drive(
+        ("127.0.0.1", 5555),
+        {"host": "docs.company.lan", "origin": "https://docs.company.lan",
+         "authorization": "Bearer s3cret"},
+    )
+    assert status == 200 and reached
+
+
+def test_a_wrong_bearer_does_not_unlock_a_foreign_host(monkeypatch):
+    monkeypatch.setenv("MANTISFETCH_MCP_TOKEN", "s3cret")
+    status, _ = _drive(
+        ("127.0.0.1", 5555), {"host": "untrusted.example", "authorization": "Bearer nope"}
+    )
+    assert status == 403
+
+
+def test_a_browser_origin_without_the_default_port_is_allowed(monkeypatch):
+    """Browsers omit :80 / :443 from Origin."""
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("PORT", "80")
+    assert _drive(("127.0.0.1", 5555), {"host": "localhost", "origin": "http://localhost"})[0] == 200
+    assert _drive(("127.0.0.1", 5555), {"host": "localhost", "origin": "https://localhost"})[0] == 403
+    monkeypatch.setenv("PORT", "443")
+    assert _drive(("127.0.0.1", 5555), {"host": "localhost", "origin": "https://localhost"})[0] == 200
+    monkeypatch.setenv("PORT", "9898")
+    assert _drive(("127.0.0.1", 5555), {"origin": "http://localhost"})[0] == 403
+
+
+def test_listed_hosts_match_whatever_their_case(monkeypatch):
+    monkeypatch.delenv("MANTISFETCH_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("MANTISFETCH_MCP_ALLOWED_HOSTS", "MF.internal:9898,Proxy.LAN:*")
+    assert _drive(("127.0.0.1", 5555), {"host": "MF.internal:9898"})[0] == 200
+    assert _drive(("127.0.0.1", 5555), {"host": "mf.INTERNAL:9898"})[0] == 200
+    assert _drive(("127.0.0.1", 5555), {"host": "proxy.lan:8443"})[0] == 200
+    assert _drive(
+        ("127.0.0.1", 5555), {"host": "mf.internal:9898", "origin": "https://MF.internal:9898"}
+    )[0] == 200

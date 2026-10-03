@@ -202,12 +202,19 @@ class _RestAuthGate:
     def _deny(self, scope: dict) -> tuple[int, bytes] | None:
         client = scope.get("client")
         peer = client[0] if client else None
+        token = os.environ.get("MANTISFETCH_MCP_TOKEN")
+        headers = dict(scope.get("headers") or [])
+        if token and secrets.compare_digest(
+            headers.get(b"authorization", b"").decode(), f"Bearer {token}"
+        ):
+            # A valid bearer is its own basis for trust, from any peer and
+            # under any Host — a same-host reverse proxy forwarding under its
+            # own name is exactly this.
+            return None
         if peer in self._LOOPBACK:
-            # Only on this path: it is the one that trusts by location. A
-            # bearer-authenticated caller has a different basis for trust, and
-            # checking its Host would break every off-host deployment whose
-            # name nobody listed.
-            headers = dict(scope.get("headers") or [])
+            # Only the token-less path is checked: it is the one that trusts
+            # by location. Checking Host on the bearer path would break every
+            # off-host deployment whose name nobody listed.
             hosts, origins = allowed_hosts_and_origins()
             host = headers.get(b"host", b"").decode("latin-1")
             origin = headers.get(b"origin", b"").decode("latin-1") or None
@@ -219,17 +226,12 @@ class _RestAuthGate:
             if not origin_allowed(origin, origins):
                 return 403, b'{"error":"forbidden: Origin is not allowed"}'
             return None
-        token = os.environ.get("MANTISFETCH_MCP_TOKEN")
         if not token:
             return 403, (
                 b'{"error":"forbidden: this surface is loopback-only; '
                 b'set MANTISFETCH_MCP_TOKEN to allow non-loopback clients"}'
             )
-        headers = dict(scope.get("headers") or [])
-        provided = headers.get(b"authorization", b"").decode()
-        if not secrets.compare_digest(provided, f"Bearer {token}"):
-            return 401, b'{"error":"unauthorized"}'
-        return None
+        return 401, b'{"error":"unauthorized"}'
 
     async def __call__(self, scope: dict, receive: object, send: object) -> None:
         if scope["type"] == "http" and scope.get("path") not in self._HEALTH_PATHS:
