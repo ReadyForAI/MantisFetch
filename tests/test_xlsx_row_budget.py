@@ -235,3 +235,201 @@ def test_a_large_non_sheet_part_is_streamed_not_built(tmp_path) -> None:
     _, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     assert peak < len(sst) // 2, f"peak {peak} bytes for a {len(sst)}-byte part"
+
+
+# ── Sparse sheets: the grid the converter fills in, not the rows stored (F06) ─
+
+_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+
+
+def _raw_sheet(body: str, dimension: str = "") -> bytes:
+    return (
+        f'<worksheet xmlns="{_NS}">{dimension}<sheetData>{body}</sheetData></worksheet>'
+    ).encode()
+
+
+def _budget(tmp_path, content: bytes, limit: int) -> None:
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    path = tmp_path / "sparse.xlsx"
+    path.write_bytes(content)
+    _check_xlsx_row_budget(path, limit, "sparse.xlsx")
+
+
+def _sparse_workbook(*cells: str) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for ref in cells:
+        ws[ref] = f"value at {ref}"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_two_cells_far_apart_count_as_every_row_between_them(tmp_path) -> None:
+    """The report's repro: A1 and A201 are two row elements and 201 rows of
+    Markdown once converted. The old count admitted it under a limit of 10."""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="spans more than 10 rows"):
+        _budget(tmp_path, _sparse_workbook("A1", "A201"), 10)
+    _budget(tmp_path, _sparse_workbook("A1", "A201"), 201)  # exactly the grid: fine
+
+
+def test_sparse_sheets_add_up_across_the_workbook(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    two_sheets = _with_part(
+        _sparse_workbook("A1", "A30"), "xl/worksheets/extra.xml",
+        _raw_sheet('<row r="1"><c r="A1"/></row><row r="30"><c r="A30"/></row>'),
+    )
+    _budget(tmp_path, two_sheets, 60)
+    with pytest.raises(HTTPException):
+        _budget(tmp_path, two_sheets, 59)
+
+
+def test_a_row_without_a_number_follows_the_one_before(tmp_path) -> None:
+    """`r` is optional on rows: a writer may leave it out of consecutive ones."""
+    from fastapi import HTTPException
+
+    body = '<row r="100"><c><v>1</v></c></row>' + "<row><c><v>2</v></c></row>" * 3
+    content = _with_part(_workbook(0), "xl/worksheets/norefs.xml", _raw_sheet(body))
+    _budget(tmp_path, content, 103)
+    with pytest.raises(HTTPException):
+        _budget(tmp_path, content, 102)
+
+
+def test_a_cell_past_its_row_counts_where_the_cell_is(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    body = '<row r="1"><c r="A1"/><c r="B5000"/></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/odd.xml", _raw_sheet(body))
+    with pytest.raises(HTTPException):
+        _budget(tmp_path, content, 4999)
+
+
+def test_a_dimension_that_understates_the_sheet_is_not_believed(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    body = '<row r="1"><c r="A1"/></row><row r="900"><c r="A900"/></row>'
+    content = _with_part(
+        _workbook(0), "xl/worksheets/liar.xml", _raw_sheet(body, '<dimension ref="A1:A2"/>')
+    )
+    with pytest.raises(HTTPException):
+        _budget(tmp_path, content, 100)
+
+
+def test_a_sparse_workbook_over_the_limit_is_refused_before_conversion(
+    client, docs, conversions, monkeypatch
+) -> None:
+    import mantisfetch_docreader as dr
+
+    monkeypatch.setattr(dr, "MAX_PARSE_ROWS", 50)
+    resp = _parse(client, "sparse.xlsx", _sparse_workbook("A1", "A5000"))
+
+    assert resp.status_code == 422, resp.text
+    assert conversions == [], "the workbook was converted before it was refused"
+    _nothing_was_kept(docs)
+
+
+# ── Wide sheets: columns are filled in too ────────────────────────────────────
+
+
+def _cells(tmp_path, content: bytes, cell_limit: int, row_limit: int = 10**9) -> None:
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    path = tmp_path / "wide.xlsx"
+    path.write_bytes(content)
+    _check_xlsx_row_budget(path, row_limit, "wide.xlsx", cell_limit)
+
+
+def test_two_cells_at_opposite_corners_count_as_the_grid_between(tmp_path) -> None:
+    """A1 and XFD200: 200 rows, inside any row limit, and a 200 x 16384 grid —
+    measured at 80 s and 3.5 GB to convert a 4.8 KB file."""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="spans more than 1000000 cells"):
+        _cells(tmp_path, _sparse_workbook("A1", "XFD200"), 1_000_000)
+    _cells(tmp_path, _sparse_workbook("A1", "XFD200"), 200 * 16384)  # exactly: fine
+
+
+def test_a_dense_sheet_counts_rows_times_columns(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    wb = openpyxl.Workbook()
+    for r in range(100):
+        wb.active.append(list(range(10)))
+    buf = io.BytesIO()
+    wb.save(buf)
+    _cells(tmp_path, buf.getvalue(), 1000)
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, buf.getvalue(), 999)
+
+
+def test_cells_without_a_reference_take_the_next_column(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    body = '<row r="1">' + "<c><v>1</v></c>" * 7 + "</row>" + '<row r="10"><c><v>2</v></c></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/norefs.xml", _raw_sheet(body))
+    _cells(tmp_path, content, 70)  # 10 rows x 7 columns
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, content, 69)
+
+
+def test_wide_sheets_add_up_across_the_workbook(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    content = _with_part(
+        _sparse_workbook("A1", "J10"), "xl/worksheets/extra.xml",
+        _raw_sheet('<row r="10"><c r="J10"/></row>'),
+    )
+    _cells(tmp_path, content, 200)  # 100 + 100
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, content, 199)
+
+
+def test_a_wide_sparse_workbook_is_refused_before_conversion(
+    client, docs, conversions
+) -> None:
+    """At the shipped defaults, through /parse."""
+    resp = _parse(client, "wide.xlsx", _sparse_workbook("A1", "XFD200"))
+
+    assert resp.status_code == 422, resp.text
+    assert "MANTISFETCH_MAX_PARSE_CELLS" in resp.json()["detail"]
+    assert conversions == [], "the workbook was converted before it was refused"
+    _nothing_was_kept(docs)
+
+
+def test_the_calculation_chain_is_not_another_sheet(tmp_path) -> None:
+    """calcChain.xml is <c r="…"> elements too, naming cells already counted."""
+    wb = openpyxl.Workbook()
+    for r in range(10):
+        wb.active.append(list(range(10)))
+    buf = io.BytesIO()
+    wb.save(buf)
+    chain = f'<calcChain xmlns="{_NS}"><c r="J10" i="1"/><c r="XFD9000" i="1"/></calcChain>'
+    content = _with_part(buf.getvalue(), "xl/calcChain.xml", chain.encode())
+    _cells(tmp_path, content, 100, row_limit=10)
+
+
+def test_an_absurdly_long_reference_is_refused_quickly(tmp_path) -> None:
+    import time
+
+    from fastapi import HTTPException
+
+    body = f'<row r="1"><c r="{"A" * 80_000}1"/></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/long.xml", _raw_sheet(body))
+    started = time.monotonic()
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, content, 1_000_000)
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_row_number_too_long_to_be_real_does_not_end_the_count(tmp_path) -> None:
+    """Past 4,300 digits int() raises — which used to abandon the sheet's count."""
+    from fastapi import HTTPException
+
+    body = f'<row r="{"9" * 5000}"><c><v>1</v></c></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/huge.xml", _raw_sheet(body))
+    with pytest.raises(HTTPException):
+        _budget(tmp_path, content, 100_000)
