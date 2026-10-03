@@ -84,8 +84,6 @@ async def test_one_dead_origin_does_not_spend_the_whole_budget() -> None:
     assert [s["rank"] for s in data["skipped"]] == [2]
     assert data["skipped"][0]["reason"].startswith("capture_timeout")
     assert took < 1.5, f"answered after {took:.2f}s on a 1s budget"
-    # The navigation timeout is inside each capture's share.
-    assert all(r.timeout_ms <= 1000 for r in seen)
 
 
 async def test_hits_there_is_no_time_for_come_back_as_search_results(monkeypatch) -> None:
@@ -208,3 +206,68 @@ async def test_a_throttle_queue_longer_than_the_budget_is_refused_at_once(monkey
     assert took < 0.3, f"answered after {took:.2f}s on a 0.1s budget"
     # Refused without taking a turn: the queue is exactly as it was.
     assert lb._next_search_allowed["fake"] - time.monotonic() < 0.6
+
+
+async def test_a_slow_page_cut_off_by_the_budget_really_lands_in_the_library(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex round 2, on the real capture path. The navigation timeout used to
+    be capped to the capture's share; the share's timer starts before browser
+    setup and always fired first, and then navigation timed out too — 502,
+    nothing stored — while the response promised a reusable result."""
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock
+
+    docs_dir = Path(tmp_path) / "docs"
+    docs_dir.mkdir()
+    page_takes = 0.6
+    response_ok = MagicMock(status=200, url="https://example.com/slow")
+
+    async def goto(url, wait_until=None, timeout=None):
+        if timeout is not None and timeout / 1000 < page_takes:
+            await asyncio.sleep(timeout / 1000)
+            raise RuntimeError(f"Timeout {timeout}ms exceeded")
+        await asyncio.sleep(page_takes)
+        return response_ok
+
+    page = AsyncMock()
+    page.goto = goto
+    page.url = "https://example.com/slow"
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    distilled = {
+        "url": "https://example.com/slow", "title": "Slow", "content_hash": "sha256:slow",
+        "sections": [{"sid": "s1", "h": "H", "t": "body text", "type": "text"}],
+        "actions": [], "meta": {},
+    }
+
+    class _OneHit(_Provider):
+        async def search(self, query, *, max_results=10, lang="en", freshness=None):
+            return [SearchResult(url="https://example.com/slow", title="slow", snippet="s",
+                                 published_at=None, score=0.5, provider="fake")]
+
+    monkeypatch.setattr(lb, "_browser", browser)
+    transport = httpx.ASGITransport(app=lb.app)
+    with (
+        patch("mantisfetch_browser.create_search_provider", return_value=_OneHit()),
+        patch("mantisfetch_browser._get_docs_dir", return_value=docs_dir),
+        patch("mantisfetch_browser._distill", new=AsyncMock(return_value=distilled)),
+        patch("mantisfetch_browser._setup_routing", new=AsyncMock()),
+    ):
+        async with httpx.AsyncClient(transport=transport, base_url="http://web.test") as c:
+            response = await asyncio.wait_for(
+                c.post("/search_and_capture",
+                       json={"query": "q", "capture_top": 1, "budget_seconds": 0.3}),
+                10,
+            )
+        assert response.json()["skipped"][0]["reason"].startswith("capture_timeout")
+        for _ in range(60):
+            if not lb._background_captures:
+                break
+            await asyncio.sleep(0.05)
+        stored = await asyncio.to_thread(
+            lb._find_capture_by_requested_url, docs_dir, "https://example.com/slow"
+        )
+    assert stored is not None, "the capture the response said would finish stored nothing"

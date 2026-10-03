@@ -837,7 +837,7 @@ Readability，所以文档的 `h1`/`h2`/`h3` 结构会保留下来、成为可�
 - **并行搜索会排队，不会失败：** 运维会设一个搜索后端的最小调用间隔（`MANTISFETCH_SEARCH_MIN_INTERVAL_SEC`，默认 2s）来保护付费配额。一轮里发好几个搜索没问题——它们轮流执行、全部返回；默认配置下 8 个并行搜索总共约 14s。只有当突发大到某一个要等过`MANTISFETCH_SEARCH_MAX_WAIT_SEC`（默认 30s）才会被拒，那个 `429` 会告诉你等几秒。不要为了躲它而把搜索串行化。
 - **排名靠前不等于抓得到正文：** `search_and_capture` 会把排名命中的 URL 原样抓下来存库，而搜索引擎常把滑动验证页、canvas 文档阅读器、视频页排在前面。这类页面存进来后 `section_count` 看着正常，但 `body_chars` 只有几百。把命中当素材用之前先看 `body_chars`；某部署实测 74 篇抓取里有 4 篇属于这种。
 - **`/web/search_and_capture` URL TTL（默认开启）：** 使用 `MANTISFETCH_SEARCH_CAPTURE_TTL_HOURS`（默认 **24**），重复研究查询会复用近期命中，无需重抓；与 `CAPTURE_TTL_HOURS` 独立。
-- **`/web/search_and_capture` 的 `budget_seconds`（可选）：** 调用方能等的墙钟秒数，从请求到达时算起；不传则不设上限，与原先一致。传了之后调用一定在窗口内以结果返回：每次抓取分到剩余时间的公平份额（导航超时也在其内），超时的记入 `skipped`（`capture_timeout`）并在后台继续完成（之后对同一 URL 的调用会复用）；没时间再试的命中放进 `uncaptured`——`{url, title, snippet, rank, reason: "budget_exhausted"}`，从未尝试。搜索本身没按时返回则是 `422 {"error": "search_budget_exceeded"}`。MCP 工具总会带上预算。
+- **`/web/search_and_capture` 的 `budget_seconds`（可选）：** 调用方能等的墙钟秒数，从请求到达时算起；不传则不设上限，与原先一致。传了之后调用一定在窗口内以结果返回：每次抓取分到剩余时间的公平份额，超时的记入 `skipped`（`capture_timeout`），并以正常的导航超时在后台继续（成功的话，之后对同一 URL 的调用会复用）；没时间再试的命中放进 `uncaptured`——`{url, title, snippet, rank, reason: "budget_exhausted"}`，从未尝试。搜索本身没按时返回则是 `422 {"error": "search_budget_exceeded"}`。MCP 工具总会带上预算。
 - **内容哈希复用（distill 后始终开启）：** 若库中已有相同 body `content_hash`（同一文章经 AMP / 跟踪参数 URL），返回该 `doc_id`（`reused: true`），并**合并** tags（并集）与新 metadata 键（已有键 first-touch 保留）。`force_refresh: true` 同样跳过。
 
 **什么时候用 `/capture`，什么时候用手动 session 流程：**

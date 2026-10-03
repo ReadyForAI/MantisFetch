@@ -4285,14 +4285,15 @@ async def search_and_capture(
             lang=req.lang,
             metadata=metadata,
         )
-        if share is not None:
-            # The common slow case is a slow origin; with the navigation
-            # timeout inside the share it fails the ordinary way, with its own
-            # reason, and the deadline below only has to catch the rest.
-            cap_req.timeout_ms = min(cap_req.timeout_ms, int(share * 1000))
         # _capture_impl runs the SSRF guard on the (search-supplied) URL, so a hit
         # pointing at a private/loopback target is rejected here → skipped.
         # URL TTL defaults to 24h for this path (B5) so repeated queries reuse hits.
+        # Its navigation timeout is left alone: the share below bounds how long
+        # the caller waits, and a capture it cuts off keeps the full window to
+        # finish in the background. Capping navigation to the share as well
+        # only guaranteed that such a capture failed and stored nothing — the
+        # outer timer starts before cache lookup and browser setup, so it
+        # always fires first.
         work = _capture_impl(
             cap_req,
             url_ttl_hours=_search_and_capture_url_ttl(),
@@ -4312,8 +4313,9 @@ async def search_and_capture(
                             url=hit.url,
                             reason=(
                                 f"capture_timeout: not done within its {share:.0f}s share of "
-                                "the budget; it finishes in the background, and a later "
-                                "call for this URL reuses it"
+                                "the budget; it keeps running in the background with its "
+                                "normal navigation timeout, and if it succeeds a later call "
+                                "for this URL reuses it"
                             ),
                             rank=rank,
                         )

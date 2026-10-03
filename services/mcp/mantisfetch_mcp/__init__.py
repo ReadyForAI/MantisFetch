@@ -604,8 +604,8 @@ if _search_tools_enabled():
         blindly. Each digest is wrapped in an untrusted-content boundary.
 
         The call answers within a fixed time budget. `skipped` hits were tried
-        and failed (`capture_timeout` ones finish in the background — calling
-        again for the same query reuses them); `uncaptured` hits were never
+        and failed (`capture_timeout` ones keep running in the background — if
+        they succeed, calling again for the same query reuses them); `uncaptured` hits were never
         tried for lack of time — they are plain search results, so pass a
         `url` to web_capture if one matters."""
         return _wrap_search_capture_result(
