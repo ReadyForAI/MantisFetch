@@ -15,6 +15,7 @@ import contextlib
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +68,44 @@ def _connect(docs_dir: Path) -> sqlite3.Connection:
     return conn
 
 
+def _discard(docs_dir: Path, conn: sqlite3.Connection) -> None:
+    """Drop a connection whose transaction state is no longer known.
+
+    Only reached when a rollback itself failed. The next caller opens a fresh
+    connection rather than inheriting whatever is still open on this one.
+    """
+    key = str(docs_dir.resolve())
+    cache: dict[str, sqlite3.Connection] = getattr(_local, "conns", {})
+    if cache.get(key) is conn:
+        del cache[key]
+    with contextlib.suppress(Exception):
+        conn.close()
+
+
+@contextlib.contextmanager
+def _transaction(docs_dir: Path, conn: sqlite3.Connection) -> Iterator[None]:
+    """Commit the writes in the block, or roll them back and raise.
+
+    Connections are cached per thread for the life of the process, and a COMMIT
+    can fail with its transaction still open — SQLite leaves it that way. The
+    next write on the same thread would then commit the failed one along with
+    its own, which is how a rewrite that reported failure and put its files back
+    could still leave the index holding the version that never landed. Worse,
+    putting the files back is itself a write on this connection: the rollback
+    path reindexes the text it restored, so the failed entry was committed by
+    the recovery from its own failure.
+    """
+    try:
+        yield
+        conn.commit()
+    except BaseException:
+        try:
+            conn.rollback()
+        except BaseException:  # pragma: no cover - defensive
+            _discard(docs_dir, conn)
+        raise
+
+
 def ensure_migrated_from_json(docs_dir: Path) -> None:
     """One-shot import of doc-index.json into SQLite.
 
@@ -83,20 +122,22 @@ def ensure_migrated_from_json(docs_dir: Path) -> None:
     if flag is not None:
         return
     index_path = docs_dir / "doc-index.json"
-    if index_path.exists():
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            index = None
-        docs = index.get("documents") if isinstance(index, dict) else None
-        if isinstance(docs, list):
-            for entry in docs:
-                if isinstance(entry, dict) and entry.get("id"):
-                    _upsert_entry_conn(conn, entry)
-    conn.execute(
-        "INSERT OR REPLACE INTO meta (key, value) VALUES ('json_migrated', '1')"
-    )
-    conn.commit()
+    with _transaction(docs_dir, conn):
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                index = None
+            docs = index.get("documents") if isinstance(index, dict) else None
+            if isinstance(docs, list):
+                for entry in docs:
+                    if isinstance(entry, dict) and entry.get("id"):
+                        _upsert_entry_conn(conn, entry)
+        # Same transaction as the rows: a flag that commits without them would
+        # mark an empty library migrated and never retry.
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('json_migrated', '1')"
+        )
 
 
 def _upsert_entry_conn(conn: sqlite3.Connection, entry: dict[str, Any]) -> None:
@@ -127,23 +168,18 @@ def upsert_document(docs_dir: Path, entry: dict[str, Any]) -> None:
     """Insert/update one document entry in SQLite (caller holds _doc_index_lock)."""
     ensure_migrated_from_json(docs_dir)
     conn = _connect(docs_dir)
-    _upsert_entry_conn(conn, entry)
-    conn.commit()
+    with _transaction(docs_dir, conn):
+        _upsert_entry_conn(conn, entry)
 
 
 def delete_document(docs_dir: Path, doc_id: str) -> None:
     conn = _connect(docs_dir)
-    try:
+    # The connection is this thread's for good. Left open, a delete that failed
+    # to commit would be committed by the next write on the thread — after the
+    # caller has put the document's files back.
+    with _transaction(docs_dir, conn):
         conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
-        conn.commit()
-    except BaseException:
-        # The connection is this thread's for good. Left open, a delete that
-        # failed to commit would be committed by the next write on the thread —
-        # after the caller has put the document's files back.
-        with contextlib.suppress(Exception):
-            conn.rollback()
-        raise
 
 
 def get_document(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:
@@ -197,13 +233,13 @@ def export_json(docs_dir: Path, *, last_updated: str | None = None) -> None:
 def upsert_fts(docs_dir: Path, doc_id: str, body: str) -> None:
     """Replace FTS body for a document (caller holds lock or is single-writer)."""
     conn = _connect(docs_dir)
-    conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
-    if body.strip():
-        conn.execute(
-            "INSERT INTO docs_fts (doc_id, body) VALUES (?, ?)",
-            (doc_id, body),
-        )
-    conn.commit()
+    with _transaction(docs_dir, conn):
+        conn.execute("DELETE FROM docs_fts WHERE doc_id = ?", (doc_id,))
+        if body.strip():
+            conn.execute(
+                "INSERT INTO docs_fts (doc_id, body) VALUES (?, ?)",
+                (doc_id, body),
+            )
 
 
 def read_fts(docs_dir: Path, doc_id: str) -> str | None:

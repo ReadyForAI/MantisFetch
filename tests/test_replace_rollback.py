@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import mantisfetch_docreader as dr
 import pytest
 from starlette.testclient import TestClient
 
+import mantisfetch_common.doc_index_store as dis
 import mantisfetch_common.storage as cs
 from mantisfetch_common.doc_index_store import list_documents, search_fts, upsert_fts
 
@@ -388,3 +390,62 @@ def test_a_replacement_landing_mid_write_is_not_rolled_back_by_a_stale_writer(
     full = (doc / "full.md").read_text(encoding="utf-8")
     assert "REPLACEMENT text" in full, "a stale writer rolled the replacement back"
     assert "ORIGINAL" not in full
+
+
+def test_a_replace_whose_index_commit_fails_leaves_the_old_entry(
+    doc_client: TestClient, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit is what fails here, not the call around it.
+
+    SQLite leaves a failed COMMIT's transaction open, and the rollback's own
+    next write — putting the indexed text back — commits on the same cached
+    connection. The replacement's index row used to land that way, while the
+    caller was told the replace had failed and the files on disk were the old
+    ones.
+    """
+    assert _post(doc_client, FIRST, "DOC-6014").status_code == 200
+
+    state = {"touched": False, "denied": False}
+
+    def authorizer(action, arg1, arg2, dbname, source):
+        if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE) and arg1 == "documents":
+            state["touched"] = True
+        if (
+            action == sqlite3.SQLITE_TRANSACTION
+            and arg1 == "COMMIT"
+            and state["touched"]
+            and not state["denied"]
+        ):
+            state["denied"] = True
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    # Through _connect, so the writer's own thread-local connection is the one
+    # that cannot commit — the parse runs in an executor thread.
+    real_connect = dis._connect
+
+    def connect_with_authorizer(d):
+        conn = real_connect(d)
+        conn.set_authorizer(authorizer)
+        return conn
+
+    monkeypatch.setattr(dis, "_connect", connect_with_authorizer)
+
+    response = doc_client.post(
+        "/parse",
+        files={"file": ("replacement.html", SECOND, "text/html")},
+        data={"doc_id": "DOC-6014", "summary_mode": "off", "replace": "true"},
+    )
+    assert response.status_code == 500
+    assert state["denied"], "the commit under test never ran"
+
+    independent = sqlite3.connect(str(docs_dir / ".doc-index.sqlite"))
+    try:
+        row = independent.execute(
+            "SELECT entry_json FROM documents WHERE id = 'DOC-6014'"
+        ).fetchone()
+    finally:
+        independent.close()
+    assert json.loads(row[0])["filename"] == "doc.html", (
+        "the index holds the replacement that never landed"
+    )
