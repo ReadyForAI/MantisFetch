@@ -1411,6 +1411,22 @@ def _stash_source(doc_dir: Path) -> None:
     """
     source = doc_dir / "source"
     stash = doc_dir / _SOURCE_ROLLBACK_DIR
+    # _settle_before_replacing ran under the writer lock, but the parse path
+    # lets go of it before it gets here, and a deferred summary of this
+    # document can finish in between. That is the one thing that can appear:
+    # nothing but this function creates a stash, and same-id replacements are
+    # serialized, but a summary write whose marker would not unlink leaves
+    # one. Staged under it, this replacement's stash would read as committed.
+    # Removing a marker a summary has only just written is safe: without it
+    # the sweep reads the commit from the index row's write_id instead.
+    marker = doc_dir / _REWRITE_COMMITTED
+    with contextlib.suppress(OSError):
+        marker.unlink(missing_ok=True)
+    if marker.exists():
+        raise RuntimeError(
+            f"{doc_dir.name} still holds a commit marker that would not clear; "
+            "refusing to stage a replacement under it"
+        )
     shutil.rmtree(stash, ignore_errors=True)
     if source.exists():
         shutil.move(str(source), str(stash))

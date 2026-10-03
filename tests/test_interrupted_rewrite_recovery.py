@@ -819,3 +819,42 @@ def test_the_committed_stash_is_gone_before_the_deferred_summary_starts(
             break
         time.sleep(0.02)
     assert seen == [False], "the deferred rewrite started with the previous stash still here"
+
+
+def test_staging_a_source_clears_a_stale_marker_first(docs_dir: Path) -> None:
+    """A deferred summary can finish between the settle and the stash and
+    leave its marker behind; the replacement's stash must not sit under it."""
+    _write(docs_dir, "DOC-7124", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7124"
+    (doc / "source").mkdir(exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    (doc / ".rewrite-committed").touch()
+
+    dr._stash_source(doc)
+
+    assert not (doc / ".rewrite-committed").exists(), "the stash was staged under a stale marker"
+    assert (doc / ".rollback-source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
+
+
+def test_a_marker_that_will_not_clear_stops_the_stash_before_it_moves_anything(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7125", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7125"
+    (doc / "source").mkdir(exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    (doc / ".rewrite-committed").touch()
+    real_unlink = Path.unlink
+
+    def refuse_the_marker(self, *a, **k):
+        if self.name == ".rewrite-committed":
+            raise OSError("read-only file system")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", refuse_the_marker)
+    with pytest.raises(RuntimeError, match="commit marker"):
+        dr._stash_source(doc)
+    monkeypatch.undo()
+
+    assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
+    assert not (doc / ".rollback-source").exists()
