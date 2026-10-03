@@ -483,3 +483,41 @@ def test_ambiguous_names_are_not_empty_states(name: str) -> None:
     )
     body = " ".join(b["text"] for b in html_to_blocks(html))
     assert "Genuine article text" in body
+
+
+def test_html_mode_parses_off_the_event_loop(monkeypatch) -> None:
+    """lxml over a multi-megabyte page is real time; the loop must keep ticking."""
+    import time
+
+    real = lb.extract.html_to_blocks
+
+    def slow_html_to_blocks(html, *a, **k):
+        time.sleep(0.4)
+        return real(html, *a, **k)
+
+    monkeypatch.setattr(lb.extract, "html_to_blocks", slow_html_to_blocks)
+
+    async def run() -> float:
+        gaps: list[float] = []
+        stop = asyncio.Event()
+
+        async def ticker() -> None:
+            last = time.monotonic()
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+                now = time.monotonic()
+                gaps.append(now - last)
+                last = now
+
+        tick = asyncio.create_task(ticker())
+        await lb._distill(
+            _html_mode_page(),
+            DistillRequest(session_id="s", distill_mode="html", include_actions=False,
+                           extract_tables=False),
+        )
+        stop.set()
+        await tick
+        return max(gaps)
+
+    worst = asyncio.run(run())
+    assert worst < 0.2, f"the event loop stalled {worst * 1000:.0f} ms parsing the page"

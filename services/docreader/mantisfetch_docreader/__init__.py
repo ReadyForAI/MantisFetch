@@ -3091,6 +3091,41 @@ PREWARM_LOCAL_OCR = os.environ.get("MANTISFETCH_PREWARM_LOCAL_OCR", "true").stri
 }
 
 
+def _prewarm_local_ocr_for_pdf(
+    pdf_path: Path,
+    *,
+    profile: DocumentProfile | None,
+    parse_mode: str | None,
+    force_ocr: bool,
+    ocr_pages_spec: str | None,
+    manual_blank_pages_spec: str | None,
+) -> None:
+    """Start the local OCR worker if this PDF will need it. Blocking — never
+    call it on the event loop: it reads the PDF, and waits on the worker lock
+    that a page being OCRed holds for as long as the page takes."""
+    try:
+        wanted = _should_prewarm_local_ocr_for_pdf(
+            pdf_path,
+            profile=profile,
+            parse_mode=parse_mode,
+            force_ocr=force_ocr,
+            ocr_pages_spec=ocr_pages_spec,
+            manual_blank_pages_spec=manual_blank_pages_spec,
+            ocr_threshold=OCR_THRESHOLD,
+        )
+    except Exception as exc:
+        logger.warning("Local OCR prewarm planning skipped before parse: %s", exc)
+        return
+    if not wanted:
+        return
+    try:
+        with _local_ocr_worker_lock:
+            _get_local_ocr_worker()
+        logger.info("Local OCR worker prewarmed before PDF parse")
+    except Exception as exc:
+        logger.warning("Local OCR worker prewarm skipped before parse: %s", exc)
+
+
 async def _startup_prewarm_local_ocr() -> None:
     if not PREWARM_LOCAL_OCR or not LOCAL_OCR_ENABLED:
         return
@@ -5216,8 +5251,12 @@ async def api_parse_doc(
             effective_mode, effective_profile = _effective_parse_plan(
                 parse_mode, metadata, document_profile, field_ocr_config
             )
+            # In a thread: it opens the PDF and inspects every page, which on a
+            # long document is real time the event loop would otherwise spend
+            # not serving anyone else.
             estimate = (
-                _estimate_parse_seconds(
+                await asyncio.to_thread(
+                    _estimate_parse_seconds,
                     scratch_path,
                     suffix,
                     force_ocr=force_ocr,
@@ -5416,30 +5455,24 @@ async def api_parse_doc(
             try:
                 loop = asyncio.get_event_loop()
                 if suffix == ".pdf":
-                    should_prewarm_local_ocr = False
-                    if PREWARM_LOCAL_OCR:
-                        try:
-                            should_prewarm_local_ocr = _should_prewarm_local_ocr_for_pdf(
+
+                    def _prewarm_then_parse() -> ParsedDocument:
+                        # In the executor, with the parse: planning reads the
+                        # PDF, and the worker lock is held by whichever thread
+                        # is OCRing a page — up to the request timeout. Taken on
+                        # the event loop, a second scanned PDF stalled every
+                        # request on the process, /health included, until the
+                        # first one's page finished.
+                        if PREWARM_LOCAL_OCR:
+                            _prewarm_local_ocr_for_pdf(
                                 tmp_path,
                                 profile=profile,
                                 parse_mode=requested_parse_mode,
                                 force_ocr=force_ocr,
                                 ocr_pages_spec=ocr_pages,
                                 manual_blank_pages_spec=manual_blank_pages_spec,
-                                ocr_threshold=OCR_THRESHOLD,
                             )
-                        except Exception as exc:
-                            logger.warning("Local OCR prewarm planning skipped before parse: %s", exc)
-                    if should_prewarm_local_ocr:
-                        try:
-                            with _local_ocr_worker_lock:
-                                _get_local_ocr_worker()
-                            logger.info("Local OCR worker prewarmed before PDF parse")
-                        except Exception as exc:
-                            logger.warning("Local OCR worker prewarm skipped before parse: %s", exc)
-                    parsed = await loop.run_in_executor(
-                        None,
-                        lambda: parse_pdf(
+                        return parse_pdf(
                             tmp_path,
                             force_ocr=force_ocr,
                             ocr_threshold=OCR_THRESHOLD,
@@ -5452,8 +5485,9 @@ async def api_parse_doc(
                             field_ocr_config=requested_field_ocr_config,
                             parse_mode=requested_parse_mode,
                             manual_blank_pages_spec=manual_blank_pages_spec,
-                        ),
-                    )
+                        )
+
+                    parsed = await loop.run_in_executor(None, _prewarm_then_parse)
                 elif suffix in (".doc", ".docx"):
                     # LibreOffice conversion shells out and can take seconds —
                     # run it off the event loop.
