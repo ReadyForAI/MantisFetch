@@ -86,7 +86,7 @@ def _child(docs_dir: Path, doc_id: str, kill_at: str) -> int:
         cs.DEFAULT_DOCS_DIR = docs
         sys.path.insert(0, {str(ROOT / "tests")!r})
         from test_interrupted_rewrite_recovery import _parsed
-        dr._stash_source(docs / "General" / {doc_id!r})
+        dr._stash_source(docs / "General" / {doc_id!r}, docs_dir=docs, doc_id={doc_id!r})
         if {kill_at!r} != "after":
             setattr(dr, {kill_at!r}, lambda *a, **k: os._exit(73))
         dr.write_output(
@@ -148,7 +148,7 @@ def test_a_stashed_source_alone_goes_back_when_nothing_committed(docs_dir: Path)
     doc = docs_dir / "General" / "DOC-7003"
     (doc / "source").mkdir(parents=True, exist_ok=True)
     (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
-    dr._stash_source(doc)
+    dr._stash_source(doc, docs_dir=docs_dir, doc_id="DOC-7003")
     (doc / "source").mkdir(parents=True, exist_ok=True)
     (doc / "source" / "new.html").write_bytes(b"<p>REPLACEMENT</p>")
 
@@ -830,7 +830,7 @@ def test_staging_a_source_clears_a_stale_marker_first(docs_dir: Path) -> None:
     (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
     (doc / ".rewrite-committed").touch()
 
-    dr._stash_source(doc)
+    dr._stash_source(doc, docs_dir=docs_dir, doc_id="DOC-7124")
 
     assert not (doc / ".rewrite-committed").exists(), "the stash was staged under a stale marker"
     assert (doc / ".rollback-source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
@@ -852,8 +852,8 @@ def test_a_marker_that_will_not_clear_stops_the_stash_before_it_moves_anything(
         return real_unlink(self, *a, **k)
 
     monkeypatch.setattr(Path, "unlink", refuse_the_marker)
-    with pytest.raises(RuntimeError, match="commit marker"):
-        dr._stash_source(doc)
+    with pytest.raises(RuntimeError, match="could not be settled"):
+        dr._stash_source(doc, docs_dir=docs_dir, doc_id="DOC-7125")
     monkeypatch.undo()
 
     assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
@@ -914,3 +914,30 @@ def test_an_in_process_rollback_that_dies_deleting_its_backup_keeps_the_search_t
         "the sweep deleted the search text the in-process rollback put back"
     )
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
+
+
+def test_a_summary_that_committed_mid_gap_is_settled_not_stripped_of_its_marker(
+    docs_dir: Path,
+) -> None:
+    """Codex round 1 on the follow-up. A deferred summary that committed in the
+    gap before the stash, whose cleanup already lost the backup's index
+    snapshot, has only its marker to say it committed. Deleting that marker on
+    its own left a backup the next sweep rolled back — the previous summary put
+    back over the committed one, with the index still describing the new."""
+    _write(docs_dir, "DOC-7128", "COMMITTED summary text")
+    doc = docs_dir / "General" / "DOC-7128"
+    (doc / "source").mkdir(exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    (doc / ".rewrite-committed").touch()
+    backup = doc / ".rollback"
+    backup.mkdir()
+    (backup / "full.md").write_text("PREVIOUS summary text", encoding="utf-8")
+    dr._write_json(backup / ".staged.json", {"staged": ["full.md"]})  # no .index-before.json
+
+    dr._stash_source_locked(docs_dir, "DOC-7128", doc)
+    dr._restore_stashed_source(doc)  # the source persist that follows fails
+    dr._finish_interrupted_rewrites(docs_dir)  # the next start
+
+    full = (doc / "full.md").read_text(encoding="utf-8")
+    assert "COMMITTED" in full and "PREVIOUS" not in full, "the committed summary was rolled back"
+    assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"

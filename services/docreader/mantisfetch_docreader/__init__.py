@@ -1359,6 +1359,22 @@ _FTS_BEFORE = ".fts-before.txt"
 _INDEX_BEFORE = ".index-before.json"
 
 
+def _settle_leftovers_locked(docs_dir: Path, doc_id: str, doc_dir: Path) -> list[str]:
+    """Settle leftovers as the startup sweep would; return what is still there.
+
+    The caller holds the writer lock, so nothing found can be a rewrite in
+    flight. Checked under that same hold rather than trusted from the return
+    value: a committed settle reports "committed" even when dropping the stash
+    failed and left the marker in place.
+    """
+    _settle_interrupted_rewrite(doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=True)
+    return [
+        name
+        for name in (_ROLLBACK_DIR, _SOURCE_ROLLBACK_DIR, _REWRITE_COMMITTED)
+        if (doc_dir / name).exists()
+    ]
+
+
 def _settle_before_replacing(docs_dir: Path, doc_id: str, doc_dir: Path) -> None:
     """Settle whatever an earlier rewrite of this document left, or refuse.
 
@@ -1378,15 +1394,7 @@ def _settle_before_replacing(docs_dir: Path, doc_id: str, doc_dir: Path) -> None
     recorders, which move the stash themselves.
     """
     with _document_writer_lock(docs_dir, doc_id):
-        _settle_interrupted_rewrite(doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=True)
-        # Checked under the same hold, not trusted from the return value: a
-        # committed settle reports "committed" even when dropping the stash
-        # failed and left the marker in place.
-        remaining = [
-            name
-            for name in (_ROLLBACK_DIR, _SOURCE_ROLLBACK_DIR, _REWRITE_COMMITTED)
-            if (doc_dir / name).exists()
-        ]
+        remaining = _settle_leftovers_locked(docs_dir, doc_id, doc_dir)
     if remaining:
         raise HTTPException(
             500,
@@ -1396,7 +1404,7 @@ def _settle_before_replacing(docs_dir: Path, doc_id: str, doc_dir: Path) -> None
         )
 
 
-def _stash_source(doc_dir: Path) -> None:
+def _stash_source(doc_dir: Path, *, docs_dir: Path, doc_id: str) -> None:
     """Move the stored source aside so a failed replacement can put it back.
 
     The upload is persisted before the writer runs — the writer needs the record
@@ -1411,25 +1419,29 @@ def _stash_source(doc_dir: Path) -> None:
     """
     source = doc_dir / "source"
     stash = doc_dir / _SOURCE_ROLLBACK_DIR
-    # _settle_before_replacing ran under the writer lock, but the parse path
-    # lets go of it before it gets here, and a deferred summary of this
-    # document can finish in between. That is the one thing that can appear:
-    # nothing but this function creates a stash, and same-id replacements are
-    # serialized, but a summary write whose marker would not unlink leaves
-    # one. Staged under it, this replacement's stash would read as committed.
-    # Removing a marker a summary has only just written is safe: without it
-    # the sweep reads the commit from the index row's write_id instead.
-    marker = doc_dir / _REWRITE_COMMITTED
-    with contextlib.suppress(OSError):
-        marker.unlink(missing_ok=True)
-    if marker.exists():
+    # The caller holds the writer lock. _settle_before_replacing ran under it
+    # too, but in an earlier hold, and a deferred summary of this document can
+    # finish in between and leave its scaffolding — a marker that would not
+    # unlink, a backup half deleted. Nothing but this function creates a
+    # stash and same-id replacements are serialized, so that is all that can
+    # appear. Settled again here, in the same hold as the stash: deleting the
+    # marker on its own would throw away the only evidence a summary whose
+    # backup had already lost its index snapshot ever committed.
+    remaining = _settle_leftovers_locked(docs_dir, doc_id, doc_dir)
+    if remaining:
         raise RuntimeError(
-            f"{doc_dir.name} still holds a commit marker that would not clear; "
-            "refusing to stage a replacement under it"
+            f"{doc_dir.name} still holds {', '.join(remaining)} that could not be "
+            "settled; refusing to stage a replacement under it"
         )
     shutil.rmtree(stash, ignore_errors=True)
     if source.exists():
         shutil.move(str(source), str(stash))
+
+
+def _stash_source_locked(docs_dir: Path, doc_id: str, doc_dir: Path) -> None:
+    """`_stash_source` for a caller that does not already hold the writer lock."""
+    with _document_writer_lock(docs_dir, doc_id):
+        _stash_source(doc_dir, docs_dir=docs_dir, doc_id=doc_id)
 
 
 def _restore_stashed_source(doc_dir: Path) -> None:
@@ -4930,7 +4942,7 @@ def _store_raw_serialized(
         # or a disk error would destroy a document that was perfectly readable a
         # moment ago.
         if will_replace:
-            _stash_source(doc_dir)
+            _stash_source(doc_dir, docs_dir=docs_dir, doc_id=d_id)
         with _restore_on_failure(
             doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
         ):
@@ -5711,7 +5723,9 @@ async def api_parse_doc(
                 # source it is about to overwrite aside first, so a failure
                 # further down can put the whole document back (#212).
                 if STORE_SOURCE_FILES and will_replace:
-                    await loop.run_in_executor(None, _stash_source, doc_storage_dir)
+                    await loop.run_in_executor(
+                        None, _stash_source_locked, docs_dir, d_id, doc_storage_dir
+                    )
                 source_record = (
                     await loop.run_in_executor(
                         None, _persist_source_file, doc_storage_dir, filename, tmp_path
