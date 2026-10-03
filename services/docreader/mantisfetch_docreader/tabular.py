@@ -49,7 +49,17 @@ _SHEET_CELL_TAGS = frozenset(
         "{http://purl.oclc.org/ooxml/spreadsheetml/main}c",
     }
 )
-_CELL_REF = re.compile(r"([A-Za-z]*)(\d+)$")
+#: A cell reference as SpreadsheetML writes one: at most XFD (16,384 columns)
+#: and 1,048,576 rows, so three letters and seven digits. Bounded before any
+#: conversion — an uploaded reference can be arbitrarily long, and turning it
+#: into an integer is quadratic in its length (and past 4,300 digits Python
+#: refuses outright, which would end the count for that sheet early).
+_CELL_REF = re.compile(r"([A-Za-z]{1,3})(\d{1,7})$")
+_ROW_NUMBER = re.compile(r"\d{1,7}$")
+#: What a reference that cannot be a real one counts as: past the end of any
+#: sheet Excel can write, so it lands on the refusal rather than slipping by.
+_PAST_LAST_ROW = 10**7
+_PAST_LAST_COLUMN = 16_385
 
 
 def _column_number(letters: str) -> int:
@@ -153,18 +163,30 @@ def _check_xlsx_row_budget(
                             with contextlib.suppress(ValueError):
                                 open_elements[-1].remove(element)
                         if element.tag in _SHEET_CELL_TAGS:
-                            match = _CELL_REF.match(element.get("r") or "")
-                            if match and match.group(1):
+                            # Only a cell in a row is a cell of the grid: the
+                            # calculation chain is made of <c r="…"> elements
+                            # too, naming cells the sheets already counted.
+                            if not open_elements or open_elements[-1].tag not in _SHEET_ROW_TAGS:
+                                continue
+                            ref = element.get("r")
+                            match = _CELL_REF.match(ref or "")
+                            if match:
                                 column = _column_number(match.group(1))
                                 spans = max(spans, int(match.group(2)))
+                            elif ref:
+                                column = _PAST_LAST_COLUMN
+                                spans = _PAST_LAST_ROW
                             else:
                                 column += 1
                             width = max(width, column)
                         elif element.tag in _SHEET_ROW_TAGS:
                             number = element.get("r")
-                            previous = (
-                                int(number) if number and number.isdigit() else previous + 1
-                            )
+                            if not number:
+                                previous += 1
+                            elif _ROW_NUMBER.match(number):
+                                previous = int(number)
+                            else:
+                                previous = _PAST_LAST_ROW
                             spans = max(spans, previous)
                             column = 0  # the next cell starts a new row
                         else:

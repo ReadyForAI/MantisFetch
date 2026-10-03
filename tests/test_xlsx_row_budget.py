@@ -398,3 +398,38 @@ def test_a_wide_sparse_workbook_is_refused_before_conversion(
     assert "MANTISFETCH_MAX_PARSE_CELLS" in resp.json()["detail"]
     assert conversions == [], "the workbook was converted before it was refused"
     _nothing_was_kept(docs)
+
+
+def test_the_calculation_chain_is_not_another_sheet(tmp_path) -> None:
+    """calcChain.xml is <c r="…"> elements too, naming cells already counted."""
+    wb = openpyxl.Workbook()
+    for r in range(10):
+        wb.active.append(list(range(10)))
+    buf = io.BytesIO()
+    wb.save(buf)
+    chain = f'<calcChain xmlns="{_NS}"><c r="J10" i="1"/><c r="XFD9000" i="1"/></calcChain>'
+    content = _with_part(buf.getvalue(), "xl/calcChain.xml", chain.encode())
+    _cells(tmp_path, content, 100, row_limit=10)
+
+
+def test_an_absurdly_long_reference_is_refused_quickly(tmp_path) -> None:
+    import time
+
+    from fastapi import HTTPException
+
+    body = f'<row r="1"><c r="{"A" * 80_000}1"/></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/long.xml", _raw_sheet(body))
+    started = time.monotonic()
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, content, 1_000_000)
+    assert time.monotonic() - started < 0.5
+
+
+def test_a_row_number_too_long_to_be_real_does_not_end_the_count(tmp_path) -> None:
+    """Past 4,300 digits int() raises — which used to abandon the sheet's count."""
+    from fastapi import HTTPException
+
+    body = f'<row r="{"9" * 5000}"><c><v>1</v></c></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/huge.xml", _raw_sheet(body))
+    with pytest.raises(HTTPException):
+        _budget(tmp_path, content, 100_000)
