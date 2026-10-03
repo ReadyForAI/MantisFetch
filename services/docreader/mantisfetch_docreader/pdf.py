@@ -21,6 +21,7 @@ function-level relative import off the facade — that breaks the import cycle
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -28,6 +29,8 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+from mantisfetch_common.atomic import _write_json
 
 from .models import (
     OCRBlocksSidecar,
@@ -53,6 +56,50 @@ from .ocr_text import (
 )
 from .profiles import _apply_field_focused_ocr, _load_document_profile
 from .sectioning import _split_sections, _split_sections_from_toc
+
+#: A local-OCR page cache entry holds the page's text *and* its layout. The
+#: entries used to be text alone (``….txt``), so a cache hit gave the page back
+#: without the blocks the first parse produced, and re-parsing the same PDF
+#: deleted its ocr_blocks.json — a cache that changed the output, not just the
+#: cost. A new name rather than a migration: the old text-only entries cannot
+#: answer for the layout, so they never match, and each page they covered is
+#: OCRed once more the next time its document is parsed.
+_LOCAL_PAGE_CACHE_SCHEMA = 1
+
+
+def _local_page_cache_path(cache_dir: Path, page_num: int, backend: str, key: str) -> Path:
+    return _ocr_cache_variant_path(
+        cache_dir, f"ocr_p{page_num:04d}.local-{backend}.{key}.page.json"
+    )
+
+
+def _read_local_page_cache(path: Path) -> tuple[str, OCRPageBlocks | None] | None:
+    """A cached page's (text, layout), or None for a miss — including an entry
+    that will not read back, which is re-OCRed rather than half-trusted."""
+    if not path.exists():
+        return None
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        if entry.get("schema") != _LOCAL_PAGE_CACHE_SCHEMA:
+            return None
+        text = entry["text"]
+        if not isinstance(text, str) or _is_ocr_failed_text(text):
+            return None
+        layout = entry.get("layout")
+        return text, OCRPageBlocks.from_dict(layout) if layout else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def _write_local_page_cache(path: Path, text: str, page_blocks: OCRPageBlocks | None) -> None:
+    _write_json(
+        path,
+        {
+            "schema": _LOCAL_PAGE_CACHE_SCHEMA,
+            "text": text,
+            "layout": page_blocks.to_dict() if page_blocks is not None else None,
+        },
+    )
 
 logger = logging.getLogger("mantisfetch_docreader")
 
@@ -329,7 +376,26 @@ def parse_pdf(
             pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
             img_bytes = pix.tobytes("png")
 
-            if cache_dir:
+            if cache_dir and page_num not in llm_ocr_set:
+                cached_page = _read_local_page_cache(
+                    _local_page_cache_path(
+                        cache_dir, page_num, ocr_plan["local_backend"], _ocr_cache_key(img_bytes)
+                    )
+                )
+                if cached_page is not None:
+                    local_ocr_results[page_num], cached_layout = cached_page
+                    if cached_layout is not None:
+                        local_ocr_layout_pages[page_num] = cached_layout
+                    logger.info("Page %d/%d: %s OCR cache hit", page_num, total_pages, cache_key)
+                    try:
+                        from mantisfetch_common import metrics as metrics
+
+                        metrics.incr("ocr_cache_hits")
+                        metrics.incr("ocr_pages")
+                    except Exception:  # noqa: BLE001 — metrics must never break OCR
+                        pass
+                    continue
+            elif cache_dir:
                 ck = _ocr_cache_key(img_bytes)
                 # Both backends key on how the text was produced as well as on
                 # the image. The LLM path used to key on the image alone, so a
@@ -349,10 +415,9 @@ def parse_pdf(
                             cache_key,
                         )
                     else:
-                        if page_num in llm_ocr_set:
-                            llm_ocr_results[page_num] = cached
-                        else:
-                            local_ocr_results[page_num] = cached
+                        # Only LLM pages reach here; local ones read their
+                        # page entry above.
+                        llm_ocr_results[page_num] = cached
                         logger.info("Page %d/%d: %s OCR cache hit", page_num, total_pages, cache_key)
                         try:
                             from mantisfetch_common import metrics as metrics
@@ -389,10 +454,13 @@ def parse_pdf(
                     and profile.cache_policy.page_ocr
                     and not _is_ocr_failed_text(text)
                 ):
-                    _ocr_cache_variant_path(
-                        cache_dir,
-                        f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_b)}.txt",
-                    ).write_text(text, encoding="utf-8")
+                    _write_local_page_cache(
+                        _local_page_cache_path(
+                            cache_dir, pn, ocr_plan["local_backend"], _ocr_cache_key(img_b)
+                        ),
+                        text,
+                        page_blocks,
+                    )
                 return pn, text, page_blocks
             finally:
                 png_path.unlink(missing_ok=True)
@@ -474,20 +542,21 @@ def parse_pdf(
             pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
             img_bytes = pix.tobytes("png")
             if cache_dir:
-                ck_path = _ocr_cache_variant_path(
-                    cache_dir,
-                    f"ocr_p{pn:04d}.local-{ocr_plan['local_backend']}.{_ocr_cache_key(img_bytes)}.txt",
+                cached_page = _read_local_page_cache(
+                    _local_page_cache_path(
+                        cache_dir, pn, ocr_plan["local_backend"], _ocr_cache_key(img_bytes)
+                    )
                 )
-                if ck_path.exists():
-                    cached = ck_path.read_text(encoding="utf-8")
-                    if not _is_ocr_failed_text(cached):
-                        local_ocr_results[pn] = cached
-                        logger.info(
-                            "Page %d/%d: local OCR cache hit (LLM OCR fallback)",
-                            pn,
-                            total_pages,
-                        )
-                        continue
+                if cached_page is not None:
+                    local_ocr_results[pn], cached_layout = cached_page
+                    if cached_layout is not None:
+                        local_ocr_layout_pages[pn] = cached_layout
+                    logger.info(
+                        "Page %d/%d: local OCR cache hit (LLM OCR fallback)",
+                        pn,
+                        total_pages,
+                    )
+                    continue
             png_path = ocr_png_scratch / f"ocr_p{pn:04d}.local-fallback.png"
             png_path.write_bytes(img_bytes)
             fallback_tasks.append((pn, png_path))

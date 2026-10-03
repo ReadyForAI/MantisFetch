@@ -69,6 +69,19 @@ class OCRTextBlock:
             "order": int(self.order),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OCRTextBlock:
+        """The inverse of ``to_dict``; raises on anything it did not write."""
+        return cls(
+            block_id=str(data["block_id"]),
+            text=str(data["text"]),
+            bbox=tuple(_normalize_layout_bbox(data["bbox"])),  # type: ignore[arg-type]
+            confidence=float(data.get("confidence", 0.0)),
+            source=str(data.get("source", "local_ocr")),
+            line_index=int(data.get("line_index", 0)),
+            order=int(data.get("order", 0)),
+        )
+
 
 @dataclass(frozen=True)
 class OCRPageBlocks:
@@ -86,6 +99,16 @@ class OCRPageBlocks:
             "height": int(self.height),
             "blocks": [block.to_dict() for block in self.blocks],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OCRPageBlocks:
+        """The inverse of ``to_dict``; raises on anything it did not write."""
+        return cls(
+            page=int(data["page"]),
+            width=int(data["width"]),
+            height=int(data["height"]),
+            blocks=tuple(OCRTextBlock.from_dict(b) for b in data.get("blocks") or ()),
+        )
 
 
 @dataclass(frozen=True)
