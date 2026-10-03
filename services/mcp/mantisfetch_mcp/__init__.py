@@ -417,10 +417,13 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
                     "opened (rejected by the path fence)"
                 ) from None
             continue  # missing, or not a file: try the next root
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            # A directory or a FIFO under the name: not this root's file. On the
+            # raw descriptor, because wrapping a directory raises first.
+            os.close(fd)
+            continue
         with os.fdopen(fd, "rb") as fh:
-            st = os.fstat(fh.fileno())
-            if not stat.S_ISREG(st.st_mode):
-                continue
             # Size from the descriptor before reading, so an allowed but huge
             # resource file can't spike memory ahead of the docreader's own
             # streaming size enforcement — and a bounded read, so a file that

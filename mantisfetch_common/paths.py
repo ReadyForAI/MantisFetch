@@ -32,6 +32,11 @@ def open_within(root: Path, target: Path) -> int:
             nxt = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=dir_fd)
             os.close(dir_fd)
             dir_fd = nxt
-        return os.open(rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        # O_NONBLOCK so a FIFO swapped in (or left) at the leaf returns at once
+        # instead of waiting for a writer; it changes nothing for a regular
+        # file, and callers reject anything else on the descriptor.
+        return os.open(
+            rel_parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd
+        )
     finally:
         os.close(dir_fd)

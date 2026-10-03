@@ -606,3 +606,40 @@ def test_a_stable_symlink_inside_the_root_still_reads(tmp_path, monkeypatch) -> 
     monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
     name, data = mm._resolve_local_doc("alias.pdf")
     assert data == b"%PDF real" and name == "real.pdf"
+
+
+def test_a_fifo_under_the_name_is_refused_without_blocking(tmp_path, monkeypatch) -> None:
+    """A FIFO with no writer would hold open() forever — on the event loop."""
+    import os
+    import signal
+
+    root = tmp_path / "resource"
+    root.mkdir()
+    os.mkfifo(root / "pipe.pdf")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+
+    class Blocked(BaseException):
+        """Not an OSError — the resolver would swallow one of those."""
+
+    def give_up(*_):
+        raise Blocked("open() blocked on the FIFO")
+
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(2)
+    try:
+        with pytest.raises(mm.ToolError, match="not found"):
+            mm._resolve_local_doc("pipe.pdf")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def test_a_directory_under_the_name_falls_through_to_the_next_root(
+    tmp_path, monkeypatch
+) -> None:
+    first, second = tmp_path / "a", tmp_path / "b"
+    (first / "doc.pdf").mkdir(parents=True)
+    second.mkdir()
+    (second / "doc.pdf").write_bytes(b"%PDF second")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", f"{first}:{second}")
+    assert mm._resolve_local_doc("doc.pdf") == ("doc.pdf", b"%PDF second")
