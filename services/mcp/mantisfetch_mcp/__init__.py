@@ -720,24 +720,26 @@ def _fit_distill(out: Any) -> Any:
     budget = _result_budget()
     if _wire_bytes(out) <= budget:
         return out
-    out = dict(out)
+    lists = {k: list(out[k]) for k in ("sections", "actions") if isinstance(out.get(k), list)}
     omitted: list[str] = []
-    for key in ("sections", "actions"):
-        items = out.get(key)
-        if not isinstance(items, list):
-            continue
-        items = list(items)
-        while items and _wire_bytes({**out, key: items}) > budget:
-            dropped = items.pop()
+
+    def assembled() -> dict[str, Any]:
+        # Measured with the omission metadata included: added afterwards, it
+        # could push a result that had just fitted back over the budget.
+        d = {**out, **lists, "truncated": True}
+        if omitted:
+            d["omitted_sids"] = list(reversed(omitted))
+        return d
+
+    for key in lists:
+        while lists[key] and _wire_bytes(assembled()) > budget:
+            dropped = lists[key].pop()
             if key == "sections" and isinstance(dropped, dict) and dropped.get("sid"):
                 omitted.append(str(dropped["sid"]))
-        out[key] = items
-        out["truncated"] = True
-        if _wire_bytes(out) <= budget:
-            break
-    if omitted:
-        out["omitted_sids"] = list(reversed(omitted))
-    return out
+    result = assembled()
+    if _wire_bytes(result) > budget:
+        result = _shrink_entry(result, lambda d: _wire_bytes(d) <= budget, ())
+    return result
 
 
 @mcp.tool()

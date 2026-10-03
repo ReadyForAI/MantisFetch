@@ -292,3 +292,23 @@ def test_an_oversized_distill_is_trimmed_not_refused(client, monkeypatch) -> Non
     assert out["truncated"] is True
     kept = [s["sid"] for s in out["sections"]]
     assert kept and kept + out["omitted_sids"] == [f"s{i:03d}" for i in range(60)]
+
+
+@pytest.mark.parametrize("chars", [200, 261, 300, 1000])
+def test_a_trimmed_distill_still_fits_once_its_omissions_are_listed(
+    client, monkeypatch, chars
+) -> None:
+    """Codex round 3: the omitted_sids list was added after the trim was
+    measured, and could push a result that had just fitted back over (60,035
+    bytes with 261-character sections), where the guard refused it."""
+    sections = [{"sid": f"s{i:03d}", "h": "节", "t": "约" * chars} for i in range(400)]
+
+    async def fake_web_post(path, payload, headers=None):
+        return {"url": "https://example.com/p", "sections": sections, "actions": []}
+
+    monkeypatch.setattr(mm, "_web_post", fake_web_post)
+    result, size = _call(client, "web_distill", {"session_id": "sess-1"})
+    assert size < WALL
+    out = _payload(result)
+    assert [s["sid"] for s in out["sections"]] + out["omitted_sids"] == \
+        [f"s{i:03d}" for i in range(400)]
