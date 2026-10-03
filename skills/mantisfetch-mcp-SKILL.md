@@ -174,7 +174,7 @@ Notes:
 | `doc_parse` | Parse a document into the library; returns `doc_id` + structure. `store_only=true` stores a `.md` / image as-is instead (no parser, `kind: "raw"`, read it back with `doc_source`). | `rel_path?` **xor** `content_b64?`, `filename?`, `content_type="General"`, `generate_summary=true`, `extract_tables=true`, `force_ocr=false`, `tags?`, `doc_id?`, `replace=false`, `store_only=false` |
 | `doc_digest` | Digest tier (~200 tokens): cheapest overview. | `doc_id` |
 | `doc_brief` | Brief tier (~1.5k tokens): section headings + snippets. | `doc_id` |
-| `doc_sections` | List sections (sid + title) for targeted retrieval. | `doc_id` |
+| `doc_sections` | List sections (sid + title, plus `table_refs` naming each section's tables) for targeted retrieval. **Paged** so a page always fits in one tool result: `total`, `next_offset` (null when the list is complete), `truncated` (true while more remain) — call again with `offset=next_offset`. Small documents come back whole on the first call. | `doc_id`, `offset=0`, `limit?` |
 | `doc_section` | Section tier: full text of one section by sid. | `doc_id`, `sid` |
 | `doc_sections_batch` | Read several sections by sid in one call (fewer round-trips than repeated `doc_section`); returns found + missing sids. | `doc_id`, `sids[]` |
 | `doc_full` | Full document text — expensive; prefer the tiers above. | `doc_id` |
@@ -182,8 +182,9 @@ Notes:
 | `doc_search_text` | **Full-text** search across document bodies; returns doc_id + sid + a snippet per hit. Use this when the term appears only in the text. | `q`, `tags?`, `doc_id?`, `scope="all"` (`all` \| `full` \| `section`), `limit=20` |
 | `doc_search_sections` | Search within one document's sections; returns sid/page provenance. | `doc_id`, `q`, `include_content=false` |
 | `doc_table` | Read one extracted table (with numeric column stats). | `doc_id`, `table_id`, `fmt="md"` (`md` \| `json`) |
+| `doc_tables` | List a document's tables (`table_id`, pages, row/column counts) — the ids for `doc_table`. Paged like `doc_sections` (`total`, `next_offset`, `truncated`). | `doc_id`, `offset=0`, `limit?` |
 | `doc_chunks` | Retrieval-friendly chunks for downstream RAG. | `doc_id`, `include_text=false` |
-| `doc_manifest` | Provenance manifest (source, hash, timestamps). | `doc_id` |
+| `doc_manifest` | Provenance manifest (source, hash, timestamps). `truncated` is always present: on a document whose manifest would not fit in one tool result it is `true`, the per-entry lists (`sections`, `tables`, `images`, per-page quality detail) are left out and named in `omitted`, the counts stay, and `table_ids` lists the ids to pass to `doc_table` when they fit. `doc_sections` and `doc_tables` (both paged) list everything. | `doc_id` |
 | `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, 64 KiB per window, `next_offset` to continue. The only reader for a raw document — `doc_full` / `doc_section` 404 on it. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
 | `doc_summary` | The document's three-tier generated summary / status. | `doc_id` |
 

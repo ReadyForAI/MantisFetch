@@ -36,6 +36,7 @@ from __future__ import annotations
 import base64
 import errno
 import inspect
+import json
 import os
 import re
 import secrets
@@ -122,6 +123,26 @@ _CACHED_LIST_METHODS = (
     "resources/list",
     "resources/templates/list",
 )
+
+#: How large one tool result may be once it is on the wire (#290). NodalOS cuts
+#: every tool return at 65,536 bytes, mid-string, leaving JSON that will not
+#: parse — or parses into a list that looks complete and is not. This leaves
+#: room under that for the JSON-RPC envelope around the result.
+_MCP_RESULT_BUDGET = 60_000
+
+
+def _wire_bytes(result: Any) -> int:
+    """A tool result's size on the wire, measured the pessimistic way.
+
+    The SDK sends the result as JSON text (indented) inside a JSON string, and
+    on the 2026-07-28 face it escapes non-ASCII as \\uXXXX — six bytes for a
+    CJK character that is three in UTF-8; measured, the envelope ran 1.93x the
+    raw result. Counting it ASCII-escaped and double-encoded models exactly
+    that, and over-counts for any client that re-encodes as UTF-8, which only
+    makes a page smaller than it needed to be.
+    """
+    return len(json.dumps(json.dumps(result, indent=2, default=str)))
+
 
 # Transport settings (stateless_http / path / transport_security) are not
 # constructor arguments in SDK v2 — they belong to streamable_http_app() at the
@@ -910,10 +931,147 @@ async def doc_brief(doc_id: str) -> Any:
     return await _doc_get(f"/library/{doc_id}/brief")
 
 
+def _page_entries(
+    data: dict[str, Any],
+    key: str,
+    offset: int,
+    limit: int | None,
+    *,
+    trim: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """One page of ``data[key]`` that fits in a tool result (#290).
+
+    The page holds at least one entry, so walking ``next_offset`` always moves.
+    An entry too large to fit even on its own has its ``trim`` list fields cut
+    to what fits, each marked ``<field>_truncated: true`` on that entry — the
+    page must never go out larger than the client will deliver.
+    """
+    entries = data[key]
+    total = len(entries)
+    if offset < 0 or offset > total:
+        raise ToolError(
+            f"offset {offset} is outside this document's {total} {key}; start at 0, or "
+            "pass the next_offset the previous page returned"
+        )
+    if limit is not None and limit < 1:
+        raise ToolError("limit must be at least 1")
+    stop = total if limit is None else min(total, offset + limit)
+
+    def page(end: int, items: list[Any] | None = None) -> dict[str, Any]:
+        more = end < total
+        return {
+            **data,
+            key: entries[offset:end] if items is None else items,
+            "total": total,
+            "offset": offset,
+            "next_offset": end if more else None,
+            "truncated": more,
+        }
+
+    # Grow by each entry's own cost, then check the real page and back off —
+    # measuring the whole page on every step would be quadratic on a long list.
+    end, used = offset, _wire_bytes(page(offset))
+    while end < stop:
+        cost = _wire_bytes(entries[end]) + 32  # nesting indent + separator
+        if end > offset and used + cost > _MCP_RESULT_BUDGET:
+            break
+        used += cost
+        end += 1
+    while end > offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
+        end -= 1
+    if end == offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
+        def fits(candidate: dict[str, Any]) -> bool:
+            return _wire_bytes(page(end, [candidate])) <= _MCP_RESULT_BUDGET
+
+        return page(end, [_shrink_entry(dict(entries[offset]), fits, trim)])
+    return page(end)
+
+
+#: What an entry is still known by when nothing else of it fits.
+_ENTRY_ID_FIELDS = ("sid", "table_id", "index", "title")
+
+
+def _shrink_entry(
+    entry: dict[str, Any], fits: Any, lists: tuple[str, ...]
+) -> dict[str, Any]:
+    """Cut one entry down until ``fits(entry)``, saying what was cut.
+
+    The named lists first, halved; then the longest strings, halved, whatever
+    field they are in (a web table's whole caption becomes its section title);
+    and if that is still not enough, the entry is reduced to what identifies it
+    and marked ``entry_truncated``. Every step is marked ``<field>_truncated``,
+    and the last one cannot fail to fit, so a page is never sent larger than
+    the client will deliver.
+    """
+    for field in lists:
+        values = entry.get(field)
+        if fits(entry):
+            return entry
+        if isinstance(values, list) and values:
+            keep = len(values)
+            while keep and not fits({**entry, field: values[:keep]}):
+                keep //= 2
+            entry[field] = values[:keep]
+            entry[f"{field}_truncated"] = True
+    while not fits(entry):
+        strings = [k for k, v in entry.items() if isinstance(v, str) and len(v) > 64]
+        if not strings:
+            break
+        longest = max(strings, key=lambda k: len(entry[k]))
+        entry[longest] = entry[longest][: len(entry[longest]) // 2]
+        entry[f"{longest}_truncated"] = True
+    if fits(entry):
+        return entry
+    stub: dict[str, Any] = {k: entry[k] for k in _ENTRY_ID_FIELDS if k in entry}
+    stub["entry_truncated"] = True
+    if not fits(stub):
+        stub = {k: v for k, v in stub.items() if k != "title"}
+    return stub
+
+
 @mcp.tool()
-async def doc_sections(doc_id: str) -> Any:
-    """List a document's sections (sid + title) for targeted retrieval."""
-    return await _doc_get(f"/library/{doc_id}/sections")
+async def doc_sections(doc_id: str, offset: int = 0, limit: int | None = None) -> Any:
+    """List a document's sections (sid + title, plus table_refs naming the
+    tables in each) for targeted retrieval.
+
+    Paged so the list always fits in one tool result: `total` is the number of
+    sections, `next_offset` is where the next page starts — null once the list
+    is complete — and `truncated` is true while more remain. Call again with
+    offset=next_offset to read on. `limit` caps the entries per page; the page
+    also stops before it would outgrow a tool result, but always holds at least
+    one entry. Small documents come back whole on the first call. A section
+    whose own table_refs would not fit has them cut and table_refs_truncated
+    set; doc_tables lists every table."""
+    data = await _doc_get(f"/library/{doc_id}/sections")
+    if not isinstance(data, dict) or not isinstance(data.get("sections"), list):
+        return data
+    return _page_entries(data, "sections", offset, limit, trim=("table_refs", "image_refs"))
+
+
+@mcp.tool()
+async def doc_tables(doc_id: str, offset: int = 0, limit: int | None = None) -> Any:
+    """List a document's tables (table_id, pages, row/column counts) — the ids
+    to pass to doc_table. Paged exactly like doc_sections: `total`,
+    `next_offset` (null when complete), `truncated`."""
+    manifest = await _doc_get(f"/library/{doc_id}/manifest")
+    if not isinstance(manifest, dict):
+        return manifest
+    tables = manifest.get("tables")
+    # The discovery fields only: an OCR-derived table also carries a list of
+    # layout block references that grows with the table, and doc_table is
+    # where the detail lives.
+    listed = [
+        {k: t[k] for k in _TABLE_LISTING_FIELDS if k in t}
+        for t in (tables if isinstance(tables, list) else [])
+        if isinstance(t, dict)
+    ]
+    return _page_entries({"doc_id": doc_id, "tables": listed}, "tables", offset, limit)
+
+
+_TABLE_LISTING_FIELDS = (
+    "table_id", "type", "source", "page", "page_start", "page_end",
+    "row_count", "column_count", "has_header", "continued_from", "continued_to",
+)
 
 
 @mcp.tool()
@@ -996,8 +1154,84 @@ async def doc_manifest(doc_id: str) -> Any:
     Also the ingest-existence probe: a 200 means the doc is in the library (the
     manifest is written the moment parse completes, before any summary), a 404
     doc_not_found means it is not ingested yet (parse it). Prefer this over
-    doc_digest for a presence check — a digest can lag when summaries are deferred."""
-    return await _doc_get(f"/library/{doc_id}/manifest")
+    doc_digest for a presence check — a digest can lag when summaries are deferred.
+
+    `truncated` is always present. On a document whose manifest would not fit in
+    one tool result it is true, and the per-entry lists are left out — named in
+    `omitted`, with their counts (section_count, table_count, image_count) still
+    here. `table_ids` lists the ids to pass to doc_table when they fit;
+    doc_sections and doc_tables (both paged) list everything."""
+    return _fit_manifest(await _doc_get(f"/library/{doc_id}/manifest"), doc_id)
+
+
+#: What a manifest that does not fit gives up first: the per-entry lists, which
+#: doc_sections (paged) already serves, then the per-page quality detail. On the
+#: one oversized manifest measured (446 sections, 119 tables) these were 98%.
+_MANIFEST_DROP_FIRST = ("sections", "tables", "images")
+
+#: Never dropped by the last-resort pass: what identifies the document and says
+#: how much was left out.
+_MANIFEST_KEEP = frozenset(
+    {
+        "doc_id", "kind", "filename", "file_type", "content_type", "storage_path",
+        "section_count", "table_count", "image_count", "total_pages",
+        "truncated", "omitted", "see",
+    }
+)
+
+
+def _fit_manifest(manifest: Any, doc_id: str) -> Any:
+    """The manifest, or a projection of it that fits in one tool result (#290)."""
+    if not isinstance(manifest, dict):
+        return manifest
+    fitted = {**manifest, "truncated": False}
+    if _wire_bytes(fitted) <= _MCP_RESULT_BUDGET:
+        return fitted
+    omitted: list[str] = []
+    tables = fitted.get("tables")
+    for key in _MANIFEST_DROP_FIRST:
+        if key in fitted:
+            # Counts survive the drop. A parsed document's manifest carries them
+            # already; a web capture's does not, so derive them first.
+            if isinstance(fitted[key], list):
+                fitted.setdefault(f"{key[:-1]}_count", len(fitted[key]))
+            del fitted[key]
+            omitted.append(key)
+    if isinstance(tables, list) and tables:
+        # The ids alone, so doc_table stays reachable. Section table_refs are
+        # not enough: a multi-section DOCX leaves every one empty on purpose
+        # (its sections all collapse onto page 1), and dropping the list
+        # would leave such a document with no route to its tables at all.
+        fitted["table_ids"] = [
+            t["table_id"] for t in tables if isinstance(t, dict) and t.get("table_id")
+        ]
+    parse_metadata = fitted.get("parse_metadata")
+    if isinstance(parse_metadata, dict) and "quality_assessment" in parse_metadata:
+        fitted["parse_metadata"] = {
+            k: v for k, v in parse_metadata.items() if k != "quality_assessment"
+        }
+        omitted.append("parse_metadata.quality_assessment")
+    fitted["truncated"] = True
+    fitted["omitted"] = omitted
+    fitted["see"] = (
+        "doc_sections for the section list and doc_tables for the table ids (both "
+        f"paged); GET /doc/library/{doc_id}/manifest for the whole manifest"
+    )
+    # Belt and braces: drop whatever is largest until it fits.
+    while _wire_bytes(fitted) > _MCP_RESULT_BUDGET:
+        candidates = [k for k in fitted if k not in _MANIFEST_KEEP]
+        if not candidates:
+            break
+        largest = max(candidates, key=lambda k: _wire_bytes(fitted[k]))
+        del fitted[largest]
+        omitted.append(largest)
+    # And if what identifies the document is itself too long (a filename of
+    # any length is accepted), cut its strings the way an oversized entry is.
+    if _wire_bytes(fitted) > _MCP_RESULT_BUDGET:
+        fitted = _shrink_entry(
+            fitted, lambda m: _wire_bytes(m) <= _MCP_RESULT_BUDGET, ()
+        )
+    return fitted
 
 
 @mcp.tool()

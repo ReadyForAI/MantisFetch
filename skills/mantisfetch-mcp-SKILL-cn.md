@@ -153,7 +153,7 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_parse` | 解析文档入库；返回 `doc_id` + 结构。带 `store_only=true` 则改为原样入库（不解析、`kind: "raw"`，用 `doc_source` 读回），仅限 `.md` 与图片。 | `rel_path?` **xor** `content_b64?`、`filename?`、`content_type="General"`、`generate_summary=true`、`extract_tables=true`、`force_ocr=false`、`tags?`、`doc_id?`、`replace=false`、`store_only=false` |
 | `doc_digest` | Digest 级（~200 tokens）：最便宜的概览。 | `doc_id` |
 | `doc_brief` | Brief 级（~1.5k tokens）：section 标题 + 片段。 | `doc_id` |
-| `doc_sections` | 列出 sections（sid + 标题）以做定向检索。 | `doc_id` |
+| `doc_sections` | 列出 sections（sid + 标题，以及标出各节所含表格的 `table_refs`）以做定向检索。**分页**，保证每页都放得进一次工具返回：`total`、`next_offset`（列表读完时为 null）、`truncated`（还有剩余时为 true）——用 `offset=next_offset` 继续读。小文档第一次调用就会完整返回。 | `doc_id`、`offset=0`、`limit?` |
 | `doc_section` | Section 级：按 sid 读取单个 section 全文。 | `doc_id`、`sid` |
 | `doc_sections_batch` | 一次调用按 sid 读取多个 section（比反复 `doc_section` 少往返）；返回找到的 + 缺失的 sid。 | `doc_id`、`sids[]` |
 | `doc_full` | 全文 —— 昂贵；优先用上面的层级。 | `doc_id` |
@@ -161,8 +161,9 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
 | `doc_search_sections` | 在单个文档的 sections 内搜索；返回 sid/页码 provenance。 | `doc_id`、`q`、`include_content=false` |
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`） |
+| `doc_tables` | 列出文档的表格（`table_id`、页码、行列数）——即 `doc_table` 要用的 id。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）。 | `doc_id`、`offset=0`、`limit?` |
 | `doc_chunks` | 面向下游 RAG 的检索友好分块。 | `doc_id`、`include_text=false` |
-| `doc_manifest` | provenance manifest（来源、hash、时间戳）。 | `doc_id` |
+| `doc_manifest` | provenance manifest（来源、hash、时间戳）。`truncated` 恒在：若某文档的 manifest 放不进一次工具返回，它为 `true`，逐条列表（`sections`、`tables`、`images`、逐页质量明细）被省略并在 `omitted` 中列出，计数仍保留，放得下时 `table_ids` 列出可传给 `doc_table` 的表格 id。`doc_sections` 与 `doc_tables`（都分页）能列出全部。 | `doc_id` |
 | `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、单窗口 64 KiB、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 对它 `doc_full` / `doc_section` 都是 404。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
 | `doc_summary` | 文档的三级生成摘要 / 状态。 | `doc_id` |
 
