@@ -21,6 +21,8 @@ services:
       # Seconds an MCP doc_parse / web_search_capture call may take; keep it under
       # the MCP client's per-request timeout (NodalOS: 60s).
       MANTISFETCH_MCP_PARSE_BUDGET_SEC: ${MANTISFETCH_MCP_PARSE_BUDGET_SEC:-45}
+      # Largest MCP tool result on the wire; keep under the client's cut (NodalOS: 65536).
+      MANTISFETCH_MCP_RESULT_BUDGET_BYTES: ${MANTISFETCH_MCP_RESULT_BUDGET_BYTES:-60000}
       # TLS (opt-in): set these in .env to serve https. Bearer over an encrypted
       # line (#702: https + bearer, no mTLS client cert). Unset → plain http.
       MANTISFETCH_TLS_CERTFILE: ${MANTISFETCH_TLS_CERTFILE:-}
