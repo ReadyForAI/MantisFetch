@@ -34,10 +34,12 @@ Design (per IRP ReadyForAI/SharedSpecs#182):
 from __future__ import annotations
 
 import base64
+import errno
 import inspect
 import os
 import re
 import secrets
+import stat
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -52,6 +54,7 @@ from pydantic import Field
 from mantisfetch_common import __version__
 from mantisfetch_common.actor import forwardable_headers
 from mantisfetch_common.allowed_hosts import allowed_hosts_and_origins
+from mantisfetch_common.paths import open_within
 from mantisfetch_common.storage import CONTENT_TYPE_DIRS
 from providers.search import available_providers, provider_trait
 
@@ -391,6 +394,7 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
     if rel.is_absolute():
         raise ToolError("rel_path must be relative to the allowed doc root, not absolute")
     inside_root = False
+    cap = max_bytes or _doc_mod.MAX_UPLOAD_BYTES
     for root in roots:
         candidate = (root / rel).resolve(strict=False)
         try:
@@ -398,15 +402,35 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
         except ValueError:
             continue  # escapes this root — try the next
         inside_root = True
-        if candidate.is_file():
-            # Reject oversized files by stat() *before* reading, so an allowed but
-            # huge resource file can't spike memory ahead of the docreader's own
-            # streaming size enforcement.
-            size = candidate.stat().st_size
-            cap = max_bytes or _doc_mod.MAX_UPLOAD_BYTES
-            if size > cap:
-                raise ToolError(f"document too large: {size} bytes (max {cap})")
-            return candidate.name, candidate.read_bytes()
+        # Open the canonical path without following anything below the root,
+        # then judge and read the descriptor, never the path again. Checking a
+        # path and then reading it by name left a window in which a shared
+        # directory could swap the file — or a directory above it — for a
+        # symlink out of the fence. A stable in-root symlink still works: the
+        # resolve above already turned it into the real path it points at.
+        try:
+            fd = open_within(root, candidate)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ToolError(
+                    f"rel_path {rel_path!r} changed into a symlink while it was being "
+                    "opened (rejected by the path fence)"
+                ) from None
+            continue  # missing, or not a file: try the next root
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            # Size from the descriptor before reading, so an allowed but huge
+            # resource file can't spike memory ahead of the docreader's own
+            # streaming size enforcement — and a bounded read, so a file that
+            # grows after the fstat cannot either.
+            if st.st_size > cap:
+                raise ToolError(f"document too large: {st.st_size} bytes (max {cap})")
+            data = fh.read(cap + 1)
+        if len(data) > cap:
+            raise ToolError(f"document too large: over {cap} bytes (max {cap})")
+        return candidate.name, data
     # Split "resolved inside an allowed root but the file is absent" from "escaped
     # every root". The former is the expected shape when a chat attachment has
     # passed its staging TTL between upload and the read — the caller should ask

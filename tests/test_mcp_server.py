@@ -7,6 +7,8 @@ the /web /doc apps are stubbed at the delegation-helper seam.
 
 import asyncio
 import base64
+import shutil
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import httpx
@@ -515,3 +517,92 @@ def test_content_type_stays_as_lenient_as_the_server(monkeypatch, value) -> None
     tool = mm.mcp._tool_manager.get_tool("web_capture")
     asyncio.run(tool.run({"url": "https://example.com", "content_type": value}, None))
     assert seen["payload"]["content_type"] == value
+
+
+# ── rel_path: the check and the read are the same file (F05) ─────────────────
+
+
+def _swap_after_resolving(monkeypatch, target: Path, swap) -> None:
+    """Run ``swap`` the moment the resolver has canonicalised ``target``.
+
+    That is the window: the containment check has passed on the path, and the
+    shared directory changes before the bytes are read.
+    """
+    real_resolve = Path.resolve
+    fired = {"done": False}
+
+    def resolve_then_swap(self, *a, **k):
+        result = real_resolve(self, *a, **k)
+        if not fired["done"] and result == real_resolve(target):
+            fired["done"] = True
+            swap()
+        return result
+
+    monkeypatch.setattr(Path, "resolve", resolve_then_swap)
+
+
+def test_a_file_swapped_for_a_symlink_after_the_check_is_not_followed(
+    tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "resource"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"SYNTHETIC_OUTSIDE_CONTENT")
+    inside = root / "input.txt"
+    inside.write_bytes(b"inside")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+
+    def swap():
+        inside.unlink()
+        inside.symlink_to(outside)
+
+    _swap_after_resolving(monkeypatch, inside, swap)
+    with pytest.raises(mm.ToolError):
+        mm._resolve_local_doc("input.txt")
+
+
+def test_a_parent_swapped_for_a_symlink_after_the_check_is_not_followed(
+    tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "resource"
+    (root / "chat").mkdir(parents=True)
+    (root / "chat" / "input.txt").write_bytes(b"inside")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "input.txt").write_bytes(b"SYNTHETIC_OUTSIDE_CONTENT")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+
+    def swap():
+        shutil.rmtree(root / "chat")
+        (root / "chat").symlink_to(elsewhere, target_is_directory=True)
+
+    _swap_after_resolving(monkeypatch, root / "chat" / "input.txt", swap)
+    with pytest.raises(mm.ToolError):
+        mm._resolve_local_doc("chat/input.txt")
+
+
+def test_the_size_limit_judges_the_file_actually_opened(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "resource"
+    root.mkdir()
+    small = root / "doc.pdf"
+    small.write_bytes(b"x" * 10)
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    monkeypatch.setattr(mm._doc_mod, "MAX_UPLOAD_BYTES", 100)
+
+    def swap():
+        small.unlink()
+        small.write_bytes(b"x" * 1000)
+
+    _swap_after_resolving(monkeypatch, small, swap)
+    with pytest.raises(mm.ToolError, match="too large"):
+        mm._resolve_local_doc("doc.pdf")
+
+
+def test_a_stable_symlink_inside_the_root_still_reads(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "resource"
+    (root / "store").mkdir(parents=True)
+    (root / "store" / "real.pdf").write_bytes(b"%PDF real")
+    (root / "alias.pdf").symlink_to(root / "store" / "real.pdf")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    name, data = mm._resolve_local_doc("alias.pdf")
+    assert data == b"%PDF real" and name == "real.pdf"
