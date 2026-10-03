@@ -86,7 +86,7 @@ def _child(docs_dir: Path, doc_id: str, kill_at: str) -> int:
         cs.DEFAULT_DOCS_DIR = docs
         sys.path.insert(0, {str(ROOT / "tests")!r})
         from test_interrupted_rewrite_recovery import _parsed
-        dr._stash_source(docs / "General" / {doc_id!r})
+        dr._stash_source(docs / "General" / {doc_id!r}, docs_dir=docs, doc_id={doc_id!r})
         if {kill_at!r} != "after":
             setattr(dr, {kill_at!r}, lambda *a, **k: os._exit(73))
         dr.write_output(
@@ -148,7 +148,7 @@ def test_a_stashed_source_alone_goes_back_when_nothing_committed(docs_dir: Path)
     doc = docs_dir / "General" / "DOC-7003"
     (doc / "source").mkdir(parents=True, exist_ok=True)
     (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
-    dr._stash_source(doc)
+    dr._stash_source(doc, docs_dir=docs_dir, doc_id="DOC-7003")
     (doc / "source").mkdir(parents=True, exist_ok=True)
     (doc / "source" / "new.html").write_bytes(b"<p>REPLACEMENT</p>")
 
@@ -670,24 +670,104 @@ def _parse(client, content: bytes, doc_id: str, **extra):
     )
 
 
-def test_a_replacement_is_refused_before_it_touches_a_leftover_stash(
-    docs_dir: Path,
-) -> None:
-    """`_stash_source` deletes the stash it finds — here, the only copy."""
+def _store(client, content: bytes, doc_id: str, **extra):
+    return client.post(
+        "/parse",
+        files={"file": ("notes.md", content, "text/markdown")},
+        data={"doc_id": doc_id, "store_only": "true", **extra},
+    )
+
+
+def _leave_a_committed_replacement_with_its_stash(doc: Path) -> None:
+    """What a cleanup failure most often leaves: the commit landed, the marker
+    says so, and the stash of the source it replaced was never dropped."""
+    stash = doc / ".rollback-source"
+    stash.mkdir()
+    (stash / "previous.md").write_bytes(b"# the source this one replaced")
+    (doc / ".rewrite-committed").touch()
+
+
+def _leave_something_that_cannot_be_settled(doc: Path) -> None:
+    """A backup whose staging record will not read: recovery must not guess."""
+    stash = doc / ".rollback-source"
+    stash.mkdir()
+    (stash / "notes.md").write_bytes(b"# THE ONLY COPY")
+    (doc / ".rollback").mkdir()
+    (doc / ".rollback" / ".staged.json").write_text("{not json", encoding="utf-8")
+
+
+def _source_bytes(doc: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted((doc / "source").iterdir())}
+
+
+def test_a_raw_replace_settles_a_committed_leftover_and_goes_ahead(docs_dir: Path) -> None:
+    """Codex's round-6 P1 scenario. It used to answer 500 — and the failure
+    recorder still put the stale stash back over the committed source."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _store(client, b"# first", "DOC-7121").status_code == 200
+    doc = docs_dir / "General" / "DOC-7121"
+    _leave_a_committed_replacement_with_its_stash(doc)
+
+    response = _store(client, b"# second", "DOC-7121", replace="true")
+
+    assert response.status_code == 200, response.text
+    assert _source_bytes(doc)["notes.md"] == b"# second"
+    for leftover in (".rollback", ".rollback-source", ".rewrite-committed"):
+        assert not (doc / leftover).exists(), leftover
+
+
+def test_a_raw_replace_that_cannot_settle_leaves_the_document_alone(docs_dir: Path) -> None:
+    """Refused means untouched: same source bytes, same stash, same backup."""
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _store(client, b"# first", "DOC-7122").status_code == 200
+    doc = docs_dir / "General" / "DOC-7122"
+    _leave_something_that_cannot_be_settled(doc)
+    before = _source_bytes(doc)
+
+    response = _store(client, b"# second", "DOC-7122", replace="true")
+
+    assert response.status_code == 500
+    assert "could not be settled" in response.text
+    assert _source_bytes(doc) == before, "a refused replace changed the source"
+    assert (doc / ".rollback-source" / "notes.md").read_bytes() == b"# THE ONLY COPY"
+    assert (doc / ".rollback" / ".staged.json").exists()
+
+
+def test_a_parsed_replace_settles_a_committed_leftover_and_goes_ahead(docs_dir: Path) -> None:
     from starlette.testclient import TestClient
 
     client = TestClient(dr.app, raise_server_exceptions=False)
     assert _parse(client, b"<p>ORIGINAL</p>", "DOC-7118").status_code == 200
     doc = docs_dir / "General" / "DOC-7118"
-    stash = doc / ".rollback-source"
-    stash.mkdir()
-    (stash / "doc.html").write_bytes(b"<p>THE ONLY COPY</p>")
+    _leave_a_committed_replacement_with_its_stash(doc)
 
     response = _parse(client, b"<p>REPLACEMENT</p>", "DOC-7118", replace="true")
 
+    assert response.status_code == 200, response.text
+    assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
+    for leftover in (".rollback", ".rollback-source", ".rewrite-committed"):
+        assert not (doc / leftover).exists(), leftover
+
+
+def test_a_parsed_replace_that_cannot_settle_leaves_the_document_alone(docs_dir: Path) -> None:
+    from starlette.testclient import TestClient
+
+    client = TestClient(dr.app, raise_server_exceptions=False)
+    assert _parse(client, b"<p>ORIGINAL</p>", "DOC-7123").status_code == 200
+    doc = docs_dir / "General" / "DOC-7123"
+    _leave_something_that_cannot_be_settled(doc)
+    before = _source_bytes(doc)
+
+    response = _parse(client, b"<p>REPLACEMENT</p>", "DOC-7123", replace="true")
+
     assert response.status_code == 500
-    assert "could not be settled" in response.text
-    assert (stash / "doc.html").read_bytes() == b"<p>THE ONLY COPY</p>"
+    assert _source_bytes(doc) == before
+    assert (doc / ".rollback-source" / "notes.md").read_bytes() == b"# THE ONLY COPY"
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
 
 
 def test_a_previous_marker_that_will_not_clear_blocks_the_next_rewrite(
@@ -739,3 +819,125 @@ def test_the_committed_stash_is_gone_before_the_deferred_summary_starts(
             break
         time.sleep(0.02)
     assert seen == [False], "the deferred rewrite started with the previous stash still here"
+
+
+def test_staging_a_source_clears_a_stale_marker_first(docs_dir: Path) -> None:
+    """A deferred summary can finish between the settle and the stash and
+    leave its marker behind; the replacement's stash must not sit under it."""
+    _write(docs_dir, "DOC-7124", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7124"
+    (doc / "source").mkdir(exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    (doc / ".rewrite-committed").touch()
+
+    dr._stash_source(doc, docs_dir=docs_dir, doc_id="DOC-7124")
+
+    assert not (doc / ".rewrite-committed").exists(), "the stash was staged under a stale marker"
+    assert (doc / ".rollback-source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
+
+
+def test_a_marker_that_will_not_clear_stops_the_stash_before_it_moves_anything(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7125", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7125"
+    (doc / "source").mkdir(exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    (doc / ".rewrite-committed").touch()
+    real_unlink = Path.unlink
+
+    def refuse_the_marker(self, *a, **k):
+        if self.name == ".rewrite-committed":
+            raise OSError("read-only file system")
+        return real_unlink(self, *a, **k)
+
+    monkeypatch.setattr(Path, "unlink", refuse_the_marker)
+    with pytest.raises(RuntimeError, match="could not be settled"):
+        dr._stash_source(doc, docs_dir=docs_dir, doc_id="DOC-7125")
+    monkeypatch.undo()
+
+    assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
+    assert not (doc / ".rollback-source").exists()
+
+
+def _a_rollback_delete_that_dies_after_the_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rmtree of a backup that removes `.fts-before.txt` and then stops — the
+    process dying partway through the delete."""
+    import shutil as shutil_module
+
+    real_rmtree = shutil_module.rmtree
+
+    def dies_partway(path, *a, **k):
+        if Path(path).name == ".rollback":
+            (Path(path) / ".fts-before.txt").unlink(missing_ok=True)
+            return None
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr(dr.shutil, "rmtree", dies_partway)
+
+
+def test_a_sweep_that_dies_deleting_its_backup_keeps_the_search_text(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7126", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7126"
+    assert _child(docs_dir, "DOC-7126", "_update_doc_index") == 73
+
+    _a_rollback_delete_that_dies_after_the_snapshot(monkeypatch)
+    dr._finish_interrupted_rewrites(docs_dir)
+    monkeypatch.undo()
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7126"]
+
+    dr._finish_interrupted_rewrites(docs_dir)  # the next start
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7126"], (
+        "the second sweep deleted the search text the first one put back"
+    )
+    assert not (doc / ".rollback").exists()
+
+
+def test_an_in_process_rollback_that_dies_deleting_its_backup_keeps_the_search_text(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(docs_dir, "DOC-7127", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7127"
+
+    _a_rollback_delete_that_dies_after_the_snapshot(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with dr._restore_on_failure(
+            doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7127"
+        ):
+            raise RuntimeError("the rewrite fails")
+    monkeypatch.undo()
+
+    dr._finish_interrupted_rewrites(docs_dir)  # the next start
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7127"], (
+        "the sweep deleted the search text the in-process rollback put back"
+    )
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
+
+
+def test_a_summary_that_committed_mid_gap_is_settled_not_stripped_of_its_marker(
+    docs_dir: Path,
+) -> None:
+    """Codex round 1 on the follow-up. A deferred summary that committed in the
+    gap before the stash, whose cleanup already lost the backup's index
+    snapshot, has only its marker to say it committed. Deleting that marker on
+    its own left a backup the next sweep rolled back — the previous summary put
+    back over the committed one, with the index still describing the new."""
+    _write(docs_dir, "DOC-7128", "COMMITTED summary text")
+    doc = docs_dir / "General" / "DOC-7128"
+    (doc / "source").mkdir(exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    (doc / ".rewrite-committed").touch()
+    backup = doc / ".rollback"
+    backup.mkdir()
+    (backup / "full.md").write_text("PREVIOUS summary text", encoding="utf-8")
+    dr._write_json(backup / ".staged.json", {"staged": ["full.md"]})  # no .index-before.json
+
+    dr._stash_source_locked(docs_dir, "DOC-7128", doc)
+    dr._restore_stashed_source(doc)  # the source persist that follows fails
+    dr._finish_interrupted_rewrites(docs_dir)  # the next start
+
+    full = (doc / "full.md").read_text(encoding="utf-8")
+    assert "COMMITTED" in full and "PREVIOUS" not in full, "the committed summary was rolled back"
+    assert (doc / "source" / "doc.html").read_bytes() == b"<p>ORIGINAL</p>"
