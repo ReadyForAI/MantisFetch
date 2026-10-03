@@ -1550,11 +1550,13 @@ async def _distill(
         # Content-Security-Policy is a non-event; no textContent, so headings
         # survive and become sids; no 40k slice.
         page_html = await page.content()
-        blocks = extract.html_to_blocks(page_html)
+        # In a thread, both: each parses the whole document with lxml, and a
+        # multi-megabyte page is time the event loop would spend serving no one.
+        blocks = await asyncio.to_thread(extract.html_to_blocks, page_html)
         if not blocks:
             mode = "simple"
         else:
-            title = extract.html_title(page_html) or await page.title()
+            title = await asyncio.to_thread(extract.html_title, page_html) or await page.title()
             url = page.url
             readability_meta = {"extractor": "in_process"}
             if req.extract_tables:
