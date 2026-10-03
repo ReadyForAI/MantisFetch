@@ -4099,8 +4099,9 @@ async def _enforce_search_throttle(
 ) -> None:
     """Wait for this search's turn, or refuse when the wait would be too long.
 
-    Every backend the request touches is charged (a fallback chain charges all
-    its members) so failover cannot bypass the limit.
+    Every backend the request touches is charged, so failover cannot bypass the
+    limit: a fallback chain's first member here, and each later member by the
+    chain's member_gate at the moment it falls through to it (#187).
 
     Taking a ticket and sleeping outside the lock, rather than sleeping while
     holding it, keeps a queue on one provider from stalling searches on another
@@ -4112,13 +4113,13 @@ async def _enforce_search_throttle(
     behind it by up to one interval. Returning the slot would mean rewinding a
     counter other waiters have already read past, which costs more than the hole.
 
-    Best-effort burst guard, enforced once up front. Known limitation: it does not
-    re-check at the moment a fallback member is actually queried, so a chain whose
-    primary hangs longer than the interval before failing over can, under concurrent
-    load, hit a fallback backend slightly sooner than the nominal interval. Closing
-    that fully would move throttling into the provider layer (an abstraction it is
-    deliberately kept out of); the residual window is bounded and low-risk for a
-    quota guard on a low-frequency surface.
+    A fallback member used to be charged up front with the rest of the chain,
+    and a primary that hung past the interval let that reservation expire
+    before the chain reached it; an explicit request for that backend could
+    then go through just before the chain hit it as well. The chain now calls
+    back into this function for each member as it is reached; a refusal there
+    is this function's own 429 (or search_budget_exceeded), not a skip to the
+    next member.
 
     With ``deadline`` (a caller's budget, as a monotonic time), a turn that
     would come after it is refused at once as search_budget_exceeded — before
@@ -4156,7 +4157,12 @@ async def _enforce_search_throttle(
         await asyncio.sleep(wait)
 
 
-def _require_search_provider(name: str | None = None):
+def _require_search_provider(
+    name: str | None = None,
+    *,
+    deadline: float | None = None,
+    budget_seconds: float | None = None,
+):
     """Return the active provider, or 404 when search is disabled.
 
     ``name`` selects one addressable provider for this request; an unknown/unlisted
@@ -4173,6 +4179,17 @@ def _require_search_provider(name: str | None = None):
         raise HTTPException(502, f"search provider misconfigured: {exc}")
     if provider is None:
         raise HTTPException(404, "search is not enabled (set MANTISFETCH_SEARCH_PROVIDER)")
+    if hasattr(provider, "member_gate"):
+        # Here, at construction, so it is in place before the up-front throttle
+        # reads throttle_keys — which shrink to the first member once a gate is
+        # set. A chain's later members are charged when it reaches them (#187),
+        # against the same deadline as everything else in the request.
+        async def gate(member: str) -> None:
+            await _enforce_search_throttle(
+                (member,), deadline=deadline, budget_seconds=budget_seconds
+            )
+
+        provider.member_gate = gate
     return provider
 
 
@@ -4232,7 +4249,9 @@ async def search_and_capture(
     other tool of this server off the client's face until it reconnects.)
     """
     deadline = None if req.budget_seconds is None else time.monotonic() + req.budget_seconds
-    provider = _require_search_provider(req.provider)
+    provider = _require_search_provider(
+        req.provider, deadline=deadline, budget_seconds=req.budget_seconds
+    )
     _normalize_content_type(req.content_type)  # 422 early on a bad content_type
     await _enforce_search_throttle(
         provider.throttle_keys, deadline=deadline, budget_seconds=req.budget_seconds
