@@ -1256,6 +1256,40 @@ _ROLLBACK_DIR = ".rollback"
 #: transaction — see _stash_source.
 _SOURCE_ROLLBACK_DIR = ".rollback-source"
 
+#: Written once a rewrite's index commit has landed, removed when the last of
+#: its scaffolding is gone. A process that dies in between leaves a directory
+#: that looks the same either way — a stashed source and no `.rollback` is both
+#: "staged, never committed" and "committed, stash not yet dropped" — and this
+#: is what tells the startup sweep which of the two it is looking at.
+_REWRITE_COMMITTED = ".rewrite-committed"
+
+#: Inside `.rollback/`: what the rewrite staged, and the text that was indexed
+#: before it started. In-process rollback keeps both in memory; a sweep running
+#: in the next process has only the directory, so they are written down.
+#: `.staged.json` appears only once staging has finished — its absence means
+#: staging was interrupted and the untouched artifacts are still in place.
+_STAGED_MANIFEST = ".staged.json"
+_FTS_BEFORE = ".fts-before.txt"
+_INDEX_BEFORE = ".index-before.json"
+
+
+def _refuse_over_unsettled_stash(doc_dir: Path) -> None:
+    """Refuse a replacement while a stash from an earlier one is still here.
+
+    `_stash_source` starts by deleting whatever stash it finds, and by the time
+    a replacement reaches it the only stash that can be there belongs to a
+    rewrite the startup sweep could not settle — the one copy of a source
+    that recovery is still waiting to put back. Checked before anything in the
+    directory changes, and outside the failure recorders, which would move
+    that stash around themselves.
+    """
+    if (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+        raise HTTPException(
+            500,
+            f"document directory {doc_dir.name} still holds a replacement that could "
+            "not be settled; resolve it (see the startup log) before replacing it again",
+        )
+
 
 def _stash_source(doc_dir: Path) -> None:
     """Move the stored source aside so a failed replacement can put it back.
@@ -1287,6 +1321,12 @@ def _restore_stashed_source(doc_dir: Path) -> None:
     shutil.move(str(stash), str(source))
 
 
+def _discard_stashed_source_locked(docs_dir: Path, doc_id: str, doc_dir: Path) -> None:
+    """`_discard_stashed_source` under the document's writer lock."""
+    with _document_writer_lock(docs_dir, doc_id):
+        _discard_stashed_source(doc_dir)
+
+
 def _discard_stashed_source(doc_dir: Path) -> None:
     """Drop the stash once the replacement has committed.
 
@@ -1298,17 +1338,252 @@ def _discard_stashed_source(doc_dir: Path) -> None:
     the request over — the document is already correct without it.
     """
     stash = doc_dir / _SOURCE_ROLLBACK_DIR
-    if not stash.exists():
+    if stash.exists():
+        try:
+            source = doc_dir / "source"
+            source.mkdir(parents=True, exist_ok=True)
+            for kept in stash.iterdir():
+                if not (source / kept.name).exists():
+                    shutil.move(str(kept), str(source / kept.name))
+        except OSError as exc:
+            logger.warning("Could not clear the source stash in %s: %s", doc_dir, exc)
+            return  # the files are still in it: never rmtree it out from under them
+        if not _gone(stash):
+            return  # still there to settle, so the marker has to stay
+    if (doc_dir / _ROLLBACK_DIR).exists():
+        # Cleanup that did not finish. Without the marker the next start reads
+        # that backup as a rewrite which never committed, and puts the version
+        # this one replaced back over it. Checked here rather than left to the
+        # caller, because the two upload paths call this directly.
         return
+    # The last step of the rewrite: with the stash gone there is nothing left
+    # for a sweep to have to decide about.
+    with contextlib.suppress(OSError):
+        (doc_dir / _REWRITE_COMMITTED).unlink(missing_ok=True)
+
+
+def _gone(path: Path) -> bool:
+    """Remove a tree and say whether it is actually gone.
+
+    `rmtree(..., ignore_errors=True)` hides a failure, and every caller here
+    uses "the scaffolding is gone" to decide that a rewrite needs no further
+    settling. A backup left behind with the commit marker already removed reads
+    as an uncommitted rewrite on the next start.
+    """
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
+def _put_back_staged(doc_dir: Path, backup: Path, names: list[str]) -> None:
+    """Undo one rewrite's staging: every staged name back the way it was.
+
+    Every staged name was in the directory before the rewrite — that is what
+    being staged means — so a name with nothing behind it in the backup has
+    already been put back. Skipping it rather than deleting the target is what
+    makes this safe to resume: a restore interrupted halfway leaves names on
+    the list whose only remaining copy is the one it just restored.
+    """
+    for name in names:
+        source = backup / name
+        if not source.exists():
+            continue
+        target = doc_dir / name
+        if target.exists():
+            shutil.rmtree(target) if target.is_dir() else target.unlink()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+
+
+def _restore_indexed_text(backup: Path, docs_dir: Path | None, doc_id: str | None) -> bool:
+    """Put the staged document's indexed text back; False if it did not happen.
+
+    Unlike the in-process rollback, which can only log and carry on, a sweep
+    that cannot write the search table has somewhere to put the problem: it
+    leaves the backup alone and the next start tries again. A snapshot that
+    cannot be read is the same answer — reading nothing as "there was no text"
+    would delete the row this is supposed to be restoring.
+    """
+    fts_path = backup / _FTS_BEFORE
     try:
-        source = doc_dir / "source"
-        source.mkdir(parents=True, exist_ok=True)
-        for kept in stash.iterdir():
-            if not (source / kept.name).exists():
-                shutil.move(str(kept), str(source / kept.name))
-        shutil.rmtree(stash, ignore_errors=True)
-    except OSError as exc:  # pragma: no cover - defensive
-        logger.warning("Could not clear the source stash in %s: %s", doc_dir, exc)
+        body = fts_path.read_text(encoding="utf-8") if fts_path.exists() else None
+    except OSError:
+        return False
+    if not docs_dir or not doc_id:
+        return True  # nothing to restore it into
+    try:
+        from mantisfetch_common.doc_index_store import upsert_fts  # noqa: PLC0415
+
+        upsert_fts(docs_dir, doc_id, body or "")
+    except Exception as exc:  # noqa: BLE001 - reported, not raised: one bad
+        logger.warning("Could not restore the search index for %s: %s", doc_id, exc)
+        return False
+    return True
+
+
+def _rewrite_committed(
+    doc_dir: Path, backup: Path, docs_dir: Path | None, doc_id: str | None
+) -> bool:
+    """Did the interrupted rewrite's index commit land? Ask the index.
+
+    The marker is written just after the commit, and "just after" still has the
+    whole JSON export in it — so a process can die with the row committed and
+    no marker on disk. The backup holds the index row as it was before the
+    rewrite started, and every commit stamps a new `write_id`: a row still
+    carrying the one in the snapshot is a commit that never landed.
+
+    The write id rather than the content: a raw replacement's content_hash is
+    empty, and a rewrite that only redoes the summary leaves it unchanged, so
+    content would read those two as uncommitted however late they died. The id
+    alone rather than the whole row: a web capture's summary status lands on
+    the same row without being a rewrite, and must not be mistaken for one.
+
+    Answers False whenever it cannot tell, because the two mistakes are not
+    equal. Rolling back a committed rewrite leaves the index describing a
+    version that is not on disk, which is repairable. Finishing one that never
+    committed deletes the only copy of the previous version.
+    """
+    if docs_dir is None or doc_id is None:
+        return False
+    try:
+        snapshot = json.loads((backup / _INDEX_BEFORE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(snapshot, dict) or snapshot == _INDEX_UNKNOWN:
+        return False
+    try:
+        from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
+
+        entry = get_document(docs_dir, doc_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable index decides nothing
+        logger.warning("Could not read the index while settling %s: %s", doc_id, exc)
+        return False
+    if entry is None:
+        return False
+    # A row predating this field has none on either side, which is the same
+    # answer: the rewrite that would have stamped one never committed.
+    return entry.get("write_id") != snapshot.get("write_id")
+
+
+def _settle_interrupted_rewrite(
+    doc_dir: Path,
+    *,
+    docs_dir: Path | None = None,
+    doc_id: str | None = None,
+    include_stash: bool = True,
+) -> str | None:
+    """Finish or undo a rewrite a previous process died inside.
+
+    `_restore_on_failure` recovers from exceptions; a SIGKILL, an OOM or a power
+    cut is not one, and what it leaves behind is a document whose products have
+    been moved into `.rollback/` while its manifest and index still describe
+    them. Nothing read them back: the next rewrite started by deleting the
+    scaffolding, which could be the only copy of the previous version left.
+
+    The marker written at commit time is what makes the two cases
+    distinguishable, so this never guesses:
+
+    - marker present — the index commit landed. Finish the cleanup: drop the
+      backup, fold the stash back in, remove the marker.
+    - no marker — it did not. Put the staged artifacts, the stashed source and
+      the indexed text back, so the document is the one it was before.
+
+    Idempotent, and the caller holds the document's writer lock.
+
+    `include_stash=False` leaves `.rollback-source` alone, for the one caller
+    that cannot tell a leftover from its own: a replacement stashes the source
+    before the rewrite starts, so by the time `_restore_on_failure` runs, the
+    stash it would find is the live one. Only the startup sweep, which runs
+    before any request, sees a stash that can only be a leftover.
+
+    Returns "committed", "rolled_back", "incomplete" — settled as far as it
+    safely could, evidence kept for the next attempt — or None when there was
+    nothing to do.
+    """
+    backup = doc_dir / _ROLLBACK_DIR
+    stash = doc_dir / _SOURCE_ROLLBACK_DIR
+    marker = doc_dir / _REWRITE_COMMITTED
+    if not (backup.exists() or (include_stash and stash.exists()) or marker.exists()):
+        return None
+
+    if marker.exists() or _rewrite_committed(doc_dir, backup, docs_dir, doc_id):
+        if not marker.exists():
+            # Write the verdict down before deleting what it was read from:
+            # the backup holds the snapshot it was read from, and once that is
+            # gone a stash left behind is all the next start would see.
+            with contextlib.suppress(OSError):
+                marker.touch()
+            if not marker.exists():
+                logger.warning("Left %s staged: its commit could not be recorded", doc_dir)
+                return "incomplete"
+        _gone(backup)
+        if include_stash:
+            # Removes the marker itself, and only once nothing is left for it
+            # to speak for.
+            _discard_stashed_source(doc_dir)
+        else:
+            # The caller is about to stage a new rewrite, so the previous one's
+            # marker has to be gone first — left here, it would make the new
+            # backup look committed. Either one that will not go means the old
+            # rewrite is not settled, and the new one must not start.
+            if not backup.exists():
+                with contextlib.suppress(OSError):
+                    marker.unlink(missing_ok=True)
+            if backup.exists() or marker.exists():
+                logger.warning("Left %s staged: the previous commit would not clear", doc_dir)
+                return "incomplete"
+        return "committed"
+
+    if backup.exists():
+        staged: list[str] | None = None
+        manifest_path = backup / _STAGED_MANIFEST
+        if manifest_path.exists():
+            try:
+                recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                # There and unreadable is not the same as never written. Taking
+                # it for an interrupted staging would restore only the moved
+                # artifacts, leave the copied ones from the replacement in
+                # place, and then delete the backup holding the rest.
+                logger.warning(
+                    "Left %s staged: its staging record could not be read: %s", doc_dir, exc
+                )
+                return "incomplete"
+            if isinstance(recorded, dict) and isinstance(recorded.get("staged"), list):
+                staged = [n for n in recorded["staged"] if isinstance(n, str)]
+            else:
+                logger.warning("Left %s staged: its staging record is not usable", doc_dir)
+                return "incomplete"
+        staging_finished = staged is not None
+        if staged is None:
+            # Staging never finished, so nothing new has been written yet.
+            # Only the moved names can be missing from the directory — the
+            # overwritten ones are copied, leaving the originals in place —
+            # and restoring a copied name wholesale would take `.cache/` with
+            # it, which also holds OCR pages this rewrite never staged.
+            staged = [
+                name
+                for name in (
+                    list(_REGENERATED_TREES)
+                    + list(_REGENERATED_FILES)
+                    + list(_EXTRACTED_TREES)
+                    + list(_EXTRACTED_FILES)
+                )
+                if (backup / name).exists()
+            ]
+        _put_back_staged(doc_dir, backup, staged)
+        if staging_finished and not _restore_indexed_text(backup, docs_dir, doc_id):
+            # The text on disk is the old one and the search table still holds
+            # the replacement's. Keeping the backup is what makes that fixable:
+            # the next sweep finds the same scaffolding, skips the artifacts it
+            # already put back, and retries this.
+            logger.warning(
+                "Left %s staged: its indexed text could not be put back", doc_dir
+            )
+            return "incomplete"
+        _gone(backup)
+    if include_stash:
+        _restore_stashed_source(doc_dir)
+    return "rolled_back"
 
 
 @contextlib.contextmanager
@@ -1340,26 +1615,45 @@ def _restore_on_failure(
     goes back, and nothing is left in .rollback/.
     """
     backup = doc_dir / _ROLLBACK_DIR
+    # Not a blind rmtree: scaffolding already here belongs to a rewrite an
+    # earlier process did not finish, and it may be the only copy of the
+    # document's previous version. Settle it first, then start.
+    if (
+        _settle_interrupted_rewrite(
+            doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=False
+        )
+        == "incomplete"
+    ):
+        # Settling kept the backup because something it needed would not read
+        # or would not write. Staging over it would delete that evidence and
+        # leave nothing to repair the document from, so this rewrite is the
+        # one that gives way: a refused write is recoverable, a lost previous
+        # version is not.
+        raise RuntimeError(
+            f"{doc_dir} still holds a rewrite that could not be settled; "
+            "resolve it before writing this document again"
+        )
     shutil.rmtree(backup, ignore_errors=True)
     moved: list[str] = []
     copied: list[str] = []
     fts_before = _read_search_index(docs_dir, doc_id)
+    index_before = _read_index_entry(docs_dir, doc_id)
 
     def _put_back() -> None:
-        for name in moved + copied:
-            target = doc_dir / name
-            if target.exists():
-                shutil.rmtree(target) if target.is_dir() else target.unlink()
-            source = backup / name
-            if source.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(target))
+        _put_back_staged(doc_dir, backup, moved + copied)
         shutil.rmtree(backup, ignore_errors=True)
         _restore_search_index(docs_dir, doc_id, fts_before)
 
     try:
         if doc_dir.exists():
             backup.mkdir(parents=True, exist_ok=True)
+            if fts_before is not None:
+                (backup / _FTS_BEFORE).write_text(fts_before, encoding="utf-8")
+            # Written even when there was no row: "this document had no index
+            # entry" is an answer, and a first write that commits and then dies
+            # before its marker has to be recognisable as committed. Absent and
+            # empty are different things here.
+            _write_json(backup / _INDEX_BEFORE, index_before)
             names = list(_REGENERATED_TREES) + list(_REGENERATED_FILES)
             if include_extracted:
                 names += list(_EXTRACTED_TREES) + list(_EXTRACTED_FILES)
@@ -1374,6 +1668,10 @@ def _restore_on_failure(
                     (backup / name).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(current, backup / name)
                     copied.append(name)
+            # Written last, so its presence means the staging above finished.
+            # Until then a sweep must put back only what it finds and delete
+            # nothing: the artifacts not yet moved are still the live ones.
+            _write_json(backup / _STAGED_MANIFEST, {"staged": moved + copied})
     except BaseException:
         _put_back()
         raise
@@ -1383,7 +1681,50 @@ def _restore_on_failure(
     except BaseException:
         _put_back()
         raise
-    shutil.rmtree(backup, ignore_errors=True)
+    # The index commit has landed. Say so before removing the evidence of the
+    # rewrite, so a process that dies in the next few milliseconds is not read
+    # as one that never committed.
+    marker = doc_dir / _REWRITE_COMMITTED
+    if doc_dir.exists():
+        with contextlib.suppress(OSError):
+            marker.touch()
+        if not marker.exists():
+            # Same rule the sweep follows: the backup carries the snapshot that
+            # says this committed, so it outlives a verdict that would not
+            # write. Left here, the next start settles it.
+            logger.warning("Could not record the commit for %s; leaving it staged", doc_dir)
+            return
+    if _gone(backup) and not (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+        # Nothing left that a sweep could misread, so the marker would only be
+        # litter. A backup that would not go keeps it: without the marker the
+        # next start reads that backup as a rewrite that never committed.
+        with contextlib.suppress(OSError):
+            (doc_dir / _REWRITE_COMMITTED).unlink(missing_ok=True)
+
+
+#: What the staging snapshot says when the index could not be read at all.
+#: Distinct from `{}`, which says the document had no row — a snapshot that
+#: cannot be compared must not be read as one that compared equal.
+_INDEX_UNKNOWN = {"snapshot": "unavailable"}
+
+
+def _read_index_entry(docs_dir: Path | None, doc_id: str | None) -> dict[str, Any]:
+    """The document's index row, `{}` for no row, or `_INDEX_UNKNOWN` if unread.
+
+    The three are different answers and the recovery decision turns on which
+    one it got: a row that still carries the snapshot's write_id is a commit
+    that never landed, no row at all is a first write, and a read that failed
+    settles nothing — the only safe reading of it is to roll back.
+    """
+    if not docs_dir or not doc_id:
+        return {}
+    try:
+        from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
+
+        return get_document(docs_dir, doc_id) or {}
+    except Exception as exc:  # noqa: BLE001 - recorded as unknown, not as absent
+        logger.warning("Could not read the index entry for %s: %s", doc_id, exc)
+        return dict(_INDEX_UNKNOWN)
 
 
 def _read_search_index(docs_dir: Path | None, doc_id: str | None) -> str | None:
@@ -2604,6 +2945,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Before anything reads or deletes: a delete the last process died inside
     # has its products renamed aside, and the retention loop below deletes too.
     await _startup_finish_interrupted_deletes()
+    # Before anything reads a manifest: a rewrite the last process died inside
+    # has the document's products in .rollback/ while its manifest still names
+    # them, and the next rewrite of that document would delete the only copy.
+    await _startup_finish_interrupted_rewrites()
     await _startup_backfill_manifest_tags()
     await _startup_reset_interrupted_summaries()
     # On the loop, not in a thread: the delete path takes an asyncio lock.
@@ -2823,6 +3168,80 @@ def _reset_interrupted_summaries(docs_dir: Path) -> int:
         with contextlib.suppress(Exception):
             dis.export_json(docs_dir)
     return reset
+
+
+def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int, int]:
+    """Settle every rewrite a previous process died inside.
+
+    Returns (rolled_back, committed, incomplete).
+
+    Found by walking the library for the scaffolding itself rather than from
+    the index: a rewrite that was interrupted before its commit has an index
+    entry describing the version it was replacing, and one interrupted after it
+    has one describing the version it wrote, so neither says anything about the
+    leftovers. The directory holding them is the document's own, and its name
+    is the doc_id — the same thing `_resolve_doc_dir` would hand back.
+    """
+    rolled_back = committed = incomplete = 0
+    seen: set[Path] = set()
+    for parent, dirnames, filenames in os.walk(docs_dir):
+        here = Path(parent)
+        leftovers = {_ROLLBACK_DIR, _SOURCE_ROLLBACK_DIR} & set(dirnames)
+        if not leftovers and _REWRITE_COMMITTED not in filenames:
+            continue
+        # Never descend into the scaffolding looking for more of it.
+        for name in leftovers:
+            dirnames.remove(name)
+        if here in seen or not _DOC_ID_RE.match(here.name):
+            continue
+        seen.add(here)
+        try:
+            with _document_writer_lock(docs_dir, here.name):
+                outcome = _settle_interrupted_rewrite(
+                    here, docs_dir=docs_dir, doc_id=here.name
+                )
+        except (OSError, RuntimeError) as exc:  # RuntimeError: a symlink loop
+            logger.warning("Could not settle the interrupted rewrite in %s: %s", here, exc)
+            continue
+        if outcome == "rolled_back":
+            rolled_back += 1
+        elif outcome == "committed":
+            committed += 1
+        elif outcome == "incomplete":
+            incomplete += 1
+    if rolled_back:
+        from mantisfetch_common import doc_index_store as dis  # noqa: PLC0415
+
+        # The index row itself was never written by an uncommitted rewrite, but
+        # the JSON export is rebuilt from the database and may have been.
+        with contextlib.suppress(Exception):
+            dis.export_json(docs_dir)
+    return rolled_back, committed, incomplete
+
+
+async def _startup_finish_interrupted_rewrites() -> None:
+    try:
+        rolled_back, committed, incomplete = await asyncio.to_thread(
+            _finish_interrupted_rewrites, _get_docs_dir()
+        )
+    except Exception as exc:  # noqa: BLE001 - never block startup on this
+        logger.warning("Interrupted-rewrite sweep skipped: %s", exc)
+        return
+    if rolled_back or committed:
+        logger.info(
+            "Settled rewrites a previous process left unfinished: "
+            "%d rolled back, %d finished committing",
+            rolled_back,
+            committed,
+        )
+    if incomplete:
+        # Loud, and left alone: these documents keep their scaffolding, refuse
+        # further writes, and need the disk or the database looked at.
+        logger.error(
+            "%d document(s) hold a rewrite that could not be settled; "
+            "they will refuse further writes until it is resolved",
+            incomplete,
+        )
 
 
 async def _startup_finish_interrupted_deletes() -> None:
@@ -4330,6 +4749,7 @@ def _store_raw_serialized(
         # or a disk error would destroy a document that was perfectly readable a
         # moment ago.
         if will_replace:
+            _refuse_over_unsettled_stash(doc_dir)
             _stash_source(doc_dir)
         with _restore_on_failure(
             doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
@@ -4968,6 +5388,8 @@ async def api_parse_doc(
             # Resolved outside the try so the failure recorders below always have
             # a directory to write into — it is a pure path computation.
             doc_storage_dir = _doc_storage_dir(docs_dir, d_id, selected_content_type)
+            if will_replace and STORE_SOURCE_FILES:
+                _refuse_over_unsettled_stash(doc_storage_dir)
             try:
                 tmp_dir = doc_storage_dir / ".tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -5192,6 +5614,13 @@ async def api_parse_doc(
                         ),
                     )
                     if summary_mode == "defer":
+                        # Before the worker exists: it rewrites this document,
+                        # and a stash still here would read as its own — a
+                        # summary rewrite that then died would put the
+                        # previous upload's source back under this one.
+                        await loop.run_in_executor(
+                            None, _discard_stashed_source_locked, docs_dir, d_id, doc_storage_dir
+                        )
                         worker = threading.Thread(
                             target=_generate_deferred_summary,
                             args=(

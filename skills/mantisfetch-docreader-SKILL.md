@@ -645,6 +645,7 @@ New ingested content is stored under `General/`, `Contract/`, `Bid/`, or `Knowle
 | `source_ref`   | Relative path to stored upload under `source/`  |
 | `content_hash` | SHA256 of content, used for deduplication and change detection |
 | `digest`       | First 200 characters of the summary             |
+| `write_id`     | Opaque, new on every write. Internal: the startup sweep uses it to tell whether an interrupted rewrite committed. Do not read it |
 
 ---
 

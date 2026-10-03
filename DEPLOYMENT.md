@@ -87,6 +87,33 @@ is retried:
 Nothing is re-queued automatically, because with fan-in that would refill the
 queue at the worst moment. Retry the ones you care about.
 
+## What a restart settles
+
+A document that was being replaced when the process died is settled on the next
+start, before anything serves a request. A replacement works in place — the old
+products move into `{doc_dir}/.rollback/`, the old source into
+`.rollback-source/`, and the index row is the commit point — so a process that
+is killed in between leaves a directory that is part old and part new while its
+manifest still describes the old one.
+
+The startup sweep decides by the `.rewrite-committed` marker the writer drops
+once the index commit has landed: with it, the leftovers are cleared and the
+new version stands; without it, the staged products, the stored source and the
+indexed text all go back and the document is the one it was before. The sweep
+is idempotent.
+
+Nothing is required of the operator in the normal case. The first start after a
+hard kill touches the library, so a start whose logs mention settled rewrites
+is reporting work, not an error.
+
+The exception is a document the sweep could not settle — a staging record or
+snapshot that will not read, or a search-index write that fails. It keeps its
+`.rollback/` rather than guess, the start logs an ERROR naming how many, and
+further writes to that document are refused (500) until it is settled, because
+staging over the kept backup would delete the only copy of the previous
+version. Fix the underlying disk or database problem and restart: the sweep
+retries on every start.
+
 ## Request size
 
 `/web` and `/doc` stop reading a request body once it passes

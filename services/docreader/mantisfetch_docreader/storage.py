@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import threading
+import uuid
 import weakref
 from datetime import UTC, datetime
 from pathlib import Path
@@ -175,6 +176,15 @@ def _update_doc_index(
             entry["summary_mode"] = summary_meta.get("mode")
             entry["summary_status"] = summary_meta.get("status")
             entry["summary_error_code"] = summary_meta.get("error_code")
+
+        # Which write this row came from. Nothing reads it but the startup
+        # sweep, which has to answer "did the rewrite that was interrupted here
+        # commit?" and cannot do it from the content: a raw replacement's
+        # content_hash is empty, and a rewrite that only redoes the summary
+        # leaves it unchanged. A value that is new every time makes the
+        # comparison exact — the row either still belongs to the version the
+        # rewrite was replacing, or it does not.
+        entry["write_id"] = uuid.uuid4().hex
 
         from mantisfetch_common import doc_index_store as dis
 
