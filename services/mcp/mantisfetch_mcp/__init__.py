@@ -1156,15 +1156,22 @@ def _window_text(
             **marks,
         }
 
-    # A header that alone would take more than half a window is cut, so every
-    # window still has room for rows — repeated unchanged it would make every
-    # window too large, limit=1 included.
-    if head_text and _wire_bytes(window(offset, head_text)) > budget // 2:
+    # A header so large that not even one row fits beside it is cut — repeated
+    # unchanged it would make every window too large, limit=1 included. Only
+    # then, and only its longest lines: the separator stays, so each window is
+    # still a Markdown table.
+    first = min(offset + 1, total)
+    if head and _wire_bytes(window(first)) > budget:
         marks["header_truncated"] = True
-        keep = len(head_text)
-        while keep and _wire_bytes(window(offset, head_text[:keep])) > budget // 2:
-            keep //= 2
-        head_text = head_text[:keep]
+        cut = list(head)
+        editable = range(len(cut) - 1) if len(cut) > 1 else range(len(cut))
+        while _wire_bytes(window(offset, "".join(cut))) > budget // 2:
+            longest = max(editable, key=lambda i: len(cut[i]))
+            line = cut[longest].rstrip("\n")
+            if len(line) <= 8:
+                break
+            cut[longest] = line[: len(line) // 2] + " …|\n"
+        head_text = "".join(cut)
 
     end, used = offset, _wire_bytes(window(offset))
     while end < stop:
@@ -1325,6 +1332,15 @@ async def doc_table(
             return data
         meta = {k: v for k, v in table.items() if k != "rows"}
         flat = {**{k: v for k, v in data.items() if k != "table"}, "rows": table["rows"]}
+        budget = _result_budget()
+
+        def with_meta(m: dict[str, Any]) -> int:
+            return _wire_bytes({**flat, "rows": [], "table": {**m, "rows": []}})
+
+        if with_meta(meta) > budget // 2:
+            # Header, caption and column stats repeat on every page; cut them
+            # first, marked, so that fewer rows can actually make a page fit.
+            meta = _shrink_entry(dict(meta), lambda m: with_meta(m) <= budget // 2, ())
 
         def nest(page: dict[str, Any]) -> dict[str, Any]:
             page = dict(page)

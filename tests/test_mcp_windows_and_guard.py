@@ -340,3 +340,39 @@ def test_a_cut_row_still_fits_with_its_marker_on(client, served, cell) -> None:
     assert size < WALL
     page = _payload(result)
     assert page["content_truncated"] is True and page["next_offset"] == 1
+
+
+def test_a_large_header_is_kept_whole_when_the_table_fits(client, served) -> None:
+    """Codex round 5: the header was cut whenever it took half the budget, even
+    when the whole table fitted, and the cut dropped the separator."""
+    header = "| " + "表头" * 2500 + " | b |\n|---|---|\n"
+    content = header + "| 1 | short |\n"
+    served["/library/DOC-14/table/table-01"] = {
+        "doc_id": "DOC-14", "table_id": "table-01", "content": content}
+    page = _payload(_call(client, "doc_table", {"doc_id": "DOC-14", "table_id": "table-01"})[0])
+    assert page["content"] == content and "header_truncated" not in page
+
+
+def test_a_header_that_must_be_cut_keeps_the_separator(client, served) -> None:
+    header = "| " + "表头" * 6000 + " | b |\n|---|---|\n"
+    served["/library/DOC-15/table/table-01"] = {
+        "doc_id": "DOC-15", "table_id": "table-01", "content": header + "| 1 | short |\n"}
+    result, size = _call(client, "doc_table", {"doc_id": "DOC-15", "table_id": "table-01"})
+    assert size < WALL
+    lines = _payload(result)["content"].splitlines()
+    assert lines[1] == "|---|---|" and lines[2] == "| 1 | short |"
+
+
+def test_large_json_table_metadata_is_cut_so_rows_can_be_read(client, served) -> None:
+    """Codex round 5: header/caption/stats repeated on every page left even a
+    one-row page over the budget."""
+    table = {"table_id": "table-03", "caption": "说明" * 9000, "column_count": 2,
+             "rows": [{"row_index": i, "cells": [str(i), "x"]} for i in range(50)]}
+    served["/library/DOC-16/table/table-03/json"] = {
+        "doc_id": "DOC-16", "table_id": "table-03", "table": table}
+    result, size = _call(client, "doc_table",
+                         {"doc_id": "DOC-16", "table_id": "table-03", "fmt": "json"})
+    assert size < WALL
+    page = _payload(result)
+    assert page["table"].get("caption_truncated") is True
+    assert [r["row_index"] for r in page["table"]["rows"]] == list(range(50))
