@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Awaitable, Callable
 
 from .base import (
     SearchConfigError,
@@ -233,12 +234,26 @@ class _FallbackSearchProvider(SearchProvider):
     def __init__(self, providers: list[SearchProvider]) -> None:
         self._providers = providers
         self.name = "+".join(p.name for p in providers)
+        #: Awaited with a member's name just before the chain falls through to
+        #: it. The web layer sets it to its min-interval throttle (#187), so a
+        #: fallback backend is charged when it is actually queried rather than
+        #: when the chain starts — a reservation taken up front expired while a
+        #: hanging primary used up the interval, and a concurrent explicit
+        #: request for that backend then went through just before the chain
+        #: hit it too. Kept a plain callback so this layer stays free of the
+        #: web service's throttle; whatever it raises propagates as is.
+        self.member_gate: Callable[[str], Awaitable[None]] | None = None
 
     @property
     def throttle_keys(self) -> tuple[str, ...]:
-        # Charge every member the chain might query (primary + each fallback): a
-        # default request must not leave any of them a free interval that an
-        # explicit `provider=<member>` request could then exploit.
+        # With a gate, only the member queried at once is charged up front; the
+        # rest are charged by the gate when the chain reaches them (charging
+        # them here too would make a fast failover wait on its own
+        # reservation). Without one, every member the chain might query is
+        # charged, so a default request cannot leave any of them a free
+        # interval for an explicit `provider=<member>` request to exploit.
+        if self.member_gate is not None:
+            return (self._providers[0].name,)
         return tuple(p.name for p in self._providers)
 
     async def search(
@@ -250,7 +265,11 @@ class _FallbackSearchProvider(SearchProvider):
         freshness: str | None = None,
     ) -> list[SearchResult]:
         last_exc: SearchProviderUnavailable | None = None
-        for provider in self._providers:
+        for position, provider in enumerate(self._providers):
+            if position and self.member_gate is not None:
+                # Outside the try: a refusal here is the throttle's answer for
+                # this backend, not a reason to skip to the next one.
+                await self.member_gate(provider.name)
             try:
                 return await provider.search(
                     query, max_results=max_results, lang=lang, freshness=freshness

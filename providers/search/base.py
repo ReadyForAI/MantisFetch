@@ -113,11 +113,12 @@ class SearchProvider(ABC):
 
     @property
     def throttle_keys(self) -> tuple[str, ...]:
-        """Backend bucket keys for the process-level min-interval throttle. A single
-        provider charges its own bucket; a fallback chain overrides this to charge
-        *every* member it might query, so neither the primary-share nor the
-        failover path can bypass the interval for a backend an explicit
-        ``provider=<name>`` request would also hit."""
+        """Backend bucket keys charged up front by the process-level min-interval
+        throttle. A single provider charges its own bucket. A fallback chain
+        charges its first member here and each later one as it reaches it, through
+        its ``member_gate``; without a gate it charges every member up front. Either
+        way neither the primary nor the failover path can bypass the interval for a
+        backend an explicit ``provider=<name>`` request would also hit."""
         return (self.name,)
 
     @abstractmethod
