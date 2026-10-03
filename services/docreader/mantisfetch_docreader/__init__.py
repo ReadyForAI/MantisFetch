@@ -2240,6 +2240,23 @@ def _reversible_rewrite(impl):
                 _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
             ):
                 return None
+            if a["guard_stale_generation"] and (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+                # A replacement has stashed the source and not committed yet —
+                # the generation check above still passes, because the manifest
+                # it reads is the one being replaced. A background write that
+                # committed now would leave a commit marker beside a stash it
+                # does not own, and the startup sweep would read that marker as
+                # the replacement's commit and throw the old source away (#309).
+                # Everything else that writes is serialized behind the doc_id
+                # lock the replacement holds; this is the one that is not, and
+                # it is stale the moment a replacement starts anyway.
+                logger.warning(
+                    "Skipping deferred write for %s: a replacement is in flight, or "
+                    "an incomplete one is waiting to be settled (%s present)",
+                    doc_id,
+                    _SOURCE_ROLLBACK_DIR,
+                )
+                return None
             with _restore_on_failure(
                 doc_dir,
                 include_extracted=not a.get("preserve_extracted", False),
