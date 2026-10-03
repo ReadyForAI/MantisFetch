@@ -250,32 +250,104 @@ def test_a_restore_interrupted_halfway_can_be_resumed(docs_dir: Path) -> None:
     assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
 
 
+def _commit_the_index_the_child_never_reached(
+    docs_dir: Path, doc: Path, digest: str, content_hash: str
+) -> None:
+    """The index write the killed child stopped short of, with no marker."""
+    from mantisfetch_docreader.storage import _update_doc_index
+
+    meta = json.loads((doc / ".meta.json").read_text(encoding="utf-8"))
+    _update_doc_index(
+        docs_dir, meta, digest, content_hash=content_hash, content_type="General"
+    )
+    assert not (doc / ".rewrite-committed").exists()
+
+
 def test_a_commit_with_no_marker_is_still_read_as_committed(docs_dir: Path) -> None:
     """The marker lands just after the commit, and "just after" has a gap.
 
-    The index row carries the content hash of whichever version is committed.
-    Still the one in the backup's manifest means the commit never landed; a
-    different one means it did, marker or no marker.
+    Every commit stamps a new write_id, and the backup holds the row as it was
+    before the rewrite: a row still carrying the snapshot's id is a commit that
+    never landed, marker or no marker.
     """
     _write(docs_dir, "DOC-7102", "ORIGINAL")
     doc = docs_dir / "General" / "DOC-7102"
     assert _child(docs_dir, "DOC-7102", "_update_doc_index") == 73
 
-    # The index commit the child never reached, with no marker behind it.
-    from mantisfetch_docreader.storage import _update_doc_index
-
-    meta = json.loads((doc / ".meta.json").read_text(encoding="utf-8"))
     manifest = json.loads((doc / "manifest.json").read_text(encoding="utf-8"))
-    _update_doc_index(
-        docs_dir, meta, "digest REPLACEMENT",
-        content_hash=manifest["provenance"]["content_hash"], content_type="General",
+    _commit_the_index_the_child_never_reached(
+        docs_dir, doc, "digest REPLACEMENT", manifest["provenance"]["content_hash"]
     )
-    assert not (doc / ".rewrite-committed").exists()
 
     assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
     assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8"), (
         "a committed rewrite was rolled back under the index"
     )
+
+
+def test_a_commit_that_did_not_change_the_content_is_still_a_commit(
+    docs_dir: Path,
+) -> None:
+    """A rewrite that only redoes the summary leaves the content hash alone.
+
+    Reading the content would call that uncommitted however late it died, and
+    roll the files back under an index row holding the new digest.
+    """
+    _write(docs_dir, "DOC-7105", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7105"
+    was = json.loads((doc / "manifest.json").read_text(encoding="utf-8"))
+    assert _child(docs_dir, "DOC-7105", "_update_doc_index") == 73
+
+    # Same content hash on both sides — only the digest is new.
+    _commit_the_index_the_child_never_reached(
+        docs_dir, doc, "a freshly written digest", was["provenance"]["content_hash"]
+    )
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
+
+
+def test_a_commit_with_no_content_hash_at_all_is_still_a_commit(
+    docs_dir: Path,
+) -> None:
+    """A raw replacement's content hash is the empty string on both sides."""
+    _write(docs_dir, "DOC-7106", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7106"
+    assert _child(docs_dir, "DOC-7106", "_update_doc_index") == 73
+    snapshot = json.loads((doc / ".rollback" / ".index-before.json").read_text(encoding="utf-8"))
+    snapshot["content_hash"] = ""
+    (doc / ".rollback" / ".index-before.json").write_text(
+        json.dumps(snapshot), encoding="utf-8"
+    )
+
+    _commit_the_index_the_child_never_reached(docs_dir, doc, "digest REPLACEMENT", "")
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8")
+
+
+def test_a_status_update_on_the_row_is_not_mistaken_for_a_commit(
+    docs_dir: Path,
+) -> None:
+    """Not every upsert is a rewrite.
+
+    A web capture's deferred summary writes its status onto the row it already
+    has. Comparing whole rows would read that as the rewrite committing, and
+    finalize one that never did — deleting the only copy of the old version.
+    """
+    _write(docs_dir, "DOC-7107", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7107"
+    assert _child(docs_dir, "DOC-7107", "_update_doc_index") == 73
+
+    from mantisfetch_common.doc_index_store import get_document, upsert_document
+
+    row = get_document(docs_dir, "DOC-7107")
+    row["summary_status"] = "completed"
+    upsert_document(docs_dir, row)
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
+    assert (doc / "sections.json").exists()
 
 
 def test_a_stash_that_will_not_move_keeps_its_marker(
@@ -330,4 +402,61 @@ def test_staging_interrupted_before_its_snapshot_leaves_the_text_searchable(
     assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
     assert search_fts(docs_dir, "Zarquonium") == ["DOC-7104"], (
         "the sweep dropped a search row it had no snapshot for"
+    )
+
+
+def test_the_committed_verdict_is_written_down_before_its_evidence_goes(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep that stops halfway must not leave the next one guessing.
+
+    The verdict is read from the backup's snapshot. Delete the backup first and
+    a sweep interrupted before it clears the stash leaves `.rollback-source`
+    alone on disk — which the next start reads as a rewrite that never
+    committed, putting the old source back over the new one.
+    """
+    _write(docs_dir, "DOC-7108", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7108"
+    (doc / "source").mkdir(parents=True, exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    assert _child(docs_dir, "DOC-7108", "_update_doc_index") == 73
+    (doc / "source").mkdir(parents=True, exist_ok=True)
+    (doc / "source" / "new.html").write_bytes(b"<p>REPLACEMENT</p>")
+    manifest = json.loads((doc / "manifest.json").read_text(encoding="utf-8"))
+    _commit_the_index_the_child_never_reached(
+        docs_dir, doc, "digest REPLACEMENT", manifest["provenance"]["content_hash"]
+    )
+
+    def stop_before_clearing_the_stash(*a, **k):
+        raise OSError("the sweep stops here")
+
+    monkeypatch.setattr(dr, "_discard_stashed_source", stop_before_clearing_the_stash)
+    dr._finish_interrupted_rewrites(docs_dir)
+    monkeypatch.undo()
+
+    assert (doc / ".rewrite-committed").exists(), "the verdict was not recorded"
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert (doc / "source" / "new.html").read_bytes() == b"<p>REPLACEMENT</p>"
+
+
+def test_clearing_the_stash_keeps_the_marker_while_a_backup_remains(
+    docs_dir: Path,
+) -> None:
+    """The upload paths call this directly, so the rule lives here.
+
+    A successful write that could not remove `.rollback` keeps its marker on
+    purpose. Dropping it in the stash cleanup that follows would hand the next
+    start a backup with nothing to say it had already committed.
+    """
+    _write(docs_dir, "DOC-7109", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7109"
+    (doc / ".rewrite-committed").touch()
+    (doc / ".rollback").mkdir()
+    (doc / ".rollback-source").mkdir()
+
+    dr._discard_stashed_source(doc)
+
+    assert not (doc / ".rollback-source").exists()
+    assert (doc / ".rewrite-committed").exists(), (
+        "the marker went while a backup was still there"
     )

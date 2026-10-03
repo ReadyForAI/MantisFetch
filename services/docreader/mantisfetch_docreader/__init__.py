@@ -1270,6 +1270,7 @@ _REWRITE_COMMITTED = ".rewrite-committed"
 #: staging was interrupted and the untouched artifacts are still in place.
 _STAGED_MANIFEST = ".staged.json"
 _FTS_BEFORE = ".fts-before.txt"
+_INDEX_BEFORE = ".index-before.json"
 
 
 def _stash_source(doc_dir: Path) -> None:
@@ -1302,7 +1303,7 @@ def _restore_stashed_source(doc_dir: Path) -> None:
     shutil.move(str(stash), str(source))
 
 
-def _discard_stashed_source(doc_dir: Path, *, keep_marker: bool = False) -> None:
+def _discard_stashed_source(doc_dir: Path) -> None:
     """Drop the stash once the replacement has committed.
 
     An upload whose stored filename differs from the one it replaces does not
@@ -1325,8 +1326,12 @@ def _discard_stashed_source(doc_dir: Path, *, keep_marker: bool = False) -> None
             return  # the files are still in it: never rmtree it out from under them
         if not _gone(stash):
             return  # still there to settle, so the marker has to stay
-    if keep_marker:
-        return  # something else is unsettled; the marker still has work to do
+    if (doc_dir / _ROLLBACK_DIR).exists():
+        # Cleanup that did not finish. Without the marker the next start reads
+        # that backup as a rewrite which never committed, and puts the version
+        # this one replaced back over it. Checked here rather than left to the
+        # caller, because the two upload paths call this directly.
+        return
     # The last step of the rewrite: with the stash gone there is nothing left
     # for a sweep to have to decide about.
     with contextlib.suppress(OSError):
@@ -1372,9 +1377,15 @@ def _rewrite_committed(
 
     The marker is written just after the commit, and "just after" still has the
     whole JSON export in it — so a process can die with the row committed and
-    no marker on disk. The backup holds the manifest of the version the rewrite
-    was replacing, and the index row carries the content hash of whichever
-    version is committed: still the old one means the commit never landed.
+    no marker on disk. The backup holds the index row as it was before the
+    rewrite started, and every commit stamps a new `write_id`: a row still
+    carrying the one in the snapshot is a commit that never landed.
+
+    The write id rather than the content: a raw replacement's content_hash is
+    empty, and a rewrite that only redoes the summary leaves it unchanged, so
+    content would read those two as uncommitted however late they died. The id
+    alone rather than the whole row: a web capture's summary status lands on
+    the same row without being a rewrite, and must not be mistaken for one.
 
     Answers False whenever it cannot tell, because the two mistakes are not
     equal. Rolling back a committed rewrite leaves the index describing a
@@ -1384,11 +1395,10 @@ def _rewrite_committed(
     if docs_dir is None or doc_id is None:
         return False
     try:
-        previous = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
-        was = previous.get("provenance", {}).get("content_hash")
-    except (OSError, ValueError, AttributeError):
+        snapshot = json.loads((backup / _INDEX_BEFORE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return False
-    if not was:
+    if not isinstance(snapshot, dict):
         return False
     try:
         from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
@@ -1397,8 +1407,11 @@ def _rewrite_committed(
     except Exception as exc:  # noqa: BLE001 - an unreadable index decides nothing
         logger.warning("Could not read the index while settling %s: %s", doc_id, exc)
         return False
-    committed = (entry or {}).get("content_hash")
-    return bool(committed) and committed != was
+    if entry is None:
+        return False
+    # A row predating this field has none on either side, which is the same
+    # answer: the rewrite that would have stamped one never committed.
+    return entry.get("write_id") != snapshot.get("write_id")
 
 
 def _settle_interrupted_rewrite(
@@ -1441,14 +1454,20 @@ def _settle_interrupted_rewrite(
         return None
 
     if marker.exists() or _rewrite_committed(doc_dir, backup, docs_dir, doc_id):
-        backup_gone = _gone(backup)
-        if include_stash:
-            # Removes the marker itself, and only once the stash is gone: it
-            # returns with both in place when it cannot move the stash back.
-            _discard_stashed_source(doc_dir, keep_marker=not backup_gone)
-        elif backup_gone:
+        if not marker.exists():
+            # Write the verdict down before deleting what it was read from.
+            # The backup holds the snapshot `_rewrite_committed` compares
+            # against, and once the backup goes a stash left behind is all the
+            # next start would see.
             with contextlib.suppress(OSError):
-                marker.unlink(missing_ok=True)
+                marker.touch()
+            if not marker.exists():
+                return None  # could not record it: leave everything as it is
+        _gone(backup)
+        if include_stash:
+            # Removes the marker itself, and only once nothing is left for it
+            # to speak for.
+            _discard_stashed_source(doc_dir)
         return "committed"
 
     if backup.exists():
@@ -1534,6 +1553,7 @@ def _restore_on_failure(
     moved: list[str] = []
     copied: list[str] = []
     fts_before = _read_search_index(docs_dir, doc_id)
+    index_before = _read_index_entry(docs_dir, doc_id)
 
     def _put_back() -> None:
         _put_back_staged(doc_dir, backup, moved + copied)
@@ -1545,6 +1565,8 @@ def _restore_on_failure(
             backup.mkdir(parents=True, exist_ok=True)
             if fts_before is not None:
                 (backup / _FTS_BEFORE).write_text(fts_before, encoding="utf-8")
+            if index_before is not None:
+                _write_json(backup / _INDEX_BEFORE, index_before)
             names = list(_REGENERATED_TREES) + list(_REGENERATED_FILES)
             if include_extracted:
                 names += list(_EXTRACTED_TREES) + list(_EXTRACTED_FILES)
@@ -1584,6 +1606,19 @@ def _restore_on_failure(
         # next start reads that backup as a rewrite that never committed.
         with contextlib.suppress(OSError):
             (doc_dir / _REWRITE_COMMITTED).unlink(missing_ok=True)
+
+
+def _read_index_entry(docs_dir: Path | None, doc_id: str | None) -> dict[str, Any] | None:
+    """The document's index row as it stands, or None if there is none to read."""
+    if not docs_dir or not doc_id:
+        return None
+    try:
+        from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
+
+        return get_document(docs_dir, doc_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not read the index entry for %s: %s", doc_id, exc)
+        return None
 
 
 def _read_search_index(docs_dir: Path | None, doc_id: str | None) -> str | None:
