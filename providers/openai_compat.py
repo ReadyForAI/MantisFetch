@@ -26,8 +26,10 @@ from providers.base import (
     _short_digest,
 )
 from providers.errors import (
+    TRUNCATED_FINISH_REASONS,
     ProviderError,
     ProviderRejected,
+    ProviderTruncated,
     ProviderUnavailable,
     classify_provider_error,
 )
@@ -344,6 +346,14 @@ class OpenAICompatProvider(LLMProvider):
             raise ProviderUnavailable(
                 f"OpenAI-compat OCR returned null content for page {page_num}"
             )
+        if finish and finish.lower() in TRUNCATED_FINISH_REASONS:
+            # Text, but only the start of it. Raised rather than returned, so
+            # the page is neither cached nor counted as transcribed, and the
+            # pipeline's fallback gets its chance.
+            raise ProviderTruncated(
+                f"OpenAI-compat OCR for page {page_num} stopped at the output limit "
+                f"({finish}) after {len(result)} chars"
+            )
         if do_proofread and result and not self._is_ocr_failure_sentinel(result):
             review_messages = [
                 {
@@ -358,7 +368,7 @@ class OpenAICompatProvider(LLMProvider):
                 }
             ]
             try:
-                reviewed, _finish = self._chat(
+                reviewed, review_finish = self._chat(
                     review_messages,
                     max_retries=1,
                     model=self._ocr_model,
@@ -367,6 +377,17 @@ class OpenAICompatProvider(LLMProvider):
             except Exception as exc:
                 logger.warning("OpenAI-compat OCR proofread skipped for page %d: %s", page_num, exc)
                 reviewed = ""
+            else:
+                if review_finish and review_finish.lower() in TRUNCATED_FINISH_REASONS:
+                    # A proofread cut off partway would replace a complete draft
+                    # with the start of one. The draft stands.
+                    logger.warning(
+                        "OpenAI-compat OCR proofread for page %d stopped at the output "
+                        "limit (%s); keeping the draft",
+                        page_num,
+                        review_finish,
+                    )
+                    reviewed = ""
             # Ignore null/empty/sentinel proofread; keep the transcription draft.
             if reviewed and not self._is_ocr_failure_sentinel(reviewed):
                 result = reviewed

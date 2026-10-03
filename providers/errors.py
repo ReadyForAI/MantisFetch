@@ -73,6 +73,25 @@ class ProviderUnusable(ProviderError):
     _failover = True
 
 
+class ProviderTruncated(ProviderError):
+    """The answer stopped at the output limit: length / MAX_TOKENS.
+
+    Not retryable — the same call to the same provider stops at the same
+    place. Worth failing over: the peer has its own model and its own limit.
+    What it must never be is a success. A page transcribed halfway looks like a
+    short page, and it was being cached as one, so every later parse kept
+    serving the missing half as if it were not there.
+    """
+
+    retryable = False
+    _failover = True
+
+
+#: Finish reasons that mean "cut off by the output limit", lowercased. OpenAI
+#: says ``length``; some compatible vendors say what they mean instead.
+TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+
 #: 4xx codes that describe the vendor rather than the request. 401 and 403 are
 #: this deployment's credentials for *this* provider; 404 is a model or endpoint
 #: this provider no longer serves. None of them says anything about whether the
