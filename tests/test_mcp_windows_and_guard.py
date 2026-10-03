@@ -376,3 +376,15 @@ def test_large_json_table_metadata_is_cut_so_rows_can_be_read(client, served) ->
     page = _payload(result)
     assert page["table"].get("caption_truncated") is True
     assert [r["row_index"] for r in page["table"]["rows"]] == list(range(50))
+
+
+def test_json_table_metadata_is_kept_whole_when_the_table_fits(client, served) -> None:
+    """Codex round 6: metadata over half the budget was cut even when the whole
+    table fitted, losing its header, counts and provenance."""
+    table = {"table_id": "table-04", "header": ["表头" * 2250, "b"], "row_count": 1,
+             "column_count": 2, "source": "web", "rows": [{"row_index": 0, "cells": ["1", "x"]}]}
+    served["/library/DOC-17/table/table-04/json"] = {
+        "doc_id": "DOC-17", "table_id": "table-04", "table": table}
+    page = _payload(_call(client, "doc_table",
+                          {"doc_id": "DOC-17", "table_id": "table-04", "fmt": "json"})[0])
+    assert page["table"] == table

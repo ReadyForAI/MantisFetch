@@ -1334,13 +1334,16 @@ async def doc_table(
         flat = {**{k: v for k, v in data.items() if k != "table"}, "rows": table["rows"]}
         budget = _result_budget()
 
-        def with_meta(m: dict[str, Any]) -> int:
-            return _wire_bytes({**flat, "rows": [], "table": {**m, "rows": []}})
+        def with_meta(m: dict[str, Any], rows: list[Any]) -> int:
+            return _wire_bytes({**flat, "rows": [], "table": {**m, "rows": rows}})
 
-        if with_meta(meta) > budget // 2:
-            # Header, caption and column stats repeat on every page; cut them
-            # first, marked, so that fewer rows can actually make a page fit.
-            meta = _shrink_entry(dict(meta), lambda m: with_meta(m) <= budget // 2, ())
+        first_row = table["rows"][offset : offset + 1] if 0 <= offset < len(table["rows"]) else []
+        if with_meta(meta, first_row) > budget:
+            # Header, caption and column stats repeat on every page. Only when
+            # not even one row fits beside them are they cut — first, marked,
+            # so that fewer rows can then make a page fit. A table that fits
+            # keeps all of its metadata.
+            meta = _shrink_entry(dict(meta), lambda m: with_meta(m, []) <= budget // 2, ())
 
         def nest(page: dict[str, Any]) -> dict[str, Any]:
             page = dict(page)
