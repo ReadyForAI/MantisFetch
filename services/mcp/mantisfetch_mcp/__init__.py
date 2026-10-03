@@ -402,6 +402,8 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
         except ValueError:
             continue  # escapes this root — try the next
         inside_root = True
+        if candidate == root:
+            continue  # the root itself is a directory, never this root's file
         # Open the canonical path without following anything below the root,
         # then judge and read the descriptor, never the path again. Checking a
         # path and then reading it by name left a window in which a shared
@@ -430,7 +432,14 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
             # grows after the fstat cannot either.
             if st.st_size > cap:
                 raise ToolError(f"document too large: {st.st_size} bytes (max {cap})")
-            data = fh.read(cap + 1)
+            # In chunks: read(cap + 1) allocates the whole allowance up front,
+            # for an 11-byte file as much as for one at the limit.
+            chunks: list[bytes] = []
+            total = 0
+            while chunk := fh.read(min(1 << 20, cap + 1 - total)):
+                chunks.append(chunk)
+                total += len(chunk)
+            data = b"".join(chunks)
         if len(data) > cap:
             raise ToolError(f"document too large: over {cap} bytes (max {cap})")
         return candidate.name, data

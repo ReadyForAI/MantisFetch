@@ -643,3 +643,43 @@ def test_a_directory_under_the_name_falls_through_to_the_next_root(
     (second / "doc.pdf").write_bytes(b"%PDF second")
     monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", f"{first}:{second}")
     assert mm._resolve_local_doc("doc.pdf") == ("doc.pdf", b"%PDF second")
+
+
+def test_a_name_that_resolves_to_the_root_falls_through(tmp_path, monkeypatch) -> None:
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    (first / "doc.pdf").symlink_to(first, target_is_directory=True)
+    second.mkdir()
+    (second / "doc.pdf").write_bytes(b"%PDF second")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", f"{first}:{second}")
+    assert mm._resolve_local_doc("doc.pdf") == ("doc.pdf", b"%PDF second")
+    with pytest.raises(mm.ToolError):
+        mm._resolve_local_doc(".")
+
+
+def test_a_small_file_is_not_read_into_a_buffer_the_size_of_the_cap(
+    tmp_path, monkeypatch
+) -> None:
+    import tracemalloc
+
+    root = tmp_path / "resource"
+    root.mkdir()
+    (root / "tiny.pdf").write_bytes(b"%PDF tiny")
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    monkeypatch.setattr(mm._doc_mod, "MAX_UPLOAD_BYTES", 64 * 1024 * 1024)
+    tracemalloc.start()
+    try:
+        mm._resolve_local_doc("tiny.pdf")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024, f"peak {peak} bytes for a 9-byte file"
+
+
+def test_a_file_at_the_cap_still_reads_whole(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "resource"
+    root.mkdir()
+    (root / "full.pdf").write_bytes(b"y" * 3_000_000)
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    monkeypatch.setattr(mm._doc_mod, "MAX_UPLOAD_BYTES", 3_000_000)
+    assert len(mm._resolve_local_doc("full.pdf")[1]) == 3_000_000
