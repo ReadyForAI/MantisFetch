@@ -16,6 +16,7 @@ from providers.base import OCR_PROOFREAD_PROMPT, OCR_TRANSCRIBE_PROMPT, LLMProvi
 from providers.errors import (
     ProviderError,
     ProviderRejected,
+    ProviderTruncated,
     ProviderUnavailable,
     classify_provider_error,
 )
@@ -52,6 +53,14 @@ def _gemini_empty_text_error(response: object, what: str) -> ProviderError:
         return ProviderRejected(f"Gemini {what} blocked ({', '.join(reason_bits)})")
     detail = ", ".join(reason_bits) if reason_bits else "no text parts"
     return ProviderUnavailable(f"Gemini {what} returned no text ({detail})")
+
+
+def _gemini_truncated(response: object) -> bool:
+    """Did a candidate stop at the output limit (FinishReason.MAX_TOKENS)?"""
+    for cand in getattr(response, "candidates", None) or []:
+        if "MAX_TOKENS" in str(getattr(cand, "finish_reason", "") or "").upper():
+            return True
+    return False
 
 
 class GeminiProvider(LLMProvider):
@@ -189,6 +198,14 @@ class GeminiProvider(LLMProvider):
                 raw_text = getattr(response, "text", None)
                 if raw_text is None:
                     raise _gemini_empty_text_error(response, f"OCR page {page_num}")
+                if _gemini_truncated(response):
+                    # Text, but only the start of it: never a success, never
+                    # cached. Not retried here either — the same request stops
+                    # at the same place.
+                    raise ProviderTruncated(
+                        f"Gemini OCR for page {page_num} stopped at MAX_TOKENS "
+                        f"after {len(raw_text)} chars"
+                    )
                 result = raw_text.strip()
                 # Proofread whenever transcription succeeded — gating on
                 # attempt == 0 skipped it for any page that needed a retry.
@@ -206,7 +223,15 @@ class GeminiProvider(LLMProvider):
                             config={"http_options": {"timeout": 60_000}},
                         )
                         reviewed = review.text.strip()
-                        if reviewed and not reviewed.strip().startswith(
+                        if _gemini_truncated(review):
+                            # A proofread cut off partway would replace a
+                            # complete draft with the start of one.
+                            logger.warning(
+                                "Gemini OCR proofread for page %d stopped at MAX_TOKENS; "
+                                "keeping the draft",
+                                page_num,
+                            )
+                        elif reviewed and not reviewed.strip().startswith(
                             ("[OCR failed", "[OCR 失败")
                         ):
                             result = reviewed
