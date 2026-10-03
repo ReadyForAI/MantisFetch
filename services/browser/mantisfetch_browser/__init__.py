@@ -151,6 +151,9 @@ from .models import (
     SkippedItem as SkippedItem,
 )
 from .models import (
+    UncapturedItem as UncapturedItem,
+)
+from .models import (
     WebMCPDiscoverRequest as WebMCPDiscoverRequest,
 )
 from .models import (
@@ -4037,6 +4040,27 @@ def _search_and_capture_url_ttl() -> float:
 
 SEARCH_CAPTURE_TOP_MAX = 3  # search_and_capture captures at most this many, serially
 
+#: With a budget, a capture is not started with less time than this left: it
+#: would only be cut off. The hits it would have taken go back as uncaptured.
+SEARCH_CAPTURE_MIN_SECONDS = 3.0
+
+#: Captures whose wait the budget cut short. They keep running — the deadline
+#: bounds what the caller waits for, not the work, so a capture is never torn
+#: down halfway through its write — and finish into the library, where the URL
+#: cache hands them to the next call. Held here so they are not collected.
+_background_captures: set[asyncio.Task[Any]] = set()
+
+
+def _finish_in_background(task: asyncio.Task[Any]) -> None:
+    _background_captures.add(task)
+
+    def _done(t: asyncio.Task[Any]) -> None:
+        _background_captures.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.info("Background capture ended with an error: %s", t.exception())
+
+    task.add_done_callback(_done)
+
 # Per-provider min-interval throttle (protects paid search-API quota). Mirrors the
 # docreader summary min-interval pattern rather than a token bucket — search is
 # low-frequency, so burst tolerance buys nothing. Keyed by resolved provider name
@@ -4168,20 +4192,63 @@ async def search_and_capture(
 ) -> SearchAndCaptureResponse:
     """Search, then capture the top N hits into the document library (serially) with
     search provenance stamped in metadata. One hit failing to capture is recorded in
-    `skipped` and does not abort the batch."""
+    `skipped` and does not abort the batch.
+
+    With ``budget_seconds`` the call answers inside that window, always as a
+    result: a hit there is no longer time for goes to ``uncaptured`` as a plain
+    search result, and a capture that overruns its share goes to ``skipped`` as
+    ``capture_timeout`` while it finishes in the background. A search that does
+    not answer in time is a 422 ``search_budget_exceeded``. Without a budget
+    nothing here is bounded, as before. (#276: a dropped MCP call takes every
+    other tool of this server off the client's face until it reconnects.)
+    """
+    deadline = None if req.budget_seconds is None else time.monotonic() + req.budget_seconds
     provider = _require_search_provider(req.provider)
     _normalize_content_type(req.content_type)  # 422 early on a bad content_type
     await _enforce_search_throttle(provider.throttle_keys)
     top = max(1, min(req.capture_top, SEARCH_CAPTURE_TOP_MAX))
     searched_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    results = await _run_search(
+    search = _run_search(
         provider, req.query, max_results=top, lang=req.lang, freshness=req.freshness
     )
+    if deadline is None:
+        results = await search
+    else:
+        try:
+            results = await asyncio.wait_for(search, timeout=max(0.0, deadline - time.monotonic()))
+        except TimeoutError:
+            raise HTTPException(
+                422,
+                {
+                    "error": "search_budget_exceeded",
+                    "message": (
+                        f"the search did not answer inside the {req.budget_seconds}s budget "
+                        "this call declared. Nothing was captured; retry, or call "
+                        "web_search and capture a hit on its own."
+                    ),
+                    "budget_seconds": req.budget_seconds,
+                },
+            ) from None
 
     captured: list[CapturedItem] = []
     skipped: list[SkippedItem] = []
-    for rank, hit in enumerate(results[:top], start=1):
+    uncaptured: list[UncapturedItem] = []
+    hits = list(enumerate(results[:top], start=1))
+    for position, (rank, hit) in enumerate(hits):
+        share: float | None = None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining < SEARCH_CAPTURE_MIN_SECONDS:
+                uncaptured.extend(
+                    UncapturedItem(url=h.url, title=h.title, snippet=h.snippet or "", rank=r)
+                    for r, h in hits[position:]
+                )
+                break
+            # A fair share of what is left, so one slow origin cannot spend the
+            # time the later hits need; whatever a fast capture leaves over
+            # rolls forward to the next.
+            share = max(SEARCH_CAPTURE_MIN_SECONDS, remaining / (len(hits) - position))
         metadata = {
             "source": "web_search",
             "search_query": req.query,
@@ -4196,15 +4263,40 @@ async def search_and_capture(
             lang=req.lang,
             metadata=metadata,
         )
+        if share is not None:
+            # The common slow case is a slow origin; with the navigation
+            # timeout inside the share it fails the ordinary way, with its own
+            # reason, and the deadline below only has to catch the rest.
+            cap_req.timeout_ms = min(cap_req.timeout_ms, int(share * 1000))
         # _capture_impl runs the SSRF guard on the (search-supplied) URL, so a hit
         # pointing at a private/loopback target is rejected here → skipped.
         # URL TTL defaults to 24h for this path (B5) so repeated queries reuse hits.
+        work = _capture_impl(
+            cap_req,
+            url_ttl_hours=_search_and_capture_url_ttl(),
+            actor=actor_from_headers(request.headers),
+        )
         try:
-            cap = await _capture_impl(
-                cap_req,
-                url_ttl_hours=_search_and_capture_url_ttl(),
-                actor=actor_from_headers(request.headers),
-            )
+            if share is None:
+                cap = await work
+            else:
+                task = asyncio.ensure_future(work)
+                try:
+                    cap = await asyncio.wait_for(asyncio.shield(task), timeout=share)
+                except TimeoutError:
+                    _finish_in_background(task)
+                    skipped.append(
+                        SkippedItem(
+                            url=hit.url,
+                            reason=(
+                                f"capture_timeout: not done within its {share:.0f}s share of "
+                                "the budget; it finishes in the background, and a later "
+                                "call for this URL reuses it"
+                            ),
+                            rank=rank,
+                        )
+                    )
+                    continue
         except HTTPException as exc:
             skipped.append(
                 SkippedItem(url=hit.url, reason=f"capture_failed: {exc.detail}", rank=rank)
@@ -4232,4 +4324,5 @@ async def search_and_capture(
         captured=captured,
         skipped=skipped,
         searched_at=searched_at,
+        uncaptured=uncaptured,
     )

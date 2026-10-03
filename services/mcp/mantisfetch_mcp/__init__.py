@@ -80,6 +80,10 @@ _MAX_REQUEST_BODY_BYTES = _MAX_INLINE_DOC_BYTES * 4 // 3 + 256 * 1024
 # left too high, the refusal stops arriving before the client gives up, which is
 # the failure this exists to prevent.
 _PARSE_BUDGET_SEC = float(os.environ.get("MANTISFETCH_MCP_PARSE_BUDGET_SEC", "45"))
+# The same number bounds web_search_capture (#276), for the same reason: it is
+# what an MCP call can safely take under the client's per-request timeout, and
+# a call that outlives it is dropped as a transport failure — which NodalOS
+# reads as this whole server being gone. One knob, because it is one limit.
 
 
 def _transport_security() -> TransportSecuritySettings:
@@ -360,6 +364,16 @@ def _wrap_search_capture_result(result: Any) -> Any:
         for field in ("title", "digest"):
             if isinstance(item.get(field), str):
                 item[field] = _wrap_text(item[field], nonce, origin)
+    # Hits the budget left uncaptured are search results — multi-origin, so
+    # each in its own boundary, exactly as _wrap_search_results does.
+    for hit in result.get("uncaptured") or []:
+        if not isinstance(hit, dict):
+            continue
+        origin = str(hit.get("url") or "unknown")
+        nonce = secrets.token_hex(8)
+        for field in ("title", "snippet"):
+            if isinstance(hit.get(field), str):
+                hit[field] = _wrap_text(hit[field], nonce, origin)
     return result
 
 
@@ -587,7 +601,13 @@ if _search_tools_enabled():
         """Search + capture the top N hits into the library (capture_top <= 3),
         returning [{doc_id, digest, rank, reused}]. Deep-read the returned doc_ids
         by tiers (doc_digest -> doc_sections -> doc_section); don't pull full text
-        blindly. Each digest is wrapped in an untrusted-content boundary."""
+        blindly. Each digest is wrapped in an untrusted-content boundary.
+
+        The call answers within a fixed time budget. `skipped` hits were tried
+        and failed (`capture_timeout` ones finish in the background — calling
+        again for the same query reuses them); `uncaptured` hits were never
+        tried for lack of time — they are plain search results, so pass a
+        `url` to web_capture if one matters."""
         return _wrap_search_capture_result(
             await _web_post(
                 "/search_and_capture",
@@ -599,6 +619,7 @@ if _search_tools_enabled():
                     "lang": lang,
                     "freshness": freshness,
                     "provider": provider,
+                    "budget_seconds": _PARSE_BUDGET_SEC,
                 },
                 headers=_actor_headers(ctx),
             )
