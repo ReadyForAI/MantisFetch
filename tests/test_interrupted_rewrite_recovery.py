@@ -460,3 +460,112 @@ def test_clearing_the_stash_keeps_the_marker_while_a_backup_remains(
     assert (doc / ".rewrite-committed").exists(), (
         "the marker went while a backup was still there"
     )
+
+
+def test_a_marker_the_last_write_could_not_clear_does_not_condemn_the_next(
+    docs_dir: Path,
+) -> None:
+    """A stale marker must not be read as evidence about a different rewrite.
+
+    A successful write that cannot unlink its marker leaves it behind. The next
+    rewrite stages over it, and if that one dies before committing, the sweep
+    would take the old marker as proof it had — and delete the only backup.
+    """
+    _write(docs_dir, "DOC-7110", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7110"
+    (doc / ".rewrite-committed").touch()  # the unlink that did not happen
+
+    # The next rewrite stages, then dies before its own commit.
+    assert _child(docs_dir, "DOC-7110", "_update_doc_index") == 73
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8"), (
+        "the stale marker finalized a rewrite that never committed"
+    )
+    assert (doc / "sections.json").exists()
+
+
+def test_a_commit_that_cannot_be_recorded_keeps_its_backup(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The backup carries the snapshot that proves the commit landed.
+
+    Deleting it after a marker write that failed leaves a state nothing can
+    read: the next start sees a stash with no marker and no snapshot, and puts
+    the old source back under the new manifest.
+    """
+    _write(docs_dir, "DOC-7111", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7111"
+
+    real_touch = Path.touch
+
+    def refuse_the_marker(self, *a, **k):
+        if self.name == ".rewrite-committed":
+            raise OSError("no space left on device")
+        return real_touch(self, *a, **k)
+
+    monkeypatch.setattr(Path, "touch", refuse_the_marker)
+    with dr._restore_on_failure(
+        doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7111"
+    ):
+        pass
+    monkeypatch.undo()
+
+    assert (doc / ".rollback" / ".index-before.json").exists(), (
+        "the snapshot the next start needs was deleted"
+    )
+
+
+def test_a_first_write_that_commits_is_not_rolled_back(docs_dir: Path) -> None:
+    """A document with no index row yet still has a state worth recording.
+
+    "No snapshot" used to mean both "there was no row" and "nothing was
+    written down", so a first upload that committed and died before its marker
+    was read as uncommitted — and the sweep cleared its searchable text.
+    """
+    doc = docs_dir / "General" / "DOC-7112"
+    doc.mkdir(parents=True)
+    with dr._restore_on_failure(
+        doc, include_extracted=True, docs_dir=docs_dir, doc_id="DOC-7112"
+    ):
+        assert (doc / ".rollback" / ".index-before.json").exists(), (
+            "a document with no index row yet was staged without a snapshot"
+        )
+        _write(docs_dir, "DOC-7112", "FIRST Zarquonium")
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7112"]
+
+    # Replay the crash window: the commit landed, the marker did not. The
+    # scaffolding is rebuilt exactly as the staging above wrote it.
+    (doc / ".rewrite-committed").unlink(missing_ok=True)
+    backup = doc / ".rollback"
+    backup.mkdir(exist_ok=True)
+    dr._write_json(backup / ".index-before.json", {})
+    dr._write_json(backup / ".staged.json", {"staged": []})
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7112"], (
+        "a committed first write lost its searchable text"
+    )
+
+
+def test_a_search_index_that_will_not_write_keeps_the_backup_for_a_retry(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Files back, search table not: that has to stay fixable."""
+    _write(docs_dir, "DOC-7113", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7113"
+    assert _child(docs_dir, "DOC-7113", "_update_doc_index") == 73
+
+    import mantisfetch_common.doc_index_store as dis
+
+    def refuse_the_write(*a, **k):
+        raise RuntimeError("the search table will not take it")
+
+    monkeypatch.setattr(dis, "upsert_fts", refuse_the_write)
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    monkeypatch.undo()
+
+    assert (doc / ".rollback").exists(), "nothing is left to retry from"
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7113"]
+    assert not (doc / ".rollback").exists()

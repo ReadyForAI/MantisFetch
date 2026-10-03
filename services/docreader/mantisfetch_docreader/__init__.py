@@ -1370,6 +1370,32 @@ def _put_back_staged(doc_dir: Path, backup: Path, names: list[str]) -> None:
         shutil.move(str(source), str(target))
 
 
+def _restore_indexed_text(backup: Path, docs_dir: Path | None, doc_id: str | None) -> bool:
+    """Put the staged document's indexed text back; False if it did not happen.
+
+    Unlike the in-process rollback, which can only log and carry on, a sweep
+    that cannot write the search table has somewhere to put the problem: it
+    leaves the backup alone and the next start tries again. A snapshot that
+    cannot be read is the same answer — reading nothing as "there was no text"
+    would delete the row this is supposed to be restoring.
+    """
+    fts_path = backup / _FTS_BEFORE
+    try:
+        body = fts_path.read_text(encoding="utf-8") if fts_path.exists() else None
+    except OSError:
+        return False
+    if not docs_dir or not doc_id:
+        return True  # nothing to restore it into
+    try:
+        from mantisfetch_common.doc_index_store import upsert_fts  # noqa: PLC0415
+
+        upsert_fts(docs_dir, doc_id, body or "")
+    except Exception as exc:  # noqa: BLE001 - reported, not raised: one bad
+        logger.warning("Could not restore the search index for %s: %s", doc_id, exc)
+        return False
+    return True
+
+
 def _rewrite_committed(
     doc_dir: Path, backup: Path, docs_dir: Path | None, doc_id: str | None
 ) -> bool:
@@ -1455,19 +1481,24 @@ def _settle_interrupted_rewrite(
 
     if marker.exists() or _rewrite_committed(doc_dir, backup, docs_dir, doc_id):
         if not marker.exists():
-            # Write the verdict down before deleting what it was read from.
-            # The backup holds the snapshot `_rewrite_committed` compares
-            # against, and once the backup goes a stash left behind is all the
-            # next start would see.
+            # Write the verdict down before deleting what it was read from:
+            # the backup holds the snapshot it was read from, and once that is
+            # gone a stash left behind is all the next start would see.
             with contextlib.suppress(OSError):
                 marker.touch()
             if not marker.exists():
-                return None  # could not record it: leave everything as it is
+                return None  # not recorded: leave everything exactly as it is
         _gone(backup)
         if include_stash:
             # Removes the marker itself, and only once nothing is left for it
             # to speak for.
             _discard_stashed_source(doc_dir)
+        elif not backup.exists():
+            # The previous rewrite is fully settled, so its marker has to go —
+            # the caller is about to stage a new one, and a marker left here
+            # would make that rewrite's own backup look committed.
+            with contextlib.suppress(OSError):
+                marker.unlink(missing_ok=True)
         return "committed"
 
     if backup.exists():
@@ -1496,18 +1527,15 @@ def _settle_interrupted_rewrite(
                 if (backup / name).exists()
             ]
         _put_back_staged(doc_dir, backup, staged)
-        if staging_finished:
-            # Only then can the rewrite have reached the FTS write, and only
-            # then does a missing snapshot mean "there was no indexed text" —
-            # it is written first, before anything moves. Interrupted earlier,
-            # the row still holds the document's own text.
-            fts_path = backup / _FTS_BEFORE
-            body = None
-            try:
-                body = fts_path.read_text(encoding="utf-8") if fts_path.exists() else None
-            except OSError:  # pragma: no cover - defensive
-                body = None
-            _restore_search_index(docs_dir, doc_id, body)
+        if staging_finished and not _restore_indexed_text(backup, docs_dir, doc_id):
+            # The text on disk is the old one and the search table still holds
+            # the replacement's. Keeping the backup is what makes that fixable:
+            # the next sweep finds the same scaffolding, skips the artifacts it
+            # already put back, and retries this.
+            logger.warning(
+                "Left %s staged: its indexed text could not be put back", doc_dir
+            )
+            return "rolled_back"
         _gone(backup)
     if include_stash:
         _restore_stashed_source(doc_dir)
@@ -1565,8 +1593,11 @@ def _restore_on_failure(
             backup.mkdir(parents=True, exist_ok=True)
             if fts_before is not None:
                 (backup / _FTS_BEFORE).write_text(fts_before, encoding="utf-8")
-            if index_before is not None:
-                _write_json(backup / _INDEX_BEFORE, index_before)
+            # Written even when there was no row: "this document had no index
+            # entry" is an answer, and a first write that commits and then dies
+            # before its marker has to be recognisable as committed. Absent and
+            # empty are different things here.
+            _write_json(backup / _INDEX_BEFORE, index_before or {})
             names = list(_REGENERATED_TREES) + list(_REGENERATED_FILES)
             if include_extracted:
                 names += list(_EXTRACTED_TREES) + list(_EXTRACTED_FILES)
@@ -1597,9 +1628,16 @@ def _restore_on_failure(
     # The index commit has landed. Say so before removing the evidence of the
     # rewrite, so a process that dies in the next few milliseconds is not read
     # as one that never committed.
+    marker = doc_dir / _REWRITE_COMMITTED
     if doc_dir.exists():
         with contextlib.suppress(OSError):
-            (doc_dir / _REWRITE_COMMITTED).touch()
+            marker.touch()
+        if not marker.exists():
+            # Same rule the sweep follows: the backup carries the snapshot that
+            # says this committed, so it outlives a verdict that would not
+            # write. Left here, the next start settles it.
+            logger.warning("Could not record the commit for %s; leaving it staged", doc_dir)
+            return
     if _gone(backup) and not (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
         # Nothing left that a sweep could misread, so the marker would only be
         # litter. A backup that would not go keeps it: without the marker the
