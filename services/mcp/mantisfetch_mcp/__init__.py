@@ -51,6 +51,7 @@ from pydantic import Field
 
 from mantisfetch_common import __version__
 from mantisfetch_common.actor import forwardable_headers
+from mantisfetch_common.allowed_hosts import allowed_hosts_and_origins
 from mantisfetch_common.storage import CONTENT_TYPE_DIRS
 from providers.search import available_providers, provider_trait
 
@@ -85,18 +86,10 @@ def _transport_security() -> TransportSecuritySettings:
 
     Origins cover both http and https: a browser/Electron MCP client sends
     Origin: https://<host> once the server is run with TLS, and MCPServer rejects
-    an unlisted Origin before bearer auth.
+    an unlisted Origin before bearer auth. The list is shared with the REST gate
+    (mantisfetch_common.allowed_hosts) so the two surfaces cannot drift.
     """
-    port = os.environ.get("PORT", "9898")
-    hosts = [f"127.0.0.1:{port}", f"localhost:{port}", "127.0.0.1", "localhost"]
-    origins: list[str] = []
-    for h in (f"127.0.0.1:{port}", f"localhost:{port}"):
-        origins += [f"http://{h}", f"https://{h}"]
-    for extra in os.environ.get("MANTISFETCH_MCP_ALLOWED_HOSTS", "").split(","):
-        extra = extra.strip()
-        if extra:
-            hosts.append(extra)
-            origins += [f"http://{extra}", f"https://{extra}"]
+    hosts, origins = allowed_hosts_and_origins()
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
     )

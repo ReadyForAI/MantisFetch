@@ -26,6 +26,11 @@ import uvicorn
 from fastapi import FastAPI
 
 from mantisfetch_common import __version__
+from mantisfetch_common.allowed_hosts import (
+    allowed_hosts_and_origins,
+    host_allowed,
+    origin_allowed,
+)
 from mantisfetch_deliverables import deliverables_app
 
 logger = logging.getLogger("mantisfetch")
@@ -165,9 +170,13 @@ class _RestAuthGate:
     (needed for cross-host MCP) those would otherwise be wide open. Behavior
     (loopback-only by default, matching the MCP gate):
 
-    - loopback peer (127.0.0.1 / ::1): always allowed — same-host callers,
-      including Skeleton-Doc over the Docker bridge when it shares the host, are
-      unaffected.
+    - loopback peer (127.0.0.1 / ::1): allowed without a token, *if* its Host
+      is a loopback name (or listed in ``MANTISFETCH_MCP_ALLOWED_HOSTS``) and any
+      Origin it sends is one of those. A loopback socket is not proof the caller
+      is a local application: a page in a local browser reaching this port
+      through DNS rebinding arrives from 127.0.0.1 with the attacker's domain
+      in Host, and the surface it reaches reads documents, replaces them and
+      drives the browser. A request without Origin (curl, SDKs) is unaffected.
     - ``MANTISFETCH_MCP_TOKEN`` set: require that bearer for non-loopback peers
       (constant-time compare; else 401). A cross-host / cross-bridge Agent reaches
       the surface by presenting the token.
@@ -193,19 +202,36 @@ class _RestAuthGate:
     def _deny(self, scope: dict) -> tuple[int, bytes] | None:
         client = scope.get("client")
         peer = client[0] if client else None
-        if peer in self._LOOPBACK:
-            return None
         token = os.environ.get("MANTISFETCH_MCP_TOKEN")
+        headers = dict(scope.get("headers") or [])
+        if token and secrets.compare_digest(
+            headers.get(b"authorization", b"").decode(), f"Bearer {token}"
+        ):
+            # A valid bearer is its own basis for trust, from any peer and
+            # under any Host — a same-host reverse proxy forwarding under its
+            # own name is exactly this.
+            return None
+        if peer in self._LOOPBACK:
+            # Only the token-less path is checked: it is the one that trusts
+            # by location. Checking Host on the bearer path would break every
+            # off-host deployment whose name nobody listed.
+            hosts, origins = allowed_hosts_and_origins()
+            host = headers.get(b"host", b"").decode("latin-1")
+            origin = headers.get(b"origin", b"").decode("latin-1") or None
+            if not host_allowed(host, hosts):
+                return 403, (
+                    b'{"error":"forbidden: Host is not a loopback name; add it to '
+                    b'MANTISFETCH_MCP_ALLOWED_HOSTS if this host is reached by it"}'
+                )
+            if not origin_allowed(origin, origins):
+                return 403, b'{"error":"forbidden: Origin is not allowed"}'
+            return None
         if not token:
             return 403, (
                 b'{"error":"forbidden: this surface is loopback-only; '
                 b'set MANTISFETCH_MCP_TOKEN to allow non-loopback clients"}'
             )
-        headers = dict(scope.get("headers") or [])
-        provided = headers.get(b"authorization", b"").decode()
-        if not secrets.compare_digest(provided, f"Bearer {token}"):
-            return 401, b'{"error":"unauthorized"}'
-        return None
+        return 401, b'{"error":"unauthorized"}'
 
     async def __call__(self, scope: dict, receive: object, send: object) -> None:
         if scope["type"] == "http" and scope.get("path") not in self._HEALTH_PATHS:
