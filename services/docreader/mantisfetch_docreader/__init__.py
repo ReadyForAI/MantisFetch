@@ -2197,6 +2197,14 @@ def _actor_provenance(doc_dir: Path, actor: Actor | None) -> dict[str, str | Non
     return {"created_by": created_by, "created_via": created_via}
 
 
+#: How long a deferred write waits for an in-flight replacement of its document
+#: to settle before giving up, and how often it looks. A replacement holds its
+#: stash for as long as its parse and any synchronous summary take; one that
+#: never settles is a leftover the startup sweep could not finish.
+_DEFERRED_WRITE_REPLACEMENT_WAIT_SEC = 1800.0
+_DEFERRED_WRITE_POLL_SEC = 0.5
+
+
 def _reversible_rewrite(impl):
     """Give a writer all-or-nothing semantics against the document on disk.
 
@@ -2233,14 +2241,24 @@ def _reversible_rewrite(impl):
         doc_dir = output_dir / _doc_storage_rel_path(
             doc_id, _normalize_content_type(content_type) if content_type else None
         )
-        with _document_writer_lock(output_dir, doc_id):
-            if a["guard_stale_generation"] and _skip_stale_generation(
-                doc_id,
-                doc_dir,
-                _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
-            ):
-                return None
-            if a["guard_stale_generation"] and (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+        guarded = a["guard_stale_generation"]
+        waited_since: float | None = None
+        while True:
+            with _document_writer_lock(output_dir, doc_id):
+                if guarded and _skip_stale_generation(
+                    doc_id,
+                    doc_dir,
+                    _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
+                ):
+                    return None
+                if not (guarded and (doc_dir / _SOURCE_ROLLBACK_DIR).exists()):
+                    with _restore_on_failure(
+                        doc_dir,
+                        include_extracted=not a.get("preserve_extracted", False),
+                        docs_dir=output_dir,
+                        doc_id=doc_id,
+                    ):
+                        return impl(*args, **kwargs)
                 # A replacement has stashed the source and not committed yet —
                 # the generation check above still passes, because the manifest
                 # it reads is the one being replaced. A background write that
@@ -2248,22 +2266,30 @@ def _reversible_rewrite(impl):
                 # does not own, and the startup sweep would read that marker as
                 # the replacement's commit and throw the old source away (#309).
                 # Everything else that writes is serialized behind the doc_id
-                # lock the replacement holds; this is the one that is not, and
-                # it is stale the moment a replacement starts anyway.
-                logger.warning(
-                    "Skipping deferred write for %s: a replacement is in flight, or "
-                    "an incomplete one is waiting to be settled (%s present)",
-                    doc_id,
-                    _SOURCE_ROLLBACK_DIR,
-                )
-                return None
-            with _restore_on_failure(
-                doc_dir,
-                include_extracted=not a.get("preserve_extracted", False),
-                docs_dir=output_dir,
-                doc_id=doc_id,
-            ):
-                return impl(*args, **kwargs)
+                # lock the replacement holds; this is the one that is not.
+                #
+                # So it waits, outside the lock, for the replacement to settle,
+                # and then asks again: committed, and the generation check skips
+                # it as stale; rolled back, and it lands on the version it was
+                # computed for — which is what happened before the wait existed.
+                # Only guarded writes come here, and they all run on deferred-
+                # summary daemon threads, never on the event loop.
+                now = time.monotonic()
+                if waited_since is None:
+                    waited_since = now
+                    logger.info(
+                        "Deferred write for %s waiting for an in-flight replacement", doc_id
+                    )
+                elif now - waited_since >= _DEFERRED_WRITE_REPLACEMENT_WAIT_SEC:
+                    logger.warning(
+                        "Giving up deferred write for %s: %s still present after %.0fs — "
+                        "an incomplete replacement is waiting to be settled",
+                        doc_id,
+                        _SOURCE_ROLLBACK_DIR,
+                        now - waited_since,
+                    )
+                    return None
+            time.sleep(_DEFERRED_WRITE_POLL_SEC)
 
     return wrapper
 
