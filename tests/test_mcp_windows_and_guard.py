@@ -234,3 +234,61 @@ def test_a_bare_markdown_table_repeats_its_header_too(client, served) -> None:
                             "content")
     assert windows > 1 and all(p.startswith(header) for p in pieces)
     assert "".join(p[len(header):] for p in pieces) == rows
+
+
+def test_long_table_rows_and_headers_are_never_split(client, served) -> None:
+    """Codex round 2: lines over ~3,750 chars were split into pieces before the
+    header was taken, so a wide header lost its separator and a long row could
+    end one window and start the next as bare cell text."""
+    header = "# Table 2 (page 3)\n\n| " + " | ".join(f"列{i}" * 60 for i in range(30)) + " |\n" + \
+        "|" + "---|" * 30 + "\n"
+    rows = "".join("| " + " | ".join([str(i)] + [_PARA * 4] * 29) + " |\n" for i in range(400))
+    served["/library/DOC-10/table/table-01"] = {
+        "doc_id": "DOC-10", "table_id": "table-01", "content": header + rows}
+
+    pieces, windows = _walk(client, "doc_table", {"doc_id": "DOC-10", "table_id": "table-01"},
+                            "content")
+    assert windows > 1
+    for piece in pieces:
+        assert piece.startswith(header), "a window lost part of the header"
+        body = piece[len(header):]
+        assert all(line.startswith("| ") and line.endswith(" |") for line in body.splitlines()), \
+            "a row was split across windows"
+    assert "".join(p[len(header):] for p in pieces) == rows
+
+
+def test_a_table_row_too_large_on_its_own_is_cut_and_marked(client, served) -> None:
+    header = "| a | b |\n|---|---|\n"
+    rows = "| 1 | short |\n| 2 | " + _PARA * 8000 + " |\n| 3 | short |\n"
+    served["/library/DOC-11/table/table-01"] = {
+        "doc_id": "DOC-11", "table_id": "table-01", "content": header + rows}
+    seen, offset = [], 0
+    while offset is not None:
+        result, size = _call(client, "doc_table",
+                             {"doc_id": "DOC-11", "table_id": "table-01", "offset": offset})
+        assert size < WALL
+        page = _payload(result)
+        seen.append(page)
+        offset = page["next_offset"]
+    assert any(p.get("content_truncated") for p in seen), "the oversized row went unmarked"
+    assert seen[-1]["content"].endswith("| 3 | short |\n"), "the rows after it were lost"
+
+
+def test_an_oversized_distill_is_trimmed_not_refused(client, monkeypatch) -> None:
+    """Codex round 2: refusing it after the browser service had taken it as the
+    session's baseline left the next distill diffing against a snapshot the
+    caller never received. Trimmed, it says what it left out."""
+    sections = [{"sid": f"s{i:03d}", "h": f"第{i}节", "t": _PARA * 20} for i in range(60)]
+
+    async def fake_web_post(path, payload, headers=None):
+        return {"url": "https://example.com/page", "title": "长页面", "sections": sections,
+                "actions": [], "changed_sids": [], "hash_changed": True}
+
+    monkeypatch.setattr(mm, "_web_post", fake_web_post)
+    result, size = _call(client, "web_distill", {"session_id": "sess-1"})
+
+    assert size < WALL
+    out = _payload(result)
+    assert out["truncated"] is True
+    kept = [s["sid"] for s in out["sections"]]
+    assert kept and kept + out["omitted_sids"] == [f"s{i:03d}" for i in range(60)]

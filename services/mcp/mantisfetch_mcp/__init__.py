@@ -703,7 +703,41 @@ async def web_distill(
             "total_output_budget_chars": total_output_budget_chars,
         },
     )
-    return _wrap_web_result(out, out.get("url", "") if isinstance(out, dict) else "")
+    return _fit_distill(_wrap_web_result(out, out.get("url", "") if isinstance(out, dict) else ""))
+
+
+def _fit_distill(out: Any) -> Any:
+    """Trim a distill result to fit, rather than refuse it (#315).
+
+    The browser service has already taken this distill as the session's
+    baseline by the time the result is measured, so refusing it would leave the
+    next distill diffing against a snapshot the caller never received. Instead
+    sections are dropped from the end — the page's order, least prominent last —
+    and listed in ``omitted_sids`` for web_read_sections; actions likewise.
+    """
+    if not isinstance(out, dict):
+        return out
+    budget = _result_budget()
+    if _wire_bytes(out) <= budget:
+        return out
+    out = dict(out)
+    omitted: list[str] = []
+    for key in ("sections", "actions"):
+        items = out.get(key)
+        if not isinstance(items, list):
+            continue
+        items = list(items)
+        while items and _wire_bytes({**out, key: items}) > budget:
+            dropped = items.pop()
+            if key == "sections" and isinstance(dropped, dict) and dropped.get("sid"):
+                omitted.append(str(dropped["sid"]))
+        out[key] = items
+        out["truncated"] = True
+        if _wire_bytes(out) <= budget:
+            break
+    if omitted:
+        out["omitted_sids"] = list(reversed(omitted))
+    return out
 
 
 @mcp.tool()
@@ -1075,6 +1109,7 @@ def _window_text(
     limit: int | None,
     *,
     head_lines: int = 0,
+    whole_lines: bool = False,
 ) -> dict[str, Any]:
     """One window of ``text`` that fits in a tool result (#315).
 
@@ -1085,10 +1120,16 @@ def _window_text(
     whole, exactly as before; one that does not comes back as its first window
     with ``truncated: true`` and ``next_offset``. A window holds at least one
     unit, so walking ``next_offset`` always moves.
+
+    ``whole_lines`` keeps every line one unit — a table row split across two
+    windows is no longer a row in either. A row too large for a window on its
+    own is then sent alone and cut, with ``<key>_truncated: true``.
     """
     budget = _result_budget()
-    units = _text_units(text, budget)
-    head, body = units[:head_lines], units[head_lines:]
+    lines = text.splitlines(keepends=True)
+    head = lines[:head_lines]  # never split: the header has to stay a header
+    rest = "".join(lines[head_lines:])
+    body = rest.splitlines(keepends=True) if whole_lines else _text_units(rest, budget)
     total = len(body)
     if offset < 0 or offset > total:
         raise ToolError(
@@ -1120,7 +1161,14 @@ def _window_text(
         end += 1
     while end > offset + 1 and _wire_bytes(window(end)) > budget:
         end -= 1
-    return window(end)
+    result = window(end)
+    if end == offset + 1 and _wire_bytes(result) > budget:
+        unit, keep = body[offset], len(body[offset])
+        while keep and _wire_bytes({**result, key: head_text + unit[:keep]}) > budget:
+            keep //= 2
+        result[key] = head_text + unit[:keep]
+        result[f"{key}_truncated"] = True
+    return result
 
 
 @mcp.tool()
@@ -1272,7 +1320,7 @@ async def doc_table(
         return data
     base = {k: v for k, v in data.items() if k != "content"}
     return _window_text(base, "content", data["content"], offset, limit,
-                        head_lines=_table_head_lines(data["content"]))
+                        head_lines=_table_head_lines(data["content"]), whole_lines=True)
 
 
 def _table_head_lines(markdown: str) -> int:
@@ -1513,7 +1561,6 @@ _OVER_BUDGET_HINTS = {
     "doc_search": "pass a lower limit",
     "doc_search_text": "pass a lower limit",
     "doc_search_sections": "set include_content=false, or narrow q",
-    "web_distill": "lower total_output_budget_chars or max_sections",
 }
 
 
