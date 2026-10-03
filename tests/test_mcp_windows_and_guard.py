@@ -312,3 +312,31 @@ def test_a_trimmed_distill_still_fits_once_its_omissions_are_listed(
     out = _payload(result)
     assert [s["sid"] for s in out["sections"]] + out["omitted_sids"] == \
         [f"s{i:03d}" for i in range(400)]
+
+
+def test_a_header_too_large_for_a_window_is_cut_so_rows_still_get_through(client, served) -> None:
+    """Codex round 4: a 9,000-character header made every window too large,
+    limit=1 included, so the guard refused them all."""
+    header = "| " + "表头" * 4500 + " | b |\n|---|---|\n"
+    rows = "".join(f"| {i} | short |\n" for i in range(50))
+    served["/library/DOC-12/table/table-01"] = {
+        "doc_id": "DOC-12", "table_id": "table-01", "content": header + rows}
+    result, size = _call(client, "doc_table",
+                         {"doc_id": "DOC-12", "table_id": "table-01", "limit": 1})
+    assert size < WALL
+    page = _payload(result)
+    assert page["header_truncated"] is True and page["content"].endswith("| 0 | short |\n")
+
+
+@pytest.mark.parametrize("cell", [119_583, 119_620])
+def test_a_cut_row_still_fits_with_its_marker_on(client, served, cell) -> None:
+    """Codex round 4: content_truncated was added after the cut was measured,
+    turning a 59,969-byte window into 60,001."""
+    header = "| a | b |\n|---|---|\n"
+    rows = "| 1 | " + "x" * cell + " |\n| 2 | y |\n"
+    served["/library/DOC-13/table/table-01"] = {
+        "doc_id": "DOC-13", "table_id": "table-01", "content": header + rows}
+    result, size = _call(client, "doc_table", {"doc_id": "DOC-13", "table_id": "table-01"})
+    assert size < WALL
+    page = _payload(result)
+    assert page["content_truncated"] is True and page["next_offset"] == 1

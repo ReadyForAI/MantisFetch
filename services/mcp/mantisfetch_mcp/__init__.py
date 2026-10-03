@@ -1142,17 +1142,29 @@ def _window_text(
         raise ToolError("limit must be at least 1")
     stop = total if limit is None else min(total, offset + limit)
     head_text = "".join(head)
+    marks: dict[str, bool] = {}
 
-    def window(end: int) -> dict[str, Any]:
+    def window(end: int, content: str | None = None) -> dict[str, Any]:
         more = end < total
         return {
             **base,
-            key: head_text + "".join(body[offset:end]),
+            key: head_text + "".join(body[offset:end]) if content is None else content,
             "total": total,
             "offset": offset,
             "next_offset": end if more else None,
             "truncated": more,
+            **marks,
         }
+
+    # A header that alone would take more than half a window is cut, so every
+    # window still has room for rows — repeated unchanged it would make every
+    # window too large, limit=1 included.
+    if head_text and _wire_bytes(window(offset, head_text)) > budget // 2:
+        marks["header_truncated"] = True
+        keep = len(head_text)
+        while keep and _wire_bytes(window(offset, head_text[:keep])) > budget // 2:
+            keep //= 2
+        head_text = head_text[:keep]
 
     end, used = offset, _wire_bytes(window(offset))
     while end < stop:
@@ -1165,11 +1177,14 @@ def _window_text(
         end -= 1
     result = window(end)
     if end == offset + 1 and _wire_bytes(result) > budget:
+        marks[f"{key}_truncated"] = True  # measured with the marker on
         unit, keep = body[offset], len(body[offset])
-        while keep and _wire_bytes({**result, key: head_text + unit[:keep]}) > budget:
+        while keep and _wire_bytes(window(end, head_text + unit[:keep])) > budget:
             keep //= 2
-        result[key] = head_text + unit[:keep]
-        result[f"{key}_truncated"] = True
+        result = window(end, head_text + unit[:keep])
+    if _wire_bytes(result) > budget:
+        # Last line, so a window fits by construction whatever made it large.
+        result = _shrink_entry(result, lambda d: _wire_bytes(d) <= budget, ())
     return result
 
 
