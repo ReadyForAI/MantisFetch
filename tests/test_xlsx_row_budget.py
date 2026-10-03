@@ -330,3 +330,71 @@ def test_a_sparse_workbook_over_the_limit_is_refused_before_conversion(
     assert resp.status_code == 422, resp.text
     assert conversions == [], "the workbook was converted before it was refused"
     _nothing_was_kept(docs)
+
+
+# ── Wide sheets: columns are filled in too ────────────────────────────────────
+
+
+def _cells(tmp_path, content: bytes, cell_limit: int, row_limit: int = 10**9) -> None:
+    from mantisfetch_docreader.tabular import _check_xlsx_row_budget
+
+    path = tmp_path / "wide.xlsx"
+    path.write_bytes(content)
+    _check_xlsx_row_budget(path, row_limit, "wide.xlsx", cell_limit)
+
+
+def test_two_cells_at_opposite_corners_count_as_the_grid_between(tmp_path) -> None:
+    """A1 and XFD200: 200 rows, inside any row limit, and a 200 x 16384 grid —
+    measured at 80 s and 3.5 GB to convert a 4.8 KB file."""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="spans more than 1000000 cells"):
+        _cells(tmp_path, _sparse_workbook("A1", "XFD200"), 1_000_000)
+    _cells(tmp_path, _sparse_workbook("A1", "XFD200"), 200 * 16384)  # exactly: fine
+
+
+def test_a_dense_sheet_counts_rows_times_columns(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    wb = openpyxl.Workbook()
+    for r in range(100):
+        wb.active.append(list(range(10)))
+    buf = io.BytesIO()
+    wb.save(buf)
+    _cells(tmp_path, buf.getvalue(), 1000)
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, buf.getvalue(), 999)
+
+
+def test_cells_without_a_reference_take_the_next_column(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    body = '<row r="1">' + "<c><v>1</v></c>" * 7 + "</row>" + '<row r="10"><c><v>2</v></c></row>'
+    content = _with_part(_workbook(0), "xl/worksheets/norefs.xml", _raw_sheet(body))
+    _cells(tmp_path, content, 70)  # 10 rows x 7 columns
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, content, 69)
+
+
+def test_wide_sheets_add_up_across_the_workbook(tmp_path) -> None:
+    from fastapi import HTTPException
+
+    content = _with_part(
+        _sparse_workbook("A1", "J10"), "xl/worksheets/extra.xml",
+        _raw_sheet('<row r="10"><c r="J10"/></row>'),
+    )
+    _cells(tmp_path, content, 200)  # 100 + 100
+    with pytest.raises(HTTPException):
+        _cells(tmp_path, content, 199)
+
+
+def test_a_wide_sparse_workbook_is_refused_before_conversion(
+    client, docs, conversions
+) -> None:
+    """At the shipped defaults, through /parse."""
+    resp = _parse(client, "wide.xlsx", _sparse_workbook("A1", "XFD200"))
+
+    assert resp.status_code == 422, resp.text
+    assert "MANTISFETCH_MAX_PARSE_CELLS" in resp.json()["detail"]
+    assert conversions == [], "the workbook was converted before it was refused"
+    _nothing_was_kept(docs)

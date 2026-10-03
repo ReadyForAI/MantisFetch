@@ -49,11 +49,22 @@ _SHEET_CELL_TAGS = frozenset(
         "{http://purl.oclc.org/ooxml/spreadsheetml/main}c",
     }
 )
-_CELL_ROW = re.compile(r"[A-Za-z]*(\d+)$")
+_CELL_REF = re.compile(r"([A-Za-z]*)(\d+)$")
 
 
-def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
-    """Refuse a workbook spanning more than ``limit`` rows before it is converted.
+def _column_number(letters: str) -> int:
+    """``A`` → 1, ``Z`` → 26, ``AA`` → 27, ``XFD`` → 16384."""
+    n = 0
+    for ch in letters.upper():
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _check_xlsx_row_budget(
+    filepath: Path, limit: int, filename: str, cell_limit: int | None = None
+) -> None:
+    """Refuse a workbook spanning more than ``limit`` rows — or, with
+    ``cell_limit``, more than that many cells — before it is converted.
 
     MarkItDown reads every sheet whole into memory before anything can look at
     how big it is: measured, a 5 MB workbook of 100,000 rows x 10 columns (50 MB
@@ -71,6 +82,12 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
     previous row where the writer left it out, and a cell reference past it
     (``A201`` in a row that claims less) counts too. ``<dimension>`` is not
     read: it is a claim the file makes about itself.
+
+    Rows alone do not bound it, because the converter fills in columns the same
+    way: values in A1 and XFD200 are two cells, 200 rows inside the row limit,
+    and a 200 x 16384 grid — measured, 80 s and 3.5 GB to convert a 4.8 KB
+    file. So each sheet's grid is its rows times its widest column, and those
+    add up against ``cell_limit``.
 
     Every XML part is counted, not just ``xl/worksheets/``: the reader finds its
     sheets through the package relationships, so a sheet can live at any path.
@@ -93,6 +110,18 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
             f"limit if this host has the memory to convert it",
         )
 
+    cells = 0
+
+    def refuse_cells() -> HTTPException:
+        return HTTPException(
+            422,
+            f"{filename} spans more than {cell_limit} cells across its sheets "
+            f"(MANTISFETCH_MAX_PARSE_CELLS; each sheet counts as its rows times "
+            f"its widest column, because conversion fills in every cell between). "
+            f"Split the workbook, or raise the limit if this host has the memory "
+            f"to convert it",
+        )
+
     try:
         zf = zipfile.ZipFile(filepath)
     except (zipfile.BadZipFile, OSError):
@@ -105,6 +134,10 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
             # the previous row had, for a row that does not say its own.
             spans = 0
             previous = 0
+            # And its width: the widest column seen, and the column the last
+            # cell in the current row had, for a cell that does not say its own.
+            width = 0
+            column = 0
             try:
                 with zf.open(info) as part:
                     open_elements: list[ET.Element] = []
@@ -120,19 +153,26 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
                             with contextlib.suppress(ValueError):
                                 open_elements[-1].remove(element)
                         if element.tag in _SHEET_CELL_TAGS:
-                            match = _CELL_ROW.match(element.get("r") or "")
-                            if match:
-                                spans = max(spans, int(match.group(1)))
+                            match = _CELL_REF.match(element.get("r") or "")
+                            if match and match.group(1):
+                                column = _column_number(match.group(1))
+                                spans = max(spans, int(match.group(2)))
+                            else:
+                                column += 1
+                            width = max(width, column)
                         elif element.tag in _SHEET_ROW_TAGS:
                             number = element.get("r")
                             previous = (
                                 int(number) if number and number.isdigit() else previous + 1
                             )
                             spans = max(spans, previous)
+                            column = 0  # the next cell starts a new row
                         else:
                             continue
                         if total + spans > limit:
                             raise refuse()
+                        if cell_limit is not None and cells + spans * width > cell_limit:
+                            raise refuse_cells()
             except HTTPException:
                 raise
             except Exception:  # noqa: BLE001 - unreadable part: see the docstring
@@ -140,8 +180,11 @@ def _check_xlsx_row_budget(filepath: Path, limit: int, filename: str) -> None:
             # Counted even when the part broke off partway: the rows it got
             # through are rows the converter may still read.
             total += spans
+            cells += spans * width
             if total > limit:
                 raise refuse()
+            if cell_limit is not None and cells > cell_limit:
+                raise refuse_cells()
 
 
 def parse_xlsx(filepath: Path) -> ParsedDocument:

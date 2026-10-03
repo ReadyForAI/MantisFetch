@@ -710,6 +710,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message
 # Config
 # ═══════════════════════════════════════════
 MAX_PARSE_ROWS = int(os.environ.get("MANTISFETCH_MAX_PARSE_ROWS", "100000"))
+#: The same bound across columns: an XLSX sheet counts as its rows times its
+#: widest column, because conversion fills in every cell between. The default
+#: is the grid the row default was sized around — 100,000 rows x 10 columns,
+#: measured at about 2 GB RSS.
+MAX_PARSE_CELLS = int(os.environ.get("MANTISFETCH_MAX_PARSE_CELLS", "1000000"))
 _MAX_CONCURRENT_PARSE = int(os.environ.get("MANTISFETCH_MAX_CONCURRENT_PARSE", "2"))
 _parse_sem = asyncio.Semaphore(_MAX_CONCURRENT_PARSE)
 
@@ -5204,7 +5209,8 @@ async def api_parse_doc(
             await asyncio.to_thread(_check_ooxml_unzip_budget, scratch_path)
             if suffix == ".xlsx":
                 await asyncio.to_thread(
-                    _check_xlsx_row_budget, scratch_path, MAX_PARSE_ROWS, filename
+                    _check_xlsx_row_budget, scratch_path, MAX_PARSE_ROWS, filename,
+                    MAX_PARSE_CELLS,
                 )
 
         # The same refusal for a PDF, so all three land the same way: no id, no

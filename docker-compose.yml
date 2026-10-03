@@ -67,6 +67,7 @@ services:
       # Rows an XLSX may have across its sheets; over it the upload is refused
       # before conversion (MarkItDown holds the whole workbook in memory).
       MANTISFETCH_MAX_PARSE_ROWS: ${MANTISFETCH_MAX_PARSE_ROWS:-100000}
+      MANTISFETCH_MAX_PARSE_CELLS: ${MANTISFETCH_MAX_PARSE_CELLS:-1000000}
       # Keep the uploaded original beside the parse, under the document's
       # source/. On by default in code too, but stated here so it is a declared
       # deployment property rather than one inherited from a default: the raw
