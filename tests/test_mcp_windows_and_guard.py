@@ -122,7 +122,8 @@ def test_a_document_that_fits_comes_back_whole_as_before(client, served) -> None
 
 
 def test_a_long_markdown_table_repeats_its_header_in_every_window(client, served) -> None:
-    header = "| 序号 | 项目 | 金额 |\n| --- | --- | ---: |\n"
+    # As docreader and capture store it: a title and a blank line first.
+    header = "# Table 1 (page 12)\n\n| 序号 | 项目 | 金额 |\n| --- | --- | ---: |\n"
     rows = "".join(f"| {i} | {_PARA} | {i * 100} |\n" for i in range(3000))
     served["/library/DOC-4/table/table-01"] = {
         "doc_id": "DOC-4", "table_id": "table-01", "content": header + rows}
@@ -222,3 +223,14 @@ def test_a_full_window_of_a_chinese_original_fits(client, monkeypatch) -> None:
         pieces.append(window["text"])
         offset = window["next_offset"]
     assert "".join(pieces).encode("utf-8") == original
+
+
+def test_a_bare_markdown_table_repeats_its_header_too(client, served) -> None:
+    header = "| a | b |\n|---|---|\n"
+    rows = "".join(f"| {i} | {_PARA * 3} |\n" for i in range(3000))
+    served["/library/DOC-9/table/table-01"] = {
+        "doc_id": "DOC-9", "table_id": "table-01", "content": header + rows}
+    pieces, windows = _walk(client, "doc_table", {"doc_id": "DOC-9", "table_id": "table-01"},
+                            "content")
+    assert windows > 1 and all(p.startswith(header) for p in pieces)
+    assert "".join(p[len(header):] for p in pieces) == rows

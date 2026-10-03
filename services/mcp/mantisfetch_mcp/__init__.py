@@ -1270,11 +1270,24 @@ async def doc_table(
     data = await _doc_get(f"/library/{doc_id}/table/{table_id}")
     if not isinstance(data, dict) or not isinstance(data.get("content"), str):
         return data
-    lines = data["content"].splitlines()
-    is_table = len(lines) >= 2 and _MD_TABLE_SEPARATOR.match(lines[1]) is not None
     base = {k: v for k, v in data.items() if k != "content"}
     return _window_text(base, "content", data["content"], offset, limit,
-                        head_lines=2 if is_table else 0)
+                        head_lines=_table_head_lines(data["content"]))
+
+
+def _table_head_lines(markdown: str) -> int:
+    """How many leading lines every window of this table repeats.
+
+    Stored tables open with a title and a blank line (``# Table 3 (page 12)``)
+    before the header row, so the separator is not on the second line: the
+    head runs through the first separator that follows a table row. No such
+    pair — not a Markdown table — repeats nothing.
+    """
+    lines = markdown.splitlines()
+    for i in range(len(lines) - 1):
+        if "|" in lines[i] and _MD_TABLE_SEPARATOR.match(lines[i + 1]):
+            return i + 2
+    return 0
 
 
 #: The line under a Markdown table's header row: | --- | :---: | ---: |
