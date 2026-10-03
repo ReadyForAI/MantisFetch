@@ -224,3 +224,110 @@ def test_staging_interrupted_halfway_puts_back_only_what_moved(docs_dir: Path) -
     assert json.loads((doc / "sections.json").read_text(encoding="utf-8"))
     assert (cache / "ocr_p0001.abc.txt").read_text(encoding="utf-8") == "a page nothing staged"
     assert not backup.exists()
+
+
+# ── The sweep's own crash and failure boundaries ──────────────────────────────
+
+
+def test_a_restore_interrupted_halfway_can_be_resumed(docs_dir: Path) -> None:
+    """The sweep can die too, and the second run must not finish the damage.
+
+    A name it has already put back is no longer in the backup. Deleting that
+    target before looking would remove the only copy left.
+    """
+    _write(docs_dir, "DOC-7101", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7101"
+    assert _child(docs_dir, "DOC-7101", "_update_doc_index") == 73
+
+    # First pass restores sections.json and stops before the rest.
+    backup = doc / ".rollback"
+    dr._put_back_staged(doc, backup, ["sections.json"])
+    assert (doc / "sections.json").exists()
+    assert not (backup / "sections.json").exists()
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert (doc / "sections.json").exists(), "the resumed sweep deleted what it had restored"
+    assert "ORIGINAL" in (doc / "full.md").read_text(encoding="utf-8")
+
+
+def test_a_commit_with_no_marker_is_still_read_as_committed(docs_dir: Path) -> None:
+    """The marker lands just after the commit, and "just after" has a gap.
+
+    The index row carries the content hash of whichever version is committed.
+    Still the one in the backup's manifest means the commit never landed; a
+    different one means it did, marker or no marker.
+    """
+    _write(docs_dir, "DOC-7102", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7102"
+    assert _child(docs_dir, "DOC-7102", "_update_doc_index") == 73
+
+    # The index commit the child never reached, with no marker behind it.
+    from mantisfetch_docreader.storage import _update_doc_index
+
+    meta = json.loads((doc / ".meta.json").read_text(encoding="utf-8"))
+    manifest = json.loads((doc / "manifest.json").read_text(encoding="utf-8"))
+    _update_doc_index(
+        docs_dir, meta, "digest REPLACEMENT",
+        content_hash=manifest["provenance"]["content_hash"], content_type="General",
+    )
+    assert not (doc / ".rewrite-committed").exists()
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert "REPLACEMENT" in (doc / "full.md").read_text(encoding="utf-8"), (
+        "a committed rewrite was rolled back under the index"
+    )
+
+
+def test_a_stash_that_will_not_move_keeps_its_marker(
+    docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup that fails must leave the state readable, not half-cleared.
+
+    Dropping the marker while the stash is still there turns a committed
+    replacement into an uncommitted one on the next start, and the old source
+    goes back over the new.
+    """
+    _write(docs_dir, "DOC-7103", "ORIGINAL")
+    doc = docs_dir / "General" / "DOC-7103"
+    (doc / "source").mkdir(parents=True, exist_ok=True)
+    (doc / "source" / "doc.html").write_bytes(b"<p>ORIGINAL</p>")
+    assert _child(docs_dir, "DOC-7103", "after") == 73
+    (doc / "source").mkdir(parents=True, exist_ok=True)
+    (doc / "source" / "new.html").write_bytes(b"<p>REPLACEMENT</p>")
+
+    real_move = dr.shutil.move
+
+    def refuse_the_stash(src, dst, *a, **k):
+        if dr._SOURCE_ROLLBACK_DIR in str(src):
+            raise OSError("the stash will not move")
+        return real_move(src, dst, *a, **k)
+
+    monkeypatch.setattr(dr.shutil, "move", refuse_the_stash)
+    dr._finish_interrupted_rewrites(docs_dir)
+    monkeypatch.undo()
+
+    assert (doc / ".rewrite-committed").exists(), "the marker went while the stash stayed"
+
+    # The next start settles it, and the committed source is the one that survives.
+    assert dr._finish_interrupted_rewrites(docs_dir) == (0, 1)
+    assert (doc / "source" / "new.html").read_bytes() == b"<p>REPLACEMENT</p>"
+
+
+def test_staging_interrupted_before_its_snapshot_leaves_the_text_searchable(
+    docs_dir: Path,
+) -> None:
+    """A missing snapshot means "no indexed text" only once staging finished.
+
+    Interrupted before it, the row still holds the document's own text, and
+    restoring "nothing" would delete it.
+    """
+    _write(docs_dir, "DOC-7104", "ORIGINAL Zarquonium")
+    doc = docs_dir / "General" / "DOC-7104"
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7104"]
+
+    (doc / ".rollback").mkdir()  # created, nothing written into it yet
+
+    assert dr._finish_interrupted_rewrites(docs_dir) == (1, 0)
+    assert search_fts(docs_dir, "Zarquonium") == ["DOC-7104"], (
+        "the sweep dropped a search row it had no snapshot for"
+    )

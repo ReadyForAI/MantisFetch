@@ -1302,7 +1302,7 @@ def _restore_stashed_source(doc_dir: Path) -> None:
     shutil.move(str(stash), str(source))
 
 
-def _discard_stashed_source(doc_dir: Path) -> None:
+def _discard_stashed_source(doc_dir: Path, *, keep_marker: bool = False) -> None:
     """Drop the stash once the replacement has committed.
 
     An upload whose stored filename differs from the one it replaces does not
@@ -1320,32 +1320,85 @@ def _discard_stashed_source(doc_dir: Path) -> None:
             for kept in stash.iterdir():
                 if not (source / kept.name).exists():
                     shutil.move(str(kept), str(source / kept.name))
-            shutil.rmtree(stash, ignore_errors=True)
-        except OSError as exc:  # pragma: no cover - defensive
+        except OSError as exc:
             logger.warning("Could not clear the source stash in %s: %s", doc_dir, exc)
-            return  # the stash is still there to settle, so the marker stays
+            return  # the files are still in it: never rmtree it out from under them
+        if not _gone(stash):
+            return  # still there to settle, so the marker has to stay
+    if keep_marker:
+        return  # something else is unsettled; the marker still has work to do
     # The last step of the rewrite: with the stash gone there is nothing left
     # for a sweep to have to decide about.
     with contextlib.suppress(OSError):
         (doc_dir / _REWRITE_COMMITTED).unlink(missing_ok=True)
 
 
+def _gone(path: Path) -> bool:
+    """Remove a tree and say whether it is actually gone.
+
+    `rmtree(..., ignore_errors=True)` hides a failure, and every caller here
+    uses "the scaffolding is gone" to decide that a rewrite needs no further
+    settling. A backup left behind with the commit marker already removed reads
+    as an uncommitted rewrite on the next start.
+    """
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
+
+
 def _put_back_staged(doc_dir: Path, backup: Path, names: list[str]) -> None:
     """Undo one rewrite's staging: every staged name back the way it was.
 
-    A name with nothing behind it in the backup was not there before the
-    rewrite, so whatever is at that path now is the rewrite's own output and
-    goes — restoring only what was backed up would leave the new document's
-    tables beside the old one's sections.
+    Every staged name was in the directory before the rewrite — that is what
+    being staged means — so a name with nothing behind it in the backup has
+    already been put back. Skipping it rather than deleting the target is what
+    makes this safe to resume: a restore interrupted halfway leaves names on
+    the list whose only remaining copy is the one it just restored.
     """
     for name in names:
+        source = backup / name
+        if not source.exists():
+            continue
         target = doc_dir / name
         if target.exists():
             shutil.rmtree(target) if target.is_dir() else target.unlink()
-        source = backup / name
-        if source.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(source), str(target))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+
+
+def _rewrite_committed(
+    doc_dir: Path, backup: Path, docs_dir: Path | None, doc_id: str | None
+) -> bool:
+    """Did the interrupted rewrite's index commit land? Ask the index.
+
+    The marker is written just after the commit, and "just after" still has the
+    whole JSON export in it — so a process can die with the row committed and
+    no marker on disk. The backup holds the manifest of the version the rewrite
+    was replacing, and the index row carries the content hash of whichever
+    version is committed: still the old one means the commit never landed.
+
+    Answers False whenever it cannot tell, because the two mistakes are not
+    equal. Rolling back a committed rewrite leaves the index describing a
+    version that is not on disk, which is repairable. Finishing one that never
+    committed deletes the only copy of the previous version.
+    """
+    if docs_dir is None or doc_id is None:
+        return False
+    try:
+        previous = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+        was = previous.get("provenance", {}).get("content_hash")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not was:
+        return False
+    try:
+        from mantisfetch_common.doc_index_store import get_document  # noqa: PLC0415
+
+        entry = get_document(docs_dir, doc_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable index decides nothing
+        logger.warning("Could not read the index while settling %s: %s", doc_id, exc)
+        return False
+    committed = (entry or {}).get("content_hash")
+    return bool(committed) and committed != was
 
 
 def _settle_interrupted_rewrite(
@@ -1387,12 +1440,15 @@ def _settle_interrupted_rewrite(
     if not (backup.exists() or (include_stash and stash.exists()) or marker.exists()):
         return None
 
-    if marker.exists():
-        shutil.rmtree(backup, ignore_errors=True)
+    if marker.exists() or _rewrite_committed(doc_dir, backup, docs_dir, doc_id):
+        backup_gone = _gone(backup)
         if include_stash:
-            _discard_stashed_source(doc_dir)
-        with contextlib.suppress(OSError):
-            marker.unlink(missing_ok=True)
+            # Removes the marker itself, and only once the stash is gone: it
+            # returns with both in place when it cannot move the stash back.
+            _discard_stashed_source(doc_dir, keep_marker=not backup_gone)
+        elif backup_gone:
+            with contextlib.suppress(OSError):
+                marker.unlink(missing_ok=True)
         return "committed"
 
     if backup.exists():
@@ -1403,6 +1459,7 @@ def _settle_interrupted_rewrite(
                 staged = [n for n in recorded["staged"] if isinstance(n, str)]
         except (OSError, ValueError):
             staged = None
+        staging_finished = staged is not None
         if staged is None:
             # Staging never finished, so nothing new has been written yet.
             # Only the moved names can be missing from the directory — the
@@ -1420,14 +1477,19 @@ def _settle_interrupted_rewrite(
                 if (backup / name).exists()
             ]
         _put_back_staged(doc_dir, backup, staged)
-        fts_path = backup / _FTS_BEFORE
-        body = None
-        try:
-            body = fts_path.read_text(encoding="utf-8") if fts_path.exists() else None
-        except OSError:  # pragma: no cover - defensive
+        if staging_finished:
+            # Only then can the rewrite have reached the FTS write, and only
+            # then does a missing snapshot mean "there was no indexed text" —
+            # it is written first, before anything moves. Interrupted earlier,
+            # the row still holds the document's own text.
+            fts_path = backup / _FTS_BEFORE
             body = None
-        _restore_search_index(docs_dir, doc_id, body)
-        shutil.rmtree(backup, ignore_errors=True)
+            try:
+                body = fts_path.read_text(encoding="utf-8") if fts_path.exists() else None
+            except OSError:  # pragma: no cover - defensive
+                body = None
+            _restore_search_index(docs_dir, doc_id, body)
+        _gone(backup)
     if include_stash:
         _restore_stashed_source(doc_dir)
     return "rolled_back"
@@ -1516,10 +1578,10 @@ def _restore_on_failure(
     if doc_dir.exists():
         with contextlib.suppress(OSError):
             (doc_dir / _REWRITE_COMMITTED).touch()
-    shutil.rmtree(backup, ignore_errors=True)
-    if not (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
-        # No stash outstanding, so nothing is left that a sweep could
-        # misread — the marker would only be litter.
+    if _gone(backup) and not (doc_dir / _SOURCE_ROLLBACK_DIR).exists():
+        # Nothing left that a sweep could misread, so the marker would only be
+        # litter. A backup that would not go keeps it: without the marker the
+        # next start reads that backup as a rewrite that never committed.
         with contextlib.suppress(OSError):
             (doc_dir / _REWRITE_COMMITTED).unlink(missing_ok=True)
 
