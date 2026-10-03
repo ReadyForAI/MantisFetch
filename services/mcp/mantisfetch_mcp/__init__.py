@@ -980,20 +980,53 @@ def _page_entries(
     while end > offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
         end -= 1
     if end == offset + 1 and _wire_bytes(page(end)) > _MCP_RESULT_BUDGET:
-        entry = dict(entries[offset])
-        for field in trim:
-            values = entry.get(field)
-            if not isinstance(values, list) or not values:
-                continue
+        def fits(candidate: dict[str, Any]) -> bool:
+            return _wire_bytes(page(end, [candidate])) <= _MCP_RESULT_BUDGET
+
+        return page(end, [_shrink_entry(dict(entries[offset]), fits, trim)])
+    return page(end)
+
+
+#: What an entry is still known by when nothing else of it fits.
+_ENTRY_ID_FIELDS = ("sid", "table_id", "index", "title")
+
+
+def _shrink_entry(
+    entry: dict[str, Any], fits: Any, lists: tuple[str, ...]
+) -> dict[str, Any]:
+    """Cut one entry down until ``fits(entry)``, saying what was cut.
+
+    The named lists first, halved; then the longest strings, halved, whatever
+    field they are in (a web table's whole caption becomes its section title);
+    and if that is still not enough, the entry is reduced to what identifies it
+    and marked ``entry_truncated``. Every step is marked ``<field>_truncated``,
+    and the last one cannot fail to fit, so a page is never sent larger than
+    the client will deliver.
+    """
+    for field in lists:
+        values = entry.get(field)
+        if fits(entry):
+            return entry
+        if isinstance(values, list) and values:
             keep = len(values)
-            while keep and _wire_bytes(page(end, [{**entry, field: values[:keep]}])) > _MCP_RESULT_BUDGET:
+            while keep and not fits({**entry, field: values[:keep]}):
                 keep //= 2
             entry[field] = values[:keep]
             entry[f"{field}_truncated"] = True
-            if _wire_bytes(page(end, [entry])) <= _MCP_RESULT_BUDGET:
-                break
-        return page(end, [entry])
-    return page(end)
+    while not fits(entry):
+        strings = [k for k, v in entry.items() if isinstance(v, str) and len(v) > 64]
+        if not strings:
+            break
+        longest = max(strings, key=lambda k: len(entry[k]))
+        entry[longest] = entry[longest][: len(entry[longest]) // 2]
+        entry[f"{longest}_truncated"] = True
+    if fits(entry):
+        return entry
+    stub: dict[str, Any] = {k: entry[k] for k in _ENTRY_ID_FIELDS if k in entry}
+    stub["entry_truncated"] = True
+    if not fits(stub):
+        stub = {k: v for k, v in stub.items() if k != "title"}
+    return stub
 
 
 @mcp.tool()
@@ -1192,6 +1225,12 @@ def _fit_manifest(manifest: Any, doc_id: str) -> Any:
         largest = max(candidates, key=lambda k: _wire_bytes(fitted[k]))
         del fitted[largest]
         omitted.append(largest)
+    # And if what identifies the document is itself too long (a filename of
+    # any length is accepted), cut its strings the way an oversized entry is.
+    if _wire_bytes(fitted) > _MCP_RESULT_BUDGET:
+        fitted = _shrink_entry(
+            fitted, lambda m: _wire_bytes(m) <= _MCP_RESULT_BUDGET, ()
+        )
     return fitted
 
 

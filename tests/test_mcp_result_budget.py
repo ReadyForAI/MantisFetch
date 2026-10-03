@@ -250,3 +250,35 @@ def test_a_projected_web_capture_keeps_its_counts(client, library) -> None:
     manifest = _payload(_call(client, "doc_manifest", {"doc_id": "WEB-9294"})[0])
     assert manifest["truncated"] is True
     assert (manifest["section_count"], manifest["table_count"]) == (500, 100)
+
+
+@pytest.mark.parametrize(
+    "oversize",
+    [
+        {"title": "表格标题" * 12_000},  # codex round 4: a web table's caption as the title
+        {"summary_preview": "x" * 200_000, "title": "長" * 30_000},
+        {"layout": {"blocks": [{"text": "块" * 50, "bbox": [0, 0, 1, 1]} for _ in range(3_000)]}},
+    ],
+    ids=["long-title", "long-strings", "nested"],
+)
+def test_no_single_entry_can_push_a_page_past_the_wall(client, library, oversize) -> None:
+    """Whatever field makes it large, a one-entry page fits and says what was cut."""
+    doc = _big_document(n_sections=1, n_tables=0)
+    doc["sections"][0].update(oversize)
+    library["DOC-9295"] = doc
+    result, size = _call(client, "doc_sections", {"doc_id": "DOC-9295"})
+
+    assert size < WALL, f"{size} bytes"
+    entry = _payload(result)["sections"][0]
+    assert any(k.endswith("_truncated") for k in entry), entry.keys()
+    assert entry.get("sid") == "s_0000"
+
+
+def test_a_manifest_whose_identity_alone_is_too_long_still_fits(client, library) -> None:
+    doc = _big_document()
+    doc["filename"] = "超长文件名" * 20_000 + ".pdf"
+    library["DOC-9296"] = doc
+    result, size = _call(client, "doc_manifest", {"doc_id": "DOC-9296"})
+    assert size < WALL, f"{size} bytes"
+    manifest = _payload(result)
+    assert manifest["truncated"] is True and manifest.get("filename_truncated") is True
