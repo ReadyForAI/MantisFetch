@@ -2197,6 +2197,30 @@ def _actor_provenance(doc_dir: Path, actor: Actor | None) -> dict[str, str | Non
     return {"created_by": created_by, "created_via": created_via}
 
 
+#: How long a deferred write waits for an in-flight replacement of its document
+#: to settle before giving up, and how often it looks. A replacement holds its
+#: stash for as long as its parse and any synchronous summary take; one that
+#: never settles is a leftover the startup sweep could not finish.
+_DEFERRED_WRITE_REPLACEMENT_WAIT_SEC = 1800.0
+_DEFERRED_WRITE_POLL_SEC = 0.5
+
+#: Set on a deferred-summary thread around the writes it makes while holding a
+#: summary slot. Those skip instead of waiting: the slot is shared by every
+#: document, and holding it through a wait on one document's replacement would
+#: stall all the others with no LLM call running.
+_deferred_write_mode = threading.local()
+
+
+@contextlib.contextmanager
+def _skip_rather_than_wait(enabled: bool = True):
+    previous = getattr(_deferred_write_mode, "skip", False)
+    _deferred_write_mode.skip = enabled or previous
+    try:
+        yield
+    finally:
+        _deferred_write_mode.skip = previous
+
+
 def _reversible_rewrite(impl):
     """Give a writer all-or-nothing semantics against the document on disk.
 
@@ -2233,20 +2257,62 @@ def _reversible_rewrite(impl):
         doc_dir = output_dir / _doc_storage_rel_path(
             doc_id, _normalize_content_type(content_type) if content_type else None
         )
-        with _document_writer_lock(output_dir, doc_id):
-            if a["guard_stale_generation"] and _skip_stale_generation(
-                doc_id,
-                doc_dir,
-                _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
-            ):
-                return None
-            with _restore_on_failure(
-                doc_dir,
-                include_extracted=not a.get("preserve_extracted", False),
-                docs_dir=output_dir,
-                doc_id=doc_id,
-            ):
-                return impl(*args, **kwargs)
+        guarded = a["guard_stale_generation"]
+        waited_since: float | None = None
+        while True:
+            with _document_writer_lock(output_dir, doc_id):
+                if guarded and _skip_stale_generation(
+                    doc_id,
+                    doc_dir,
+                    _generation_token(a["parsed"], a["tags"], a["metadata"], a["source_record"]),
+                ):
+                    return None
+                if not (guarded and (doc_dir / _SOURCE_ROLLBACK_DIR).exists()):
+                    with _restore_on_failure(
+                        doc_dir,
+                        include_extracted=not a.get("preserve_extracted", False),
+                        docs_dir=output_dir,
+                        doc_id=doc_id,
+                    ):
+                        return impl(*args, **kwargs)
+                # A replacement has stashed the source and not committed yet —
+                # the generation check above still passes, because the manifest
+                # it reads is the one being replaced. A background write that
+                # committed now would leave a commit marker beside a stash it
+                # does not own, and the startup sweep would read that marker as
+                # the replacement's commit and throw the old source away (#309).
+                # Everything else that writes is serialized behind the doc_id
+                # lock the replacement holds; this is the one that is not.
+                #
+                # So it waits, outside the lock, for the replacement to settle,
+                # and then asks again: committed, and the generation check skips
+                # it as stale; rolled back, and it lands on the version it was
+                # computed for — which is what happened before the wait existed.
+                # Only guarded writes come here, and they all run on deferred-
+                # summary daemon threads, never on the event loop.
+                if getattr(_deferred_write_mode, "skip", False):
+                    logger.info(
+                        "Skipping deferred placeholder write for %s: a replacement is "
+                        "in flight and this thread holds a summary slot",
+                        doc_id,
+                    )
+                    return None
+                now = time.monotonic()
+                if waited_since is None:
+                    waited_since = now
+                    logger.info(
+                        "Deferred write for %s waiting for an in-flight replacement", doc_id
+                    )
+                elif now - waited_since >= _DEFERRED_WRITE_REPLACEMENT_WAIT_SEC:
+                    logger.warning(
+                        "Giving up deferred write for %s: %s still present after %.0fs — "
+                        "an incomplete replacement is waiting to be settled",
+                        doc_id,
+                        _SOURCE_ROLLBACK_DIR,
+                        now - waited_since,
+                    )
+                    return None
+            time.sleep(_DEFERRED_WRITE_POLL_SEC)
 
     return wrapper
 
@@ -2681,21 +2747,25 @@ def _generate_deferred_summary(
                 return
         acquired = True
         _set_summary_metadata(parsed, mode="defer", status="running", attempts=attempts)
-        write_output_extract_only(
-            doc_id,
-            parsed,
-            output_dir,
-            tags=tags,
-            source="upload",
-            metadata=metadata,
-            source_record=source_record,
-            content_type=content_type,
-            preserve_extracted=preserve_extracted,
-            summary_placeholder=_summary_placeholder_text(
-                "running", locale=_parsed_document_locale(parsed)
-            ),
-            guard_stale_generation=True,
-        )
+        # Holding a summary slot: skip rather than wait if a replacement is in
+        # flight. It is only the "running" placeholder; the result written
+        # below, after the slot has gone back, still waits.
+        with _skip_rather_than_wait():
+            write_output_extract_only(
+                doc_id,
+                parsed,
+                output_dir,
+                tags=tags,
+                source="upload",
+                metadata=metadata,
+                source_record=source_record,
+                content_type=content_type,
+                preserve_extracted=preserve_extracted,
+                summary_placeholder=_summary_placeholder_text(
+                    "running", locale=_parsed_document_locale(parsed)
+                ),
+                guard_stale_generation=True,
+            )
         # Bound the wall-clock wait with a daemon worker instead of future.result
         # on a ThreadPoolExecutor: the executor's threads are non-daemon and its
         # atexit join would let a hung LLM backend block process shutdown. The
@@ -2758,21 +2828,22 @@ def _generate_deferred_summary(
             error_code=error_code,
             attempts=attempts,
         )
-        write_output_extract_only(
-            doc_id,
-            parsed,
-            output_dir,
-            tags=tags,
-            source="upload",
-            metadata=metadata,
-            source_record=source_record,
-            content_type=content_type,
-            preserve_extracted=preserve_extracted,
-            summary_placeholder=_summary_placeholder_text(
-                "failed", error_message, locale=_parsed_document_locale(parsed)
-            ),
-            guard_stale_generation=True,
-        )
+        with _skip_rather_than_wait(acquired):
+            write_output_extract_only(
+                doc_id,
+                parsed,
+                output_dir,
+                tags=tags,
+                source="upload",
+                metadata=metadata,
+                source_record=source_record,
+                content_type=content_type,
+                preserve_extracted=preserve_extracted,
+                summary_placeholder=_summary_placeholder_text(
+                    "failed", error_message, locale=_parsed_document_locale(parsed)
+                ),
+                guard_stale_generation=True,
+            )
     finally:
         if acquired:
             try:
