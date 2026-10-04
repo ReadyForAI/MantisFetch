@@ -3661,11 +3661,7 @@ def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
             if "shared" in manifest:
                 continue
             manifest["shared"] = False
-            tmp_path = manifest_path.with_suffix(".tmp")
-            tmp_path.write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            os.replace(tmp_path, manifest_path)
+            _write_json(manifest_path, manifest)
             stats["manifests"] += 1
         except (OSError, ValueError):
             stats["errors"] += 1
@@ -5060,19 +5056,26 @@ def _parse_tags(tags: str | None) -> list[str]:
         return [t.strip() for t in tags.split(",") if t.strip()]
 
 
-def _find_doc_by_source_sha256(docs_dir: Path, sha256: str, exclude_doc_id: str) -> str | None:
-    """The doc_id of another document holding these exact source bytes, or None.
+def _find_visible_source_sha256(
+    docs_dir: Path, sha256: str, exclude_doc_id: str, actor: Actor | None
+) -> str | None:
+    """Another document with these bytes that this caller may already know about.
 
-    An index scan, like /web's capture dedup — ``source_sha256`` is already an
-    index field, so no second structure has to be kept in step. Only ever
-    reported, never acted on: see the raw ingest below for why nothing is
-    merged.
+    The index can hold several copies. The first match may be someone else's
+    private document; naming it would leak it, and stopping there would hide
+    this caller's own later copy. With the switch off every match is visible,
+    so this is the first hit, as before. Advisory only: the document the
+    caller asked for is still created (SharedSpecs 20260708 amendment-1 M5).
     """
     if not sha256:
         return None
     for entry in _load_doc_index(docs_dir):
-        if entry.get("id") != exclude_doc_id and entry.get("source_sha256") == sha256:
-            return str(entry.get("id"))
+        if entry.get("id") == exclude_doc_id or entry.get("source_sha256") != sha256:
+            continue
+        if not _row_discoverable(entry, actor):
+            continue
+        ident = entry.get("id")
+        return str(ident) if ident else None
     return None
 
 
@@ -5247,14 +5250,9 @@ def _write_raw_document(
     # one doc_id across two chats would let the first session's cleanup
     # delete the second session's attachment — this library has no
     # reference counting (SharedSpecs 20260708 amendment-1 M5).
-    existing_doc_id = _find_doc_by_source_sha256(docs_dir, source_record["sha256"], d_id)
-    if existing_doc_id and owner_scoped_discovery_enabled():
-        # Reporting the other id tells the caller a private document exists.
-        # Only a document this caller could already have found by searching
-        # is named; the new document is still created either way (M5).
-        other = _find_doc_index_entry(docs_dir, existing_doc_id)
-        if other is None or not _row_discoverable(other, actor):
-            existing_doc_id = None
+    existing_doc_id = _find_visible_source_sha256(
+        docs_dir, source_record["sha256"], d_id, actor
+    )
     if existing_doc_id and dedup_status == "miss":
         dedup_status = "hit"
 

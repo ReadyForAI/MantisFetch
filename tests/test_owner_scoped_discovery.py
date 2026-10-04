@@ -248,6 +248,19 @@ def test_replace_is_owner_only(client: TestClient, monkeypatch) -> None:
     assert replaced.status_code == 200, replaced.text
 
 
+def test_dedup_reports_the_callers_own_copy_past_a_private_one(
+    client: TestClient, monkeypatch
+) -> None:
+    _on(monkeypatch)
+    alice = _store(client, who="human:alice")
+    bob = _store(client, who="human:bob", name="copy.md")
+    assert bob.json()["existing_doc_id"] is None
+    again = _store(client, who="human:bob", name="copy2.md")
+    assert again.json()["dedup"] == "hit"
+    assert again.json()["existing_doc_id"] == bob.json()["doc_id"]
+    assert again.json()["existing_doc_id"] != alice.json()["doc_id"]
+
+
 def test_dedup_hides_a_private_existing_id(client: TestClient, monkeypatch) -> None:
     _on(monkeypatch)
     first = _store(client, who="human:alice")
