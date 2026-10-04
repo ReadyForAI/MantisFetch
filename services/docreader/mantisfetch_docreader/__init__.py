@@ -38,7 +38,12 @@ from pydantic import BaseModel, Field
 
 from i18n import init_locale, t, tmpl_for_locale
 from mantisfetch_common import __version__
-from mantisfetch_common.actor import Actor, actor_from_headers, actor_label
+from mantisfetch_common.actor import (
+    Actor,
+    actor_from_headers,
+    actor_label,
+    owner_scoped_discovery_enabled,
+)
 from mantisfetch_common.atomic import _write_json, _write_text
 from mantisfetch_common.http_headers import content_disposition
 from mantisfetch_common.paths import _mask_path
@@ -530,6 +535,12 @@ from .storage import (
     _optional_doc_id_lock as _optional_doc_id_lock,
 )
 from .storage import (
+    _patch_doc_index as _patch_doc_index,
+)
+from .storage import (
+    _patch_doc_index_many as _patch_doc_index_many,
+)
+from .storage import (
     _resolve_doc_dir as _resolve_doc_dir,
 )
 from .storage import (
@@ -807,9 +818,7 @@ async def _parse_slot(
             # semaphore that is not full acquires on a fast path that never
             # suspends, so nothing can take the slot in between.
             if _parse_sem.locked():
-                raise HTTPException(
-                    422, _budget_refusal(budget_seconds, spent, estimate, 0.0)
-                )
+                raise HTTPException(422, _budget_refusal(budget_seconds, spent, estimate, 0.0))
             await _parse_sem.acquire()
         else:
             try:
@@ -1147,7 +1156,9 @@ def _convert_legacy_office(filepath: Path, target_ext: str) -> Path:
     converted = out_dir / f"{filepath.stem}.{target_ext}"
     if proc.returncode != 0 or not converted.exists():
         details = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(t("office_conversion_failed", src=filepath.suffix, dst=target_ext, err=details))
+        raise RuntimeError(
+            t("office_conversion_failed", src=filepath.suffix, dst=target_ext, err=details)
+        )
     return converted
 
 
@@ -1159,7 +1170,9 @@ def _detect_text_locale(text: str) -> str:
 
 
 def _parsed_document_locale(parsed: ParsedDocument) -> str:
-    value = str(parsed.metadata.get("summary_locale") or parsed.metadata.get("language") or "").strip()
+    value = str(
+        parsed.metadata.get("summary_locale") or parsed.metadata.get("language") or ""
+    ).strip()
     if value.startswith(("zh", "en")):
         return value[:2]
     sample_parts = [parsed.filename]
@@ -1725,9 +1738,7 @@ def _settle_interrupted_rewrite(
             # the replacement's. Keeping the backup is what makes that fixable:
             # the next sweep finds the same scaffolding, skips the artifacts it
             # already put back, and retries this.
-            logger.warning(
-                "Left %s staged: its indexed text could not be put back", doc_dir
-            )
+            logger.warning("Left %s staged: its indexed text could not be put back", doc_dir)
             return "incomplete"
         _forget_staging_then_remove(backup)
     if include_stash:
@@ -1737,7 +1748,11 @@ def _settle_interrupted_rewrite(
 
 @contextlib.contextmanager
 def _restore_on_failure(
-    doc_dir: Path, *, include_extracted: bool, docs_dir: Path | None = None, doc_id: str | None = None
+    doc_dir: Path,
+    *,
+    include_extracted: bool,
+    docs_dir: Path | None = None,
+    doc_id: str | None = None,
 ):
     """Put the document back the way it was if this rewrite does not finish.
 
@@ -1768,9 +1783,7 @@ def _restore_on_failure(
     # earlier process did not finish, and it may be the only copy of the
     # document's previous version. Settle it first, then start.
     if (
-        _settle_interrupted_rewrite(
-            doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=False
-        )
+        _settle_interrupted_rewrite(doc_dir, docs_dir=docs_dir, doc_id=doc_id, include_stash=False)
         == "incomplete"
     ):
         # Settling kept the backup because something it needed would not read
@@ -2197,6 +2210,78 @@ def _actor_provenance(doc_dir: Path, actor: Actor | None) -> dict[str, str | Non
     return {"created_by": created_by, "created_via": created_via}
 
 
+def _shared_for_rewrite(doc_dir: Path, shared: bool | None) -> bool:
+    """The sharing flag a rewrite should persist.
+
+    An upload says so explicitly. A summary rewrite passes None and must
+    keep whatever the manifest says now: the owner may have cancelled
+    sharing while the summary was in flight, and defaulting to false would
+    drop a share the upload set. Read under the document writer lock, which
+    the rewrite already holds, so a PUT cannot land between this read and
+    the write.
+    """
+    if shared is not None:
+        return bool(shared)
+    try:
+        manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(manifest, dict) and manifest.get("shared") is True
+
+
+def _row_discoverable(entry: dict[str, Any], actor: Actor | None) -> bool:
+    """Whether a library search may return this index row.
+
+    Switch off: everything. Switch on (IRP 20261003 D2): a web capture is
+    public; a shared document is visible to every caller; anything else is
+    visible only to the ``human:`` identity that uploaded it, compared as
+    the stored string. An empty ``created_by`` is not a match.
+    """
+    if not owner_scoped_discovery_enabled():
+        return True
+    if entry.get("file_type") == "web_capture":
+        return True
+    if entry.get("shared") is True:
+        return True
+    caller = actor[0] if actor else None
+    created_by = entry.get("created_by")
+    return isinstance(caller, str) and isinstance(created_by, str) and caller == created_by
+
+
+def _visible_documents(
+    documents: list[dict[str, Any]], actor: Actor | None
+) -> list[dict[str, Any]]:
+    if not owner_scoped_discovery_enabled():
+        return documents
+    return [entry for entry in documents if _row_discoverable(entry, actor)]
+
+
+def _ownership_kwargs(entry: dict[str, Any]) -> dict[str, Any]:
+    created_by = entry.get("created_by")
+    return {
+        "created_by": created_by if isinstance(created_by, str) and created_by else None,
+        "shared": entry.get("shared") is True,
+    }
+
+
+def _reject_unowned_replace(docs_dir: Path, doc_id: str, actor: Actor | None) -> None:
+    """403 unless this caller is the recorded owner. No-op when the switch is off.
+
+    An empty ``created_by`` has no owner, so nobody may replace it. Delete
+    is a different rule and is not checked here.
+    """
+    if not owner_scoped_discovery_enabled():
+        return
+    try:
+        doc_dir = _resolve_doc_dir(docs_dir, doc_id)
+    except HTTPException:
+        return
+    created_by, _ = _read_manifest_actor(doc_dir)
+    caller = actor[0] if actor else None
+    if not isinstance(caller, str) or caller != created_by:
+        raise HTTPException(403, "only the document owner can replace it")
+
+
 #: How long a deferred write waits for an in-flight replacement of its document
 #: to settle before giving up, and how often it looks. A replacement holds its
 #: stash for as long as its parse and any synchronous summary take; one that
@@ -2333,6 +2418,7 @@ def _write_output_impl(
     preserve_extracted: bool = False,
     guard_stale_generation: bool = False,
     actor: Actor | None = None,
+    shared: bool | None = None,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
@@ -2440,6 +2526,8 @@ def _write_output_impl(
             pass
 
     # manifest.json + v3 provenance (content_hash computed at function top)
+    recorded_shared = _shared_for_rewrite(doc_dir, shared)
+    ownership = _actor_provenance(doc_dir, actor)
     manifest = {
         "doc_id": doc_id,
         "filename": parsed.filename,
@@ -2447,6 +2535,7 @@ def _write_output_impl(
         "source": source,
         "content_type": normalized_content_type or "General",
         "storage_path": storage_path,
+        "shared": recorded_shared,
         "tags": list(tags) if tags else [],
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
@@ -2484,7 +2573,7 @@ def _write_output_impl(
             "source": source,
             "source_url": original_path or str(parsed.filename),
             "created_at": meta["created_at"],
-            **_actor_provenance(doc_dir, actor),
+            **ownership,
             "content_hash": content_hash,
             "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
@@ -2511,6 +2600,9 @@ def _write_output_impl(
         source_record=source_record,
         content_type=normalized_content_type,
         storage_path=storage_path,
+        created_by=ownership["created_by"],
+        created_via=ownership["created_via"],
+        shared=recorded_shared,
     )
 
 
@@ -2528,6 +2620,7 @@ def _write_output_extract_only_impl(
     preserve_extracted: bool = False,
     guard_stale_generation: bool = False,
     actor: Actor | None = None,
+    shared: bool | None = None,
 ):
     normalized_content_type = _normalize_content_type(content_type) if content_type else None
     storage_path = _doc_storage_rel_path(doc_id, normalized_content_type)
@@ -2614,6 +2707,8 @@ def _write_output_extract_only_impl(
         f"{tmpl_for_locale(output_locale, 'digest_title', doc_id=doc_id, filename=parsed.filename)}\n\n{placeholder}\n",
     )
 
+    recorded_shared = _shared_for_rewrite(doc_dir, shared)
+    ownership = _actor_provenance(doc_dir, actor)
     manifest = {
         "doc_id": doc_id,
         "filename": parsed.filename,
@@ -2621,6 +2716,7 @@ def _write_output_extract_only_impl(
         "source": source,
         "content_type": normalized_content_type or "General",
         "storage_path": storage_path,
+        "shared": recorded_shared,
         "tags": list(tags) if tags else [],
         "total_pages": parsed.total_pages,
         "section_count": len(parsed.sections),
@@ -2644,10 +2740,7 @@ def _write_output_extract_only_impl(
             "images": "images.json",
             "ocr_blocks": layout_entry["ocr_blocks_path"],
         },
-        "sections": [
-            _build_section_entry(sec, summary_preview="")
-            for sec in parsed.sections
-        ],
+        "sections": [_build_section_entry(sec, summary_preview="") for sec in parsed.sections],
         "tables": table_entries,
         "images": image_entries,
         "layout": layout_entry,
@@ -2655,7 +2748,7 @@ def _write_output_extract_only_impl(
             "source": source,
             "source_url": str(parsed.filename),
             "created_at": meta["created_at"],
-            **_actor_provenance(doc_dir, actor),
+            **ownership,
             "content_hash": content_hash,
             "generation": generation,
             "source_kind": (source_record or {}).get("kind", ""),
@@ -2680,6 +2773,9 @@ def _write_output_extract_only_impl(
         source_record=source_record,
         content_type=normalized_content_type,
         storage_path=storage_path,
+        created_by=ownership["created_by"],
+        created_via=ownership["created_via"],
+        shared=recorded_shared,
     )
     logger.info(f"Text extraction complete (no summary): {doc_dir}")
 
@@ -2700,9 +2796,7 @@ def _generate_deferred_summary(
     acquired = False
     try:
         if attempts > DEFERRED_SUMMARY_MAX_ATTEMPTS:
-            raise RuntimeError(
-                f"summary attempt limit reached ({DEFERRED_SUMMARY_MAX_ATTEMPTS})"
-            )
+            raise RuntimeError(f"summary attempt limit reached ({DEFERRED_SUMMARY_MAX_ATTEMPTS})")
         if _local_ocr_worker_initializing.is_set() and DEFERRED_SUMMARY_LOCAL_OCR_WAIT_SEC > 0:
             logger.info(
                 "Deferred summary waiting for local OCR init: %s (timeout=%ss)",
@@ -2929,7 +3023,11 @@ def _raw_max_bytes(suffix: str) -> int:
     bytes (SharedSpecs 20260708 amendment-1 M3). Read per call so a deployment
     can lower them without a restart, like the other tunables in this file.
     """
-    key = "MANTISFETCH_RAW_MAX_MD_MB" if suffix in RAW_TEXT_EXTENSIONS else "MANTISFETCH_RAW_MAX_IMAGE_MB"
+    key = (
+        "MANTISFETCH_RAW_MAX_MD_MB"
+        if suffix in RAW_TEXT_EXTENSIONS
+        else "MANTISFETCH_RAW_MAX_IMAGE_MB"
+    )
     default = "2" if suffix in RAW_TEXT_EXTENSIONS else "8"
     try:
         mib = int(os.environ.get(key, default))
@@ -3039,6 +3137,11 @@ class SearchResult(BaseModel):
     tags: list[str] = []
     source: str = "upload"
     created_at: str | None = None
+    # Who uploaded it, and whether discovery treats it as shared. Absent on
+    # rows written before the index carried the fields; a search still
+    # returns them (shared defaults to false). By-id reads do not use these.
+    created_by: str | None = None
+    shared: bool = False
     score: float = 1.0
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_ref: str | None = None
@@ -3175,6 +3278,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # them, and the next rewrite of that document would delete the only copy.
     await _startup_finish_interrupted_rewrites()
     await _startup_backfill_manifest_tags()
+    await _startup_backfill_ownership()
     await _startup_reset_interrupted_summaries()
     # On the loop, not in a thread: the delete path takes an asyncio lock.
     retention = (
@@ -3457,9 +3561,7 @@ def _finish_interrupted_rewrites(docs_dir: Path) -> tuple[int, int, int]:
         seen.add(here)
         try:
             with _document_writer_lock(docs_dir, here.name):
-                outcome = _settle_interrupted_rewrite(
-                    here, docs_dir=docs_dir, doc_id=here.name
-                )
+                outcome = _settle_interrupted_rewrite(here, docs_dir=docs_dir, doc_id=here.name)
         except (OSError, RuntimeError) as exc:  # RuntimeError: a symlink loop
             logger.warning("Could not settle the interrupted rewrite in %s: %s", here, exc)
             continue
@@ -3506,9 +3608,7 @@ async def _startup_finish_interrupted_rewrites() -> None:
 
 async def _startup_finish_interrupted_deletes() -> None:
     try:
-        restored, cleared = await asyncio.to_thread(
-            _finish_interrupted_deletes, _get_docs_dir()
-        )
+        restored, cleared = await asyncio.to_thread(_finish_interrupted_deletes, _get_docs_dir())
     except Exception as exc:  # noqa: BLE001 - never block startup on this
         logger.warning("Interrupted-delete sweep skipped: %s", exc)
         return
@@ -3527,9 +3627,7 @@ async def _startup_reset_interrupted_summaries() -> None:
         logger.warning("Interrupted-summary sweep skipped: %s", exc)
         return
     if reset:
-        logger.info(
-            "Reset %d summary/summaries a previous process left in flight", reset
-        )
+        logger.info("Reset %d summary/summaries a previous process left in flight", reset)
 
 
 async def _startup_backfill_manifest_tags() -> None:
@@ -3540,6 +3638,73 @@ async def _startup_backfill_manifest_tags() -> None:
         return
     if stats["patched"] or stats["errors"]:
         logger.info("Manifest tags backfill: %s", stats)
+
+
+def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
+    """Copy created_by / created_via / shared onto index rows that lack them.
+
+    Manifests written before D3 have no top-level ``shared``; those get
+    false, which is what an old document means. An index row that already
+    has ``created_by`` (including a recorded null) is left alone. One bad
+    document is counted and skipped.
+    """
+    stats = {"manifests": 0, "index": 0, "errors": 0}
+    if not docs_dir.exists():
+        return stats
+    updates: dict[str, dict[str, Any]] = {}
+    for entry in _load_doc_index(docs_dir):
+        doc_id = entry.get("id")
+        if not isinstance(doc_id, str):
+            continue
+        fields: dict[str, Any] = {}
+        try:
+            doc_dir = _resolve_doc_dir(docs_dir, doc_id, entry=entry)
+            manifest_path = doc_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest is not an object")
+            # Only this document's manifest. A stored original can itself be a
+            # JSON file named manifest.json; rewriting that would change the
+            # bytes the library claims to hold.
+            if "shared" not in manifest:
+                manifest["shared"] = False
+                _write_json(manifest_path, manifest)
+                stats["manifests"] += 1
+        except (HTTPException, OSError, ValueError):
+            # One unreadable or unwritable document must not drop the rest.
+            stats["errors"] += 1
+            continue
+        provenance = (
+            manifest.get("provenance") if isinstance(manifest.get("provenance"), dict) else {}
+        )
+        if "created_by" not in entry:
+            fields["created_by"] = provenance.get("created_by")
+        if "created_via" not in entry:
+            fields["created_via"] = provenance.get("created_via")
+        recorded_shared = manifest.get("shared") is True
+        # A share that was written to the manifest and then killed before the
+        # index commit still says so here. Copy it across, including when the
+        # index row already has a stale false.
+        if "shared" not in entry or entry.get("shared") is not recorded_shared:
+            fields["shared"] = recorded_shared
+        if fields:
+            updates[doc_id] = fields
+    if updates:
+        try:
+            stats["index"] = _patch_doc_index_many(docs_dir, updates)
+        except (OSError, ValueError):
+            stats["errors"] += 1
+    return stats
+
+
+async def _startup_backfill_ownership() -> None:
+    try:
+        stats = await asyncio.to_thread(_backfill_ownership, _get_docs_dir())
+    except Exception as exc:
+        logger.warning("Ownership backfill skipped: %s", exc)
+        return
+    if stats["manifests"] or stats["index"] or stats["errors"]:
+        logger.info("Ownership backfill: %s", stats)
 
 
 def _parse_metadata_form(metadata: str | None) -> dict[str, Any]:
@@ -4342,7 +4507,9 @@ def _backfill_manifest_tags(docs_dir: Path) -> dict[str, int]:
     return stats
 
 
-def _load_parsed_document_from_storage(docs_dir: Path, doc_id: str) -> tuple[ParsedDocument, dict[str, Any], dict[str, Any]]:
+def _load_parsed_document_from_storage(
+    docs_dir: Path, doc_id: str
+) -> tuple[ParsedDocument, dict[str, Any], dict[str, Any]]:
     doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     manifest_path = doc_dir / "manifest.json"
     if not manifest_path.exists():
@@ -4414,7 +4581,9 @@ def _load_parsed_document_from_storage(docs_dir: Path, doc_id: str) -> tuple[Par
             parsed.table_count = int(raw_meta.get("table_count") or 0)
 
     metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
-    source_record = manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
+    source_record = (
+        manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
+    )
     return parsed, metadata, source_record
 
 
@@ -4471,7 +4640,9 @@ def _resolve_manifest_section_path(doc_dir: Path, rel_path: str) -> Path | None:
     return None
 
 
-def _load_section_records(docs_dir: Path, doc_id: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _load_section_records(
+    docs_dir: Path, doc_id: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     _validate_doc_id(doc_id)
     doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     manifest_path = doc_dir / "manifest.json"
@@ -4730,7 +4901,10 @@ def _chunk_sections(
             request.merge_short_sections
             and current_records
             and current_tokens + tokens <= request.max_tokens_per_chunk
-            and (current_tokens < request.merge_threshold_tokens or tokens < request.merge_threshold_tokens)
+            and (
+                current_tokens < request.merge_threshold_tokens
+                or tokens < request.merge_threshold_tokens
+            )
         )
         if not current_records or can_merge:
             current_records.append(record)
@@ -4846,8 +5020,7 @@ def _survives_client_disconnect(fn):
                 task.cancel()
                 raise
             logger.warning(
-                "Client disconnected during %s; it keeps running and will still "
-                "write its result",
+                "Client disconnected during %s; it keeps running and will still write its result",
                 fn.__name__,
             )
             # Nobody is left to await the task, so retrieve whatever it ends up
@@ -4880,21 +5053,26 @@ def _parse_tags(tags: str | None) -> list[str]:
         return [t.strip() for t in tags.split(",") if t.strip()]
 
 
-def _find_doc_by_source_sha256(
-    docs_dir: Path, sha256: str, exclude_doc_id: str
+def _find_visible_source_sha256(
+    docs_dir: Path, sha256: str, exclude_doc_id: str, actor: Actor | None
 ) -> str | None:
-    """The doc_id of another document holding these exact source bytes, or None.
+    """Another document with these bytes that this caller may already know about.
 
-    An index scan, like /web's capture dedup — ``source_sha256`` is already an
-    index field, so no second structure has to be kept in step. Only ever
-    reported, never acted on: see the raw ingest below for why nothing is
-    merged.
+    The index can hold several copies. The first match may be someone else's
+    private document; naming it would leak it, and stopping there would hide
+    this caller's own later copy. With the switch off every match is visible,
+    so this is the first hit, as before. Advisory only: the document the
+    caller asked for is still created (SharedSpecs 20260708 amendment-1 M5).
     """
     if not sha256:
         return None
     for entry in _load_doc_index(docs_dir):
-        if entry.get("id") != exclude_doc_id and entry.get("source_sha256") == sha256:
-            return str(entry.get("id"))
+        if entry.get("id") == exclude_doc_id or entry.get("source_sha256") != sha256:
+            continue
+        if not _row_discoverable(entry, actor):
+            continue
+        ident = entry.get("id")
+        return str(ident) if ident else None
     return None
 
 
@@ -4914,6 +5092,7 @@ async def _store_only_ingest(
     will_replace: bool,
     t_entry: float,
     actor: Actor | None = None,
+    shared: bool = False,
 ) -> ParseResponse:
     """Store an original file with no parse products at all (store_only=true).
 
@@ -4940,6 +5119,8 @@ async def _store_only_ingest(
             if exists_now and not will_replace:
                 will_replace = True
                 dedup_status = "replaced"
+            if will_replace:
+                _reject_unowned_replace(docs_dir, d_id, actor)
 
         selected_content_type = (
             _doc_content_type(docs_dir, d_id) if will_replace else requested_content_type
@@ -4968,6 +5149,7 @@ async def _store_only_ingest(
                 dedup_status=dedup_status,
                 will_replace=will_replace,
                 actor=actor,
+                shared=shared,
                 t_entry=t_entry,
             )
         except HTTPException as exc:
@@ -5014,9 +5196,7 @@ def _store_raw_serialized(
         # moment ago.
         if will_replace:
             _stash_source(doc_dir, docs_dir=docs_dir, doc_id=d_id)
-        with _restore_on_failure(
-            doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id
-        ):
+        with _restore_on_failure(doc_dir, include_extracted=True, docs_dir=docs_dir, doc_id=d_id):
             # These are copied into the rollback rather than moved, because a
             # re-parse reads some of them back. Nothing here does, and leaving
             # them would make the result read as parsed while its manifest says
@@ -5026,9 +5206,7 @@ def _store_raw_serialized(
             for name in _OVERWRITTEN_FILES:
                 if name != "manifest.json":
                     (doc_dir / name).unlink(missing_ok=True)
-            response = _write_raw_document(
-                docs_dir, doc_dir=doc_dir, d_id=d_id, **write_kwargs
-            )
+            response = _write_raw_document(docs_dir, doc_dir=doc_dir, d_id=d_id, **write_kwargs)
         # A raw ingest that succeeds clears a marker an earlier failed attempt on
         # the same doc_id left, and drops the stash the replacement no longer
         # needs — the same two closing steps the parse path takes, but inside the
@@ -5054,6 +5232,7 @@ def _write_raw_document(
     dedup_status: str,
     t_entry: float,
     actor: Actor | None = None,
+    shared: bool = False,
 ) -> ParseResponse:
     """Write the original, the manifest and the index entry, in that order.
 
@@ -5068,7 +5247,9 @@ def _write_raw_document(
     # one doc_id across two chats would let the first session's cleanup
     # delete the second session's attachment — this library has no
     # reference counting (SharedSpecs 20260708 amendment-1 M5).
-    existing_doc_id = _find_doc_by_source_sha256(docs_dir, source_record["sha256"], d_id)
+    existing_doc_id = _find_visible_source_sha256(
+        docs_dir, source_record["sha256"], d_id, actor
+    )
     if existing_doc_id and dedup_status == "miss":
         dedup_status = "hit"
 
@@ -5088,6 +5269,7 @@ def _write_raw_document(
         "source": "upload",
         "content_type": selected_content_type,
         "storage_path": storage_path,
+        "shared": bool(shared),
         "tags": parsed_tags,
         "total_pages": 0,
         "section_count": 0,
@@ -5103,14 +5285,13 @@ def _write_raw_document(
             "source": "upload",
             "source_url": filename,
             "created_at": created_at,
-            **_actor_provenance(doc_dir, actor),
+            **(ownership := _actor_provenance(doc_dir, actor)),
             "content_hash": "",
             # No summary worker runs for a raw document, but one may still be
             # in flight for the parsed document this replaces; a token here
             # is what tells it its target is gone.
-            "generation": "sha256:" + hashlib.sha256(
-                f"raw:{d_id}:{source_record['sha256']}".encode()
-            ).hexdigest(),
+            "generation": "sha256:"
+            + hashlib.sha256(f"raw:{d_id}:{source_record['sha256']}".encode()).hexdigest(),
             "source_kind": source_record["kind"],
             "source_filename": source_record["filename"],
             "source_ref": source_record["ref"],
@@ -5151,6 +5332,9 @@ def _write_raw_document(
         content_type=selected_content_type,
         storage_path=storage_path,
         kind="raw",
+        created_by=ownership["created_by"],
+        created_via=ownership["created_via"],
+        shared=bool(shared),
     )
     logger.info("stored raw document %s (%s, %d bytes)", d_id, media_type, total_size)
     return ParseResponse(
@@ -5224,6 +5408,9 @@ async def api_parse_doc(
     tags: str | None = Form(None),  # JSON array string: '["Q3","financial"]'
     metadata: str | None = Form(None),  # JSON object string
     replace: bool = Form(False),
+    # Discovery flag (IRP 20261003 D3). Absent means private. Not an MCP tool;
+    # changing it later is PUT /library/{doc_id}/shared.
+    shared: bool = Form(False),
     # The raw channel: store the original file, run no parser. Only the formats
     # in RAW_FORMATS may take it, and they are exactly the ones no parser here
     # can read (SharedSpecs 20260708 amendment-1 M1).
@@ -5240,6 +5427,15 @@ async def api_parse_doc(
     t_entry = time.monotonic()
     # Who is writing, off the transport — never off the form (IRP 20260908 P1).
     actor = actor_from_headers(request.headers)
+    if (
+        owner_scoped_discovery_enabled()
+        and (id_strategy or "").strip().lower() == "source_filename"
+    ):
+        raise HTTPException(
+            422,
+            "id_strategy=source_filename is not available while "
+            "MANTISFETCH_OWNER_SCOPED_DISCOVERY is on",
+        )
 
     docs_dir = _get_docs_dir()
     filename = file.filename or "unknown"
@@ -5289,6 +5485,8 @@ async def api_parse_doc(
     # doesn't need d_id. Catching this here means a conflicting upload can't
     # waste disk + `_upload_sem` writing a scratch file just to be 409'd.
     will_replace = bool(doc_id and _doc_exists_anywhere(docs_dir, doc_id))
+    if will_replace and replace:
+        _reject_unowned_replace(docs_dir, str(doc_id), actor)
     if will_replace and not replace:
         raise _doc_id_conflict(docs_dir, str(doc_id), store_only=store_only)
     dedup_status = "replaced" if will_replace else "miss"
@@ -5406,6 +5604,7 @@ async def api_parse_doc(
                 will_replace=will_replace,
                 t_entry=t_entry,
                 actor=actor,
+                shared=shared,
             )
 
         # The OOXML formats are zips. A file that is not one cannot be read as
@@ -5422,8 +5621,7 @@ async def api_parse_doc(
             if not await asyncio.to_thread(zipfile.is_zipfile, scratch_path):
                 raise HTTPException(
                     422,
-                    f"{filename} is not a valid {suffix.lstrip('.')} file "
-                    f"(not a zip archive)",
+                    f"{filename} is not a valid {suffix.lstrip('.')} file (not a zip archive)",
                 )
             # And budgets that have to hold before anything expands it: every
             # OOXML entry within the unzip budget, and a workbook within the row
@@ -5450,9 +5648,7 @@ async def api_parse_doc(
         # parser, and still leaves the record that says a parse was tried.
         if suffix == ".pdf" and scratch_path is not None:
             if not await asyncio.to_thread(_contains_bytes, scratch_path, b"%PDF-"):
-                raise HTTPException(
-                    422, f"{filename} is not a valid pdf file (no %PDF- header)"
-                )
+                raise HTTPException(422, f"{filename} is not a valid pdf file (no %PDF- header)")
 
         # Refuse a document this call cannot afford, before it costs anything.
         # The estimate is cheap and runs before the doc_id is minted, so a
@@ -5544,13 +5740,16 @@ async def api_parse_doc(
         # Lock outside _parse_sem so waiters don't burn a parse slot — otherwise
         # unrelated documents get 429'd while one same-id queue drains. Both
         # waits come out of the same budget, or the same queue ceiling.
-        async with _doc_id_lock_within(
-            d_id_lock, budget_seconds=budget_seconds, t_entry=t_entry, estimate=estimate
-        ) as queued_since, _parse_slot(
-            budget_seconds=budget_seconds,
-            t_entry=t_entry,
-            estimate=estimate,
-            queued_since=queued_since,
+        async with (
+            _doc_id_lock_within(
+                d_id_lock, budget_seconds=budget_seconds, t_entry=t_entry, estimate=estimate
+            ) as queued_since,
+            _parse_slot(
+                budget_seconds=budget_seconds,
+                t_entry=t_entry,
+                estimate=estimate,
+                queued_since=queued_since,
+            ),
         ):
             t0 = time.time()
             # Guard against silent overwrite when the caller pins an explicit
@@ -5572,6 +5771,11 @@ async def api_parse_doc(
                     will_replace = True
                     dedup_status = "replaced"
             if will_replace:
+                # Always, not only when the flag flipped just now. The
+                # pre-upload check can have passed for a document that was
+                # deleted and recreated under the same id while this request
+                # waited, and that new document may belong to someone else.
+                _reject_unowned_replace(docs_dir, d_id, actor)
                 # Preserve the existing doc's content_type so replace=true can't
                 # leave orphans in a different category directory. The caller's
                 # content_type is silently overridden because they already
@@ -5600,7 +5804,9 @@ async def api_parse_doc(
                 )
             )
             if field_ocr_profile:
-                canonical_profile = _DOCUMENT_PROFILE_ALIASES.get(field_ocr_profile, field_ocr_profile)
+                canonical_profile = _DOCUMENT_PROFILE_ALIASES.get(
+                    field_ocr_profile, field_ocr_profile
+                )
                 if canonical_profile != field_ocr_profile:
                     field_ocr_profile = canonical_profile
                     if parsed_metadata.get("document_profile"):
@@ -5735,7 +5941,9 @@ async def api_parse_doc(
                         embedded_image_count = _count_word_embedded_image_references(word_path)
                         requested_ocr_image_count = min(embedded_image_count, max_images)
                         parsed_metadata.setdefault("embedded_image_count", embedded_image_count)
-                        parsed_metadata.setdefault("requested_image_count", requested_ocr_image_count)
+                        parsed_metadata.setdefault(
+                            "requested_image_count", requested_ocr_image_count
+                        )
                         parsed_metadata.setdefault(
                             "image_inventory_truncated",
                             bool(embedded_image_count > requested_ocr_image_count),
@@ -5865,6 +6073,7 @@ async def api_parse_doc(
                             source_record=source_record,
                             content_type=selected_content_type,
                             actor=actor,
+                            shared=shared,
                         ),
                     )
                 else:
@@ -5882,6 +6091,7 @@ async def api_parse_doc(
                             source_record=source_record,
                             content_type=selected_content_type,
                             actor=actor,
+                            shared=shared,
                         ),
                     )
                     if summary_mode == "defer":
@@ -5967,12 +6177,15 @@ async def library_search(
     limit = max(1, min(limit, SEARCH_LIMIT_MAX))  # clamp: negative dropped results
     docs_dir = _get_docs_dir()
     metadata_filters = _metadata_filters_from_request(request)
-    documents = _filter_documents(
-        _load_doc_index(docs_dir),
-        file_type=file_type,
-        content_type=content_type,
-        tags=tags,
-        metadata_filters=metadata_filters,
+    documents = _visible_documents(
+        _filter_documents(
+            _load_doc_index(docs_dir),
+            file_type=file_type,
+            content_type=content_type,
+            tags=tags,
+            metadata_filters=metadata_filters,
+        ),
+        actor_from_headers(request.headers),
     )
 
     if q:
@@ -6030,6 +6243,7 @@ async def library_search(
             source=d.get("source", "upload"),
             created_at=d.get("created_at"),
             score=scores.get(d.get("id"), 1.0),
+            **_ownership_kwargs(d),
             metadata=d.get("metadata") or {},
             source_ref=d.get("source_ref") or None,
             source_filename=d.get("source_filename") or None,
@@ -6075,6 +6289,10 @@ async def library_search_text(
         tags=tags,
         metadata_filters=metadata_filters,
     )
+    # A named doc_id is a by-id read: the caller already has the number, and
+    # advisors have no human identity. Library-wide search is the filtered one.
+    if not doc_id:
+        documents = _visible_documents(documents, actor_from_headers(request.headers))
     if doc_id:
         documents = [d for d in documents if d.get("id") == doc_id]
         if not documents:
@@ -6148,6 +6366,7 @@ async def library_search_text(
                                     tags=d.get("tags", []),
                                     source=d.get("source", "upload"),
                                     created_at=d.get("created_at"),
+                                    **_ownership_kwargs(d),
                                     score=_search_score((True, 1.0)),
                                     metadata=d.get("metadata") or {},
                                     source_ref=d.get("source_ref") or None,
@@ -6193,6 +6412,7 @@ async def library_search_text(
                                     tags=d.get("tags", []),
                                     source=d.get("source", "upload"),
                                     created_at=d.get("created_at"),
+                                    **_ownership_kwargs(d),
                                     score=_search_score((title_hit, 2.0), (text_hit, 1.5)),
                                     metadata=d.get("metadata") or {},
                                     source_ref=d.get("source_ref") or None,
@@ -6251,6 +6471,7 @@ async def library_search_text(
                                     tags=d.get("tags", []),
                                     source=d.get("source", "upload"),
                                     created_at=d.get("created_at"),
+                                    **_ownership_kwargs(d),
                                     score=_search_score((title_hit, 2.0), (text_hit, 1.5)),
                                     metadata=d.get("metadata") or {},
                                     source_ref=d.get("source_ref") or None,
@@ -6298,6 +6519,66 @@ async def get_manifest(doc_id: str):
     if not p.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+class SharedUpdate(BaseModel):
+    shared: bool
+
+
+@app.put("/library/{doc_id}/shared")
+async def update_document_shared(doc_id: str, body: SharedUpdate, request: Request):
+    """Set whether discovery treats this document as shared.
+
+    Only the recorded ``created_by`` may change it (IRP 20261003 D3). An
+    empty owner is 403. Not registered as an MCP tool. The switch does not
+    have to be on: this only records the flag.
+    """
+    _validate_doc_id(doc_id)
+    actor = actor_from_headers(request.headers)
+    docs_dir = _get_docs_dir()
+
+    def _apply() -> dict[str, Any]:
+        with _document_writer_lock(docs_dir, doc_id):
+            doc_dir = _resolve_doc_dir(docs_dir, doc_id)
+            manifest_path = doc_dir / "manifest.json"
+            if not manifest_path.exists():
+                raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise HTTPException(404, t("doc_not_found", doc_id=doc_id)) from exc
+            if not isinstance(manifest, dict):
+                raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
+            created_by, created_via = _read_manifest_actor(doc_dir)
+            caller = actor[0] if actor else None
+            if (
+                not isinstance(caller, str)
+                or not isinstance(created_by, str)
+                or caller != created_by
+            ):
+                raise HTTPException(403, "only the document owner can change sharing")
+            previous = manifest_path.read_bytes()
+            manifest["shared"] = body.shared
+            _write_json(manifest_path, manifest)
+            try:
+                updated = _patch_doc_index(
+                    docs_dir,
+                    doc_id,
+                    shared=body.shared,
+                    created_by=created_by,
+                    created_via=created_via,
+                )
+                if not updated:
+                    raise OSError(f"no index row for {doc_id}")
+            except Exception:
+                # A summary rewrite reads shared from the manifest. Leaving
+                # the file ahead of the index would publish a share the
+                # index update did not commit.
+                manifest_path.write_bytes(previous)
+                raise
+        return {"doc_id": doc_id, "shared": body.shared}
+
+    return await asyncio.to_thread(_apply)
 
 
 @app.get("/library/{doc_id}/sidecars")
@@ -6462,8 +6743,12 @@ async def get_summary_status(doc_id: str):
     if not manifest_path.exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    parse_metadata = manifest.get("parse_metadata") if isinstance(manifest.get("parse_metadata"), dict) else {}
-    summary = parse_metadata.get("summary") if isinstance(parse_metadata.get("summary"), dict) else {}
+    parse_metadata = (
+        manifest.get("parse_metadata") if isinstance(manifest.get("parse_metadata"), dict) else {}
+    )
+    summary = (
+        parse_metadata.get("summary") if isinstance(parse_metadata.get("summary"), dict) else {}
+    )
     return {
         "doc_id": doc_id,
         # A raw document has no summary and never will; without this the empty
@@ -6907,7 +7192,9 @@ def _resolve_source_file(doc_dir: Path, manifest: dict[str, Any], doc_id: str) -
     admitted as is part of the contract, so it is recorded at ingest rather than
     re-guessed here from a name the uploader chose.
     """
-    source_file = manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
+    source_file = (
+        manifest.get("source_file") if isinstance(manifest.get("source_file"), dict) else {}
+    )
     ref = source_file.get("ref") or ""
     if not ref:
         raise HTTPException(
@@ -6969,7 +7256,7 @@ def _doc_id_conflict(docs_dir: Path, doc_id: str, *, store_only: bool) -> HTTPEx
 
 
 def _doc_kind(docs_dir: Path, doc_id: str) -> str:
-    """"raw" for a stored original, "parsed" for everything else (and for a
+    """ "raw" for a stored original, "parsed" for everything else (and for a
     document whose manifest cannot be read — the conservative answer, since
     every reader's default is parsed)."""
     try:
@@ -7110,13 +7397,15 @@ async def get_source_info(
 
     consumed = max(1, len(kept)) if window else 0
     next_offset = start + consumed
-    info.update({
-        "text": "".join(kept),
-        "offset": start,
-        "next_offset": next_offset if next_offset < len(lines) else None,
-        "total_lines": len(lines),
-        "truncated": truncated,
-    })
+    info.update(
+        {
+            "text": "".join(kept),
+            "offset": start,
+            "next_offset": next_offset if next_offset < len(lines) else None,
+            "total_lines": len(lines),
+            "truncated": truncated,
+        }
+    )
     return info
 
 

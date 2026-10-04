@@ -158,8 +158,8 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_section` | Section 级：按 sid 读取单个 section 全文。 | `doc_id`、`sid` |
 | `doc_sections_batch` | 一次调用按 sid 读取多个 section（比反复 `doc_section` 少往返）；返回找到的 + 缺失的 sid。 | `doc_id`、`sids[]` |
 | `doc_full` | 全文 —— 昂贵；优先用上面的层级。放得进一次工具返回就整篇返回；更长的文档分窗返回：`total` 行数、`next_offset`（读完为 null）、`truncated`——用 `offset=next_offset` 继续读。 | `doc_id`、`offset=0`、`limit?` |
-| `doc_search` | 跨库搜 **metadata**——文件名、digest、tags、自定义 metadata。**不看正文**：只出现在正文里的词在这里返回 `total: 0`，那**不等于**「库里没有」。零结果会带一条 `hint` 说明。 | `q`、`tags?`、`limit=20` |
-| `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
+| `doc_search` | 跨库搜 **metadata**——文件名、digest、tags、自定义 metadata。**不看正文**：只出现在正文里的词在这里返回 `total: 0`，那**不等于**「库里没有」。零结果会带一条 `hint` 说明。会转发调用方身份。`MANTISFETCH_OWNER_SCOPED_DISCOVERY` 打开时，只返回该调用方自己的上传、`shared` 文档和网页抓取，每行带 `created_by` 和 `shared`。 | `q`、`tags?`、`limit=20` |
+| `doc_search_text` | 跨库**全文**搜索正文；每个命中返回 doc_id + sid + snippet。词只出现在正文里时用这个。身份转发和可见性与 `doc_search` 相同；带了 `doc_id` 则是按编号读，不过滤。 | `q`、`tags?`、`doc_id?`、`scope="all"`（`all` \| `full` \| `section`）、`limit=20` |
 | `doc_search_sections` | 在单个文档的 sections 内搜索；返回 sid/页码 provenance。 | `doc_id`、`q`、`include_content=false` |
 | `doc_table` | 读取单个提取出的表格（含数值列统计）。一次工具返回放不下的表按行分窗（`total`、`next_offset`、`truncated`）；`md` 每窗都重复表头行，`json` 的分窗是 `table.rows`。 | `doc_id`、`table_id`、`fmt="md"`（`md` \| `json`）、`offset=0`、`limit?` |
 | `doc_tables` | 列出文档的表格（`table_id`、页码、行列数）——即 `doc_table` 要用的 id。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）。 | `doc_id`、`offset=0`、`limit?` |

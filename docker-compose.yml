@@ -17,6 +17,9 @@ services:
       # adds extra Host values (host:* = any port) past the DNS-rebinding check,
       # which guards /mcp and the token-less loopback path of /web and /doc.
       MANTISFETCH_MCP_TOKEN: ${MANTISFETCH_MCP_TOKEN:-}
+      # Owner-scoped discovery (IRP 20261003). Off unless set to 1/true/yes/on.
+      # On also requires MANTISFETCH_MCP_TOKEN or the process refuses to start.
+      MANTISFETCH_OWNER_SCOPED_DISCOVERY: ${MANTISFETCH_OWNER_SCOPED_DISCOVERY:-}
       MANTISFETCH_MCP_ALLOWED_HOSTS: ${MANTISFETCH_MCP_ALLOWED_HOSTS:-}
       # Seconds an MCP doc_parse / web_search_capture call may take; keep it under
       # the MCP client's per-request timeout (NodalOS: 60s).

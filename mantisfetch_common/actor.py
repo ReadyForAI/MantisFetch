@@ -25,9 +25,16 @@ the only thing this module adds; the alias is not normalised further.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
+
+# SharedSpecs IRP 20261003-council-topic-materials D1. Default off: a standard
+# instance does not filter the library, and turning it on is what makes the
+# caller's self-asserted identity load-bearing (D2), so the process then
+# refuses to start without MANTISFETCH_MCP_TOKEN.
+_OWNER_SCOPE_ON = {"1", "true", "yes", "on"}
 
 ACTOR_HEADER = "X-RFAI-Actor-ID"
 CALLER_AGENT_HEADER = "X-NodalOS-Caller-Agent-ID"
@@ -67,6 +74,18 @@ def _well_formed(value: str | None) -> str | None:
         return value
     logger.warning("ignoring malformed %s value (expected <kind>:<id>): %r", ACTOR_HEADER, value)
     return None
+
+
+def owner_scoped_discovery_enabled() -> bool:
+    """Whether library discovery is filtered by who uploaded a document.
+
+    Read on each call so a test can flip the switch without restarting the
+    process. The startup refusal in the unified server is the one check that
+    happens only once.
+    """
+    return (
+        os.environ.get("MANTISFETCH_OWNER_SCOPED_DISCOVERY", "").strip().lower() in _OWNER_SCOPE_ON
+    )
 
 
 def actor_from_headers(headers: Mapping[str, str] | None) -> Actor:

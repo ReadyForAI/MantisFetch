@@ -98,9 +98,7 @@ def _export_index_json(docs_dir: Path) -> None:
     from mantisfetch_common import doc_index_store as dis
 
     try:
-        dis.export_json(
-            docs_dir, last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        )
+        dis.export_json(docs_dir, last_updated=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
     except Exception as exc:  # noqa: BLE001 - the index is committed either way
         logger.warning("doc-index.json export failed (index is committed): %s", exc)
 
@@ -118,6 +116,9 @@ def _update_doc_index(
     content_type: str | None = None,
     storage_path: str | None = None,
     kind: str | None = None,
+    created_by: str | None = None,
+    created_via: str | None = None,
+    shared: bool = False,
 ):
     """Commit one document to the index.
 
@@ -133,9 +134,13 @@ def _update_doc_index(
         normalized_content_type = _normalize_content_type(
             content_type or meta.get("content_type") or "General"
         )
-        rel_storage_path = storage_path or meta.get("storage_path") or _doc_storage_rel_path(
-            meta["doc_id"],
-            normalized_content_type if content_type or meta.get("storage_path") else None,
+        rel_storage_path = (
+            storage_path
+            or meta.get("storage_path")
+            or _doc_storage_rel_path(
+                meta["doc_id"],
+                normalized_content_type if content_type or meta.get("storage_path") else None,
+            )
         )
 
         entry: dict[str, Any] = {
@@ -160,6 +165,13 @@ def _update_doc_index(
             "source_filename": (source_record or meta.get("source_file") or {}).get("filename", ""),
             "source_sha256": (source_record or meta.get("source_file") or {}).get("sha256", ""),
             "source_available": bool((source_record or meta.get("source_file") or {}).get("ref")),
+            # Discovery fields (IRP 20261003 D2/D3). Written on every index
+            # rebuild, including a summary rewrite, so a later pass cannot
+            # drop the owner or reset sharing. Absent on a row means "not
+            # backfilled yet"; a present null created_by stays null.
+            "created_by": created_by,
+            "created_via": created_via,
+            "shared": bool(shared),
         }
         # Only raw documents carry it, so an existing row keeps meaning what it
         # meant: absent is parsed. Search hits need it because "find it, then
@@ -190,6 +202,48 @@ def _update_doc_index(
 
         dis.upsert_document(docs_dir, entry)
         _export_index_json(docs_dir)
+
+
+def _patch_doc_index(docs_dir: Path, doc_id: str, **fields: Any) -> bool:
+    """Merge fields into one index row. False when the row does not exist.
+
+    Caller may already hold the document writer lock. This takes the index
+    lock, which is the same order ``_update_doc_index`` uses.
+    """
+    with _doc_index_lock:
+        entry = _find_doc_index_entry(docs_dir, doc_id)
+        if entry is None:
+            return False
+        entry.update(fields)
+        from mantisfetch_common import doc_index_store as dis
+
+        dis.upsert_document(docs_dir, entry)
+        _export_index_json(docs_dir)
+        return True
+
+
+def _patch_doc_index_many(docs_dir: Path, updates: dict[str, dict[str, Any]]) -> int:
+    """Merge fields into many rows and export the JSON index once.
+
+    The startup backfill used to export on every row, which rewrites the
+    whole compatibility file each time.
+    """
+    if not updates:
+        return 0
+    with _doc_index_lock:
+        from mantisfetch_common import doc_index_store as dis
+
+        changed = 0
+        for doc_id, fields in updates.items():
+            entry = _find_doc_index_entry(docs_dir, doc_id)
+            if entry is None or not fields:
+                continue
+            entry.update(fields)
+            dis.upsert_document(docs_dir, entry)
+            changed += 1
+        if changed:
+            _export_index_json(docs_dir)
+        return changed
 
 
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
@@ -327,9 +381,7 @@ def _delete_doc(docs_dir: Path, doc_id: str) -> bool:
             # has never been migrated it would remove nothing and the export
             # below — which does migrate — would import the row straight back.
             if not had_index_entry:
-                had_index_entry = any(
-                    d.get("id") == doc_id for d in dis.list_documents(docs_dir)
-                )
+                had_index_entry = any(d.get("id") == doc_id for d in dis.list_documents(docs_dir))
             dis.delete_document(docs_dir, doc_id)
         except BaseException:
             _put_back_set_aside(set_aside)
@@ -388,7 +440,9 @@ def _finish_interrupted_deletes(docs_dir: Path) -> tuple[int, int]:
             if not isinstance(e.get("id"), str):
                 continue
             resolved = _resolve_index_storage_path(docs_dir, e.get("storage_path"))
-            indexed[e["id"]] = resolved if resolved is not None and resolved.name == e["id"] else None
+            indexed[e["id"]] = (
+                resolved if resolved is not None and resolved.name == e["id"] else None
+            )
         tombstones: list[Path] = []
         for parent, dirnames, filenames in os.walk(docs_dir):
             if "manifest.json" in filenames and Path(parent) != docs_dir:
@@ -461,8 +515,27 @@ def _next_doc_id(docs_dir: Path) -> str:
         return doc_id
 
 
+def _next_random_doc_id(docs_dir: Path) -> str:
+    """An unguessable id for an upload that did not name one.
+
+    Used only while owner-scoped discovery is on (IRP 20261003 D2): the
+    counter and the filename strategy are both enumerable. ``R-`` plus 32
+    hex characters matches ``_DOC_ID_RE`` whenever the hex contains a digit,
+    which a uuid4 does except in a vanishing case the loop skips.
+    """
+    for _ in range(8):
+        doc_id = "R-" + uuid.uuid4().hex
+        if _DOC_ID_RE.match(doc_id) and not _doc_exists_anywhere(docs_dir, doc_id):
+            return doc_id
+    raise RuntimeError("doc_id allocation exhausted: random ids kept colliding")
+
+
 def _doc_id_strategy(requested_strategy: str | None = None) -> str:
-    strategy = (requested_strategy or os.environ.get("MANTISFETCH_DOC_ID_STRATEGY", "counter")).strip().lower()
+    strategy = (
+        (requested_strategy or os.environ.get("MANTISFETCH_DOC_ID_STRATEGY", "counter"))
+        .strip()
+        .lower()
+    )
     return strategy if strategy in {"counter", "source_filename"} else "counter"
 
 
@@ -513,6 +586,15 @@ def _resolve_doc_id(
         _validate_doc_id(requested_doc_id)
         return requested_doc_id
 
+    # The env strategy is ignored here on purpose: an operator who left
+    # source_filename set must not keep minting guessable ids once the
+    # switch is on. An explicit id_strategy=source_filename is refused
+    # earlier, at the parse endpoint, with 422.
+    from mantisfetch_common.actor import owner_scoped_discovery_enabled
+
+    if owner_scoped_discovery_enabled():
+        return _next_random_doc_id(docs_dir)
+
     if _doc_id_strategy(requested_strategy) == "source_filename":
         filename_doc_id = _next_filename_doc_id(docs_dir, filename)
         if filename_doc_id:
@@ -555,9 +637,7 @@ def _find_doc_index_entry(docs_dir: Path, doc_id: str) -> dict[str, Any] | None:
         return None
 
 
-def _resolve_doc_dir(
-    docs_dir: Path, doc_id: str, entry: dict[str, Any] | None = None
-) -> Path:
+def _resolve_doc_dir(docs_dir: Path, doc_id: str, entry: dict[str, Any] | None = None) -> Path:
     """The document's directory on disk.
 
     ``entry`` is the caller's already-loaded index row, passed in to avoid a
@@ -663,13 +743,21 @@ def _doc_entry_from_manifest(docs_dir: Path, doc_id: str) -> dict[str, Any] | No
 
     source_file = manifest.get("source_file") or meta.get("source_file") or {}
     provenance = manifest.get("provenance") or {}
-    content_type = _normalize_content_type(manifest.get("content_type") or meta.get("content_type") or "General")
-    storage_path = str(manifest.get("storage_path") or meta.get("storage_path") or doc_dir.relative_to(docs_dir))
+    content_type = _normalize_content_type(
+        manifest.get("content_type") or meta.get("content_type") or "General"
+    )
+    storage_path = str(
+        manifest.get("storage_path") or meta.get("storage_path") or doc_dir.relative_to(docs_dir)
+    )
     sections = manifest.get("sections") if isinstance(manifest.get("sections"), list) else []
     images = manifest.get("images") if isinstance(manifest.get("images"), list) else []
     manifest_tags = manifest.get("tags") if isinstance(manifest.get("tags"), list) else None
-    parse_metadata = manifest.get("parse_metadata") if isinstance(manifest.get("parse_metadata"), dict) else {}
-    summary_meta = parse_metadata.get("summary") if isinstance(parse_metadata.get("summary"), dict) else {}
+    parse_metadata = (
+        manifest.get("parse_metadata") if isinstance(manifest.get("parse_metadata"), dict) else {}
+    )
+    summary_meta = (
+        parse_metadata.get("summary") if isinstance(parse_metadata.get("summary"), dict) else {}
+    )
     digest = ""
     digest_path = doc_dir / "digest.md"
     if digest_path.exists():
