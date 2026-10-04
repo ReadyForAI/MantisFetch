@@ -538,6 +538,9 @@ from .storage import (
     _patch_doc_index as _patch_doc_index,
 )
 from .storage import (
+    _patch_doc_index_many as _patch_doc_index_many,
+)
+from .storage import (
     _resolve_doc_dir as _resolve_doc_dir,
 )
 from .storage import (
@@ -3666,6 +3669,7 @@ def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
             stats["manifests"] += 1
         except (OSError, ValueError):
             stats["errors"] += 1
+    updates: dict[str, dict[str, Any]] = {}
     for entry in _load_doc_index(docs_dir):
         doc_id = entry.get("id")
         if not isinstance(doc_id, str):
@@ -3690,11 +3694,11 @@ def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
                 fields["created_via"] = provenance.get("created_via")
             if "shared" not in entry:
                 fields["shared"] = manifest.get("shared") is True
-        if not fields:
-            continue
+        if fields:
+            updates[doc_id] = fields
+    if updates:
         try:
-            _patch_doc_index(docs_dir, doc_id, **fields)
-            stats["index"] += 1
+            stats["index"] = _patch_doc_index_many(docs_dir, updates)
         except (OSError, ValueError):
             stats["errors"] += 1
     return stats
@@ -5771,8 +5775,12 @@ async def api_parse_doc(
                 if exists_now and not will_replace:
                     will_replace = True
                     dedup_status = "replaced"
-                    _reject_unowned_replace(docs_dir, d_id, actor)
             if will_replace:
+                # Always, not only when the flag flipped just now. The
+                # pre-upload check can have passed for a document that was
+                # deleted and recreated under the same id while this request
+                # waited, and that new document may belong to someone else.
+                _reject_unowned_replace(docs_dir, d_id, actor)
                 # Preserve the existing doc's content_type so replace=true can't
                 # leave orphans in a different category directory. The caller's
                 # content_type is silently overridden because they already
@@ -6554,15 +6562,25 @@ async def update_document_shared(doc_id: str, body: SharedUpdate, request: Reque
                 or caller != created_by
             ):
                 raise HTTPException(403, "only the document owner can change sharing")
+            previous = manifest_path.read_bytes()
             manifest["shared"] = body.shared
             _write_json(manifest_path, manifest)
-            _patch_doc_index(
-                docs_dir,
-                doc_id,
-                shared=body.shared,
-                created_by=created_by,
-                created_via=created_via,
-            )
+            try:
+                updated = _patch_doc_index(
+                    docs_dir,
+                    doc_id,
+                    shared=body.shared,
+                    created_by=created_by,
+                    created_via=created_via,
+                )
+                if not updated:
+                    raise OSError(f"no index row for {doc_id}")
+            except Exception:
+                # A summary rewrite reads shared from the manifest. Leaving
+                # the file ahead of the index would publish a share the
+                # index update did not commit.
+                manifest_path.write_bytes(previous)
+                raise
         return {"doc_id": doc_id, "shared": body.shared}
 
     return await asyncio.to_thread(_apply)

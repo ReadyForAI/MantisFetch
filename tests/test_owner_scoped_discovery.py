@@ -404,6 +404,126 @@ def test_summary_rewrite_keeps_the_latest_shared_flag(tmp_path, monkeypatch) -> 
     assert row["created_by"] == "human:alice"
 
 
+def test_replace_rechecks_ownership_after_the_precheck(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-upload check can pass and the document can change owners
+    before the write. The locked check still has to refuse."""
+    _on(monkeypatch)
+    doc_id = "F-recheck1"
+    assert (
+        _store(client, who="human:bob", name="b.md", content=b"# bob\n", doc_id=doc_id).status_code
+        == 200
+    )
+    import mantisfetch_docreader as dr
+
+    real = dr._reject_unowned_replace
+    calls = {"n": 0}
+
+    def skip_the_precheck(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(dr, "_reject_unowned_replace", skip_the_precheck)
+    stolen = _store(
+        client,
+        who="human:alice",
+        name="a.md",
+        content=b"# alice\n",
+        doc_id=doc_id,
+        replace="true",
+    )
+    assert stolen.status_code == 403
+    assert calls["n"] >= 2
+
+
+def test_a_failed_share_update_puts_the_manifest_back(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _on(monkeypatch)
+    stored = _store(client, who="human:alice", name="share.md", content=b"# share\n")
+    doc_id = stored.json()["doc_id"]
+    import mantisfetch_docreader as dr
+
+    def boom(*_args, **_kwargs):
+        raise OSError("index down")
+
+    monkeypatch.setattr(dr, "_patch_doc_index", boom)
+    with pytest.raises(OSError, match="index down"):
+        client.put(
+            f"/doc/library/{doc_id}/shared",
+            json={"shared": True},
+            headers=_headers("human:alice"),
+        )
+    manifest = client.get(
+        f"/doc/library/{doc_id}/manifest", headers=_headers("human:alice")
+    ).json()
+    assert manifest["shared"] is False
+    assert doc_id not in _ids(client, "human:bob", q="share")
+
+
+def test_backfill_exports_the_index_once(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import mantisfetch_docreader.storage as storage
+    from mantisfetch_docreader import _backfill_ownership, _update_doc_index
+
+    import mantisfetch_common.storage as cs
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    monkeypatch.setattr(cs, "DEFAULT_DOCS_DIR", docs)
+    for i in (1, 2):
+        doc_dir = docs / "General" / f"DOC-00{i}"
+        doc_dir.mkdir(parents=True)
+        (doc_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "doc_id": f"DOC-00{i}",
+                    "filename": f"old-{i}.md",
+                    "file_type": "md",
+                    "provenance": {"created_by": "human:alice", "created_via": None},
+                }
+            ),
+            encoding="utf-8",
+        )
+        _update_doc_index(
+            docs,
+            {
+                "doc_id": f"DOC-00{i}",
+                "filename": f"old-{i}.md",
+                "file_type": "md",
+                "total_pages": 0,
+                "section_count": 0,
+                "ocr_page_count": 0,
+                "table_count": 0,
+                "created_at": "2026-01-01T00:00:00Z",
+                "storage_path": f"General/DOC-00{i}",
+            },
+            "old",
+        )
+    from mantisfetch_common import doc_index_store as dis
+
+    for i in (1, 2):
+        entry = dis.get_document(docs, f"DOC-00{i}")
+        assert entry is not None
+        for key in ("created_by", "created_via", "shared"):
+            entry.pop(key, None)
+        dis.upsert_document(docs, entry)
+
+    exports = {"n": 0}
+    real = storage._export_index_json
+
+    def counting(docs_dir):
+        exports["n"] += 1
+        return real(docs_dir)
+
+    monkeypatch.setattr(storage, "_export_index_json", counting)
+    stats = _backfill_ownership(docs)
+    assert stats["index"] == 2
+    assert exports["n"] == 1
+
+
 def test_library_captures_do_not_carry_login_state() -> None:
     """IRP 20261003 D2 / MF 06: a stored capture is anonymous by construction.
 

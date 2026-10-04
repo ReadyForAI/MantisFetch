@@ -222,6 +222,30 @@ def _patch_doc_index(docs_dir: Path, doc_id: str, **fields: Any) -> bool:
         return True
 
 
+def _patch_doc_index_many(docs_dir: Path, updates: dict[str, dict[str, Any]]) -> int:
+    """Merge fields into many rows and export the JSON index once.
+
+    The startup backfill used to export on every row, which rewrites the
+    whole compatibility file each time.
+    """
+    if not updates:
+        return 0
+    with _doc_index_lock:
+        from mantisfetch_common import doc_index_store as dis
+
+        changed = 0
+        for doc_id, fields in updates.items():
+            entry = _find_doc_index_entry(docs_dir, doc_id)
+            if entry is None or not fields:
+                continue
+            entry.update(fields)
+            dis.upsert_document(docs_dir, entry)
+            changed += 1
+        if changed:
+            _export_index_json(docs_dir)
+        return changed
+
+
 def _load_doc_index(docs_dir: Path) -> list[dict[str, Any]]:
     try:
         from mantisfetch_common import doc_index_store as dis
