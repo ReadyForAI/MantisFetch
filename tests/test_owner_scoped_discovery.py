@@ -338,6 +338,12 @@ def test_backfill_copies_provenance_and_writes_shared_false(tmp_path, monkeypatc
     assert stats["index"] == 1
     rewritten = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
     assert rewritten["shared"] is False
+    original = doc_dir / "source" / "manifest.json"
+    original.parent.mkdir()
+    original.write_text(json.dumps({"doc_id": "DOC-001", "filename": "not-a-library-manifest"}), encoding="utf-8")
+    before = original.read_bytes()
+    _backfill_ownership(_get_docs_dir())
+    assert original.read_bytes() == before
     row = dis.get_document(docs, "DOC-001")
     assert row is not None
     assert row["created_by"] == "human:alice"

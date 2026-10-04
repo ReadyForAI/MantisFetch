@@ -3651,20 +3651,6 @@ def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
     stats = {"manifests": 0, "index": 0, "errors": 0}
     if not docs_dir.exists():
         return stats
-    for manifest_path in docs_dir.rglob("manifest.json"):
-        if VISUAL_DEBUG_ARTIFACT_DIR.split("/")[0] in manifest_path.parts:
-            continue
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if not isinstance(manifest, dict) or not isinstance(manifest.get("doc_id"), str):
-                continue
-            if "shared" in manifest:
-                continue
-            manifest["shared"] = False
-            _write_json(manifest_path, manifest)
-            stats["manifests"] += 1
-        except (OSError, ValueError):
-            stats["errors"] += 1
     updates: dict[str, dict[str, Any]] = {}
     for entry in _load_doc_index(docs_dir):
         doc_id = entry.get("id")
@@ -3681,6 +3667,13 @@ def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
             if not isinstance(manifest, dict):
                 stats["errors"] += 1
                 continue
+            # Only this document's manifest. A stored original can itself be a
+            # JSON file named manifest.json; rewriting that would change the
+            # bytes the library claims to hold.
+            if "shared" not in manifest:
+                manifest["shared"] = False
+                _write_json(doc_dir / "manifest.json", manifest)
+                stats["manifests"] += 1
             provenance = (
                 manifest.get("provenance") if isinstance(manifest.get("provenance"), dict) else {}
             )
