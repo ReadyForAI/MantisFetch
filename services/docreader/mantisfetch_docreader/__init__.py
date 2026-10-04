@@ -3657,32 +3657,36 @@ def _backfill_ownership(docs_dir: Path) -> dict[str, int]:
         if not isinstance(doc_id, str):
             continue
         fields: dict[str, Any] = {}
-        if "created_by" not in entry or "created_via" not in entry or "shared" not in entry:
-            try:
-                doc_dir = _resolve_doc_dir(docs_dir, doc_id, entry=entry)
-                manifest = json.loads((doc_dir / "manifest.json").read_text(encoding="utf-8"))
-            except (HTTPException, OSError, ValueError):
-                stats["errors"] += 1
-                continue
+        try:
+            doc_dir = _resolve_doc_dir(docs_dir, doc_id, entry=entry)
+            manifest_path = doc_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if not isinstance(manifest, dict):
-                stats["errors"] += 1
-                continue
+                raise ValueError("manifest is not an object")
             # Only this document's manifest. A stored original can itself be a
             # JSON file named manifest.json; rewriting that would change the
             # bytes the library claims to hold.
             if "shared" not in manifest:
                 manifest["shared"] = False
-                _write_json(doc_dir / "manifest.json", manifest)
+                _write_json(manifest_path, manifest)
                 stats["manifests"] += 1
-            provenance = (
-                manifest.get("provenance") if isinstance(manifest.get("provenance"), dict) else {}
-            )
-            if "created_by" not in entry:
-                fields["created_by"] = provenance.get("created_by")
-            if "created_via" not in entry:
-                fields["created_via"] = provenance.get("created_via")
-            if "shared" not in entry:
-                fields["shared"] = manifest.get("shared") is True
+        except (HTTPException, OSError, ValueError):
+            # One unreadable or unwritable document must not drop the rest.
+            stats["errors"] += 1
+            continue
+        provenance = (
+            manifest.get("provenance") if isinstance(manifest.get("provenance"), dict) else {}
+        )
+        if "created_by" not in entry:
+            fields["created_by"] = provenance.get("created_by")
+        if "created_via" not in entry:
+            fields["created_via"] = provenance.get("created_via")
+        recorded_shared = manifest.get("shared") is True
+        # A share that was written to the manifest and then killed before the
+        # index commit still says so here. Copy it across, including when the
+        # index row already has a stale false.
+        if "shared" not in entry or entry.get("shared") is not recorded_shared:
+            fields["shared"] = recorded_shared
         if fields:
             updates[doc_id] = fields
     if updates:
