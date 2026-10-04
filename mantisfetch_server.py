@@ -94,12 +94,30 @@ def _warn_legacy_env() -> None:
         )
 
 
+def _require_owner_scope_token() -> None:
+    """Refuse to boot a filtered library that would trust an unauthenticated identity.
+
+    SharedSpecs IRP 20261003 D2: with the switch on, the caller header is
+    what discovery filters on, so a missing token would let any local
+    process claim any ``human:`` identity. Health checks are unaffected
+    because the process never reaches them.
+    """
+    from mantisfetch_common.actor import owner_scoped_discovery_enabled
+
+    if owner_scoped_discovery_enabled() and not os.environ.get("MANTISFETCH_MCP_TOKEN"):
+        raise RuntimeError(
+            "MANTISFETCH_OWNER_SCOPED_DISCOVERY is on but MANTISFETCH_MCP_TOKEN "
+            "is unset; refusing to start"
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Start sub-application lifespans (browser Playwright init, docreader startup
     tasks) plus the MCP server's streamable-HTTP session manager."""
     _warn_legacy_env()
     _warn_unconfigured_llm()
+    _require_owner_scope_token()
     async with browser_app.router.lifespan_context(browser_app):
         async with doc_app.router.lifespan_context(doc_app):
             async with mcp.session_manager.run():
@@ -211,6 +229,13 @@ class _RestAuthGate:
             # under any Host — a same-host reverse proxy forwarding under its
             # own name is exactly this.
             return None
+        # Owner-scoped discovery makes the self-asserted actor header a
+        # filter key, so loopback is no longer a basis for trust (IRP
+        # 20261003 D2). Health paths never reach this method.
+        from mantisfetch_common.actor import owner_scoped_discovery_enabled
+
+        if owner_scoped_discovery_enabled():
+            return 401, b'{"error":"unauthorized"}'
         if peer in self._LOOPBACK:
             # Only the token-less path is checked: it is the one that trusts
             # by location. Checking Host on the bearer path would break every

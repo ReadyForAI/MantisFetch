@@ -2307,6 +2307,7 @@ def _persist_web_capture(
             "source": "web_capture",
             "content_type": normalized_content_type,
             "storage_path": storage_path,
+            "shared": False,
             "tags": list(tags) if tags else [],
             "metadata": dict(metadata) if metadata else {},
             # How much there actually is to read. A page that answers 200 and
@@ -2408,6 +2409,9 @@ def _persist_web_capture(
                     "tags": tags,
                     "created_at": now_str,
                     "content_hash": content_hash,
+                    "created_by": actor[0] if actor else None,
+                    "created_via": actor[1] if actor else None,
+                    "shared": False,
                     "extract_tables": extract_tables,
                     "requested_url": requested_url or url,
                     "lang": lang,

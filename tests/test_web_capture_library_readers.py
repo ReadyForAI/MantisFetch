@@ -346,7 +346,7 @@ def test_mcp_doc_search_text_calls_the_right_endpoint(monkeypatch) -> None:
 
     seen: dict = {}
 
-    async def fake_get(path: str, params: dict | None = None):
+    async def fake_get(path: str, params: dict | None = None, headers: dict | None = None):
         seen["path"] = path
         seen["params"] = params
         return {"results": [], "total": 0}
@@ -367,7 +367,7 @@ def test_mcp_doc_search_text_passes_tags_through(monkeypatch) -> None:
 
     seen: dict = {}
 
-    async def fake_get(path: str, params: dict | None = None):
+    async def fake_get(path: str, params: dict | None = None, headers: dict | None = None):
         seen.update(params or {})
         return {"results": [], "total": 0}
 

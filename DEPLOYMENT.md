@@ -30,6 +30,31 @@ So a same-host client configured with the *wrong* token sees REST succeed and
 MCP answer 401. Send the bearer on every call — it is the only configuration
 that is correct on both faces.
 
+## Owner-scoped discovery
+
+`MANTISFETCH_OWNER_SCOPED_DISCOVERY` (default off) is for a MantisFetch
+instance used only by one council deployment (SharedSpecs IRP
+20261003-council-topic-materials). Leave it unset on a standard instance.
+
+When it is on:
+
+- The process **refuses to start** unless `MANTISFETCH_MCP_TOKEN` is set.
+  `/web`, `/doc` and `/deliverables` then require that bearer from every
+  peer, loopback included. `/health`, `/metrics`, `/web/health` and
+  `/doc/health` stay open.
+- The token is held only by that deployment's NodalOS and AULO. AULO must
+  set `mantisfetch.token` to the same value.
+- `GET /doc/library/search` and `GET /doc/library/search_text` (and the MCP
+  tools `doc_search` / `doc_search_text`) return a document only when it is
+  a web capture, or `shared` is true, or its `created_by` is exactly the
+  caller's `human:<sub>` header. A caller without a `human:` identity sees
+  shared documents and web captures. Reads that name a `doc_id` are not
+  filtered.
+- An upload with no explicit `doc_id` is stored under `R-<hex>`.
+  `id_strategy=source_filename` is rejected. `replace=true` is allowed only
+  for the recorded owner. `PUT /doc/library/{doc_id}/shared` changes the
+  flag and is not an MCP tool.
+
 **The token-less loopback allowance is bound to loopback names.** A loopback
 socket is not proof the caller is a local application: a page open in a local
 browser can reach this port through DNS rebinding, arriving from `127.0.0.1`

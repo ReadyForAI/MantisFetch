@@ -258,8 +258,12 @@ async def _web_post(
     return _unwrap(await _web_client.post(path, json=payload, headers=headers))
 
 
-async def _doc_get(path: str, params: dict[str, Any] | None = None) -> Any:
-    return _unwrap(await _doc_client.get(path, params=params))
+async def _doc_get(
+    path: str,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    return _unwrap(await _doc_client.get(path, params=params, headers=headers))
 
 
 async def _doc_post(
@@ -1269,14 +1273,17 @@ async def doc_full(doc_id: str, offset: int = 0, limit: int | None = None) -> An
 
 
 @mcp.tool()
-async def doc_search(q: str, tags: str | None = None, limit: int = 20) -> Any:
+async def doc_search(
+    q: str, tags: str | None = None, limit: int = 20, ctx: Context | None = None
+) -> Any:
     """Search library METADATA — filename, digest, tags, custom metadata. It does
     NOT look inside document bodies: a term that only appears in the text will
-    not match here. Use doc_search_text for that."""
+    not match here. Use doc_search_text for that. The caller's identity headers
+    are forwarded so owner-scoped discovery can filter."""
     params: dict[str, Any] = {"q": q, "limit": limit}
     if tags:
         params["tags"] = tags
-    return await _doc_get("/library/search", params=params)
+    return await _doc_get("/library/search", params=params, headers=_actor_headers(ctx))
 
 
 @mcp.tool()
@@ -1286,6 +1293,7 @@ async def doc_search_text(
     doc_id: str | None = None,
     scope: _SearchTextScope = "all",
     limit: int = 20,
+    ctx: Context | None = None,
 ) -> Any:
     """Full-text search across the library's document bodies; returns doc_id +
     sid + a snippet around each hit. This is the one that finds a term occurring
@@ -1299,7 +1307,9 @@ async def doc_search_text(
         params["tags"] = tags
     if doc_id:
         params["doc_id"] = doc_id
-    return await _doc_get("/library/search_text", params=params)
+    return await _doc_get(
+        "/library/search_text", params=params, headers=_actor_headers(ctx)
+    )
 
 
 @mcp.tool()
