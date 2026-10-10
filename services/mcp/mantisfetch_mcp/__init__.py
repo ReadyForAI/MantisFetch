@@ -488,14 +488,18 @@ def _resolve_local_doc(rel_path: str, *, max_bytes: int | None = None) -> tuple[
             # grows after the fstat cannot either.
             if st.st_size > cap:
                 raise ToolError(f"document too large: {st.st_size} bytes (max {cap})")
-            # In chunks: read(cap + 1) allocates the whole allowance up front,
-            # for an 11-byte file as much as for one at the limit.
-            chunks: list[bytes] = []
-            total = 0
-            while chunk := fh.read(min(1 << 20, cap + 1 - total)):
-                chunks.append(chunk)
-                total += len(chunk)
-            data = b"".join(chunks)
+            # One read sized to the file: a single allocation, where chunks plus
+            # their join held two copies at once — 400 MB at the 200 MB cap. Not
+            # read(cap + 1), which allocates the whole allowance for any file.
+            data = fh.read(st.st_size + 1)
+            if len(data) > st.st_size:
+                # Grew after the fstat: read on in chunks, still bounded by the cap.
+                chunks = [data]
+                total = len(data)
+                while total <= cap and (chunk := fh.read(min(1 << 20, cap + 1 - total))):
+                    chunks.append(chunk)
+                    total += len(chunk)
+                data = b"".join(chunks)
         if len(data) > cap:
             raise ToolError(f"document too large: over {cap} bytes (max {cap})")
         return candidate.name, data
