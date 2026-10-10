@@ -283,6 +283,15 @@ def test_gate_requires_bearer_including_loopback(client: TestClient, monkeypatch
     assert allowed.status_code == 200
 
 
+def test_root_health_reports_the_switch_without_a_bearer(client: TestClient, monkeypatch) -> None:
+    """AULO reads this unauthenticated and only enables uploads on a literal true."""
+    assert client.get("/health").json()["owner_scoped_discovery"] is False
+    _on(monkeypatch)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["owner_scoped_discovery"] is True
+
+
 def test_startup_refuses_the_switch_without_a_token(monkeypatch) -> None:
     from mantisfetch_server import _require_owner_scope_token
 

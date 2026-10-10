@@ -151,6 +151,8 @@ def _llm_role_status() -> dict[str, str]:
 @app.get("/health")
 async def health() -> dict:
     """Return aggregated health status for all mounted services."""
+    from mantisfetch_common.actor import owner_scoped_discovery_enabled
+
     return {
         "ok": True,
         "version": __version__,
@@ -163,6 +165,10 @@ async def health() -> dict:
         # difference between "summaries are off" and "summaries are broken" —
         # and it names the key to set.
         "llm": _llm_role_status(),
+        # Whether discovery is filtered by uploader, as the process applies it
+        # right now. AULO only offers topic-material uploads when this is true
+        # (SharedSpecs IRP 20261003, discussion/11).
+        "owner_scoped_discovery": owner_scoped_discovery_enabled(),
     }
 
 
