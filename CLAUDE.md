@@ -157,3 +157,15 @@ pyright mantisfetch_*.py
 1. Read relevant SKILL files in `skills/` to understand API contracts
 2. Check `docs/mantisfetch_opensource_design.md` for feature boundaries (open-source vs commercial)
 3. Run `ruff check .` and `pytest tests/ -v` before committing
+
+## 对外特性登记（public-features.yaml）
+
+官网（ReadyForAI website）通过本仓根目录 `public-features.yaml` 发现新能力、撤回已下线能力。规则全文见 SharedSpecs `notice/public-features-ledger-20261011/notice.md`，格式见 `schemas/public_features_v1.json`。
+
+- **同 PR 登记**：合入后外部用户/运维可感知的变化，在**同一个 PR** 里新增或更新一条。包括：HTTP API / MCP tool 的新增、变更、移除；新的集成、搜索或 LLM 服务商支持；默认行为或开关变化；对外口径里的数字变化（MCP 工具数、支持格式等）；部署形态变化（镜像变体、PyPI 包）；下线或改名。纯重构、内部存储结构、测试/CI、依赖升级、普通 bugfix 不登记。
+- **只写事实**：`fact` 写做什么、边界、默认值、依赖，不写营销话术。本仓开源，本文件随仓公开，只写已公开的事实。
+- **可见度由本仓提议**：`public` 可上官网 / `ask` 需 Seer 拍板 / `internal` 存在但不对外。拿不准填 `ask`。
+- **不删条目**：下线改 `status: removed`；改名新增一条并用 `supersedes` 指向旧 id。
+- **日期加引号**（`since: "2026-10-11"`），`evidence` 只写版本库里存在的路径或 PR 链接。
+- **提交前校验**（在仓根目录执行；SharedSpecs #922 合入前 SS main 上还没有这个 schema，从 PR 分支 `notice/public-features-ledger-20261011` 取）：
+  `.venv/bin/python -c 'import json,sys,yaml,jsonschema; jsonschema.validate(yaml.safe_load(open("public-features.yaml")), json.load(open(sys.argv[1])), format_checker=jsonschema.FormatChecker()); print("public-features.yaml OK")' /Users/seer/Products/SharedSpecs/schemas/public_features_v1.json`
