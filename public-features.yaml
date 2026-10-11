@@ -21,7 +21,7 @@ features:
       - "再次提炼不会自动只返回变化部分：返回的仍是完整章节列表，差异只作为元数据给出"
 
   - id: web-capture-to-library
-    fact: "把网页抓取进文档库，与上传文档共用同一套索引和读取方式（digest / brief / section）；同一 URL 在有效期内重复抓取直接复用，内容相同按哈希去重；抓取结果标明抓到多少正文与表格字符（body_chars / table_chars）"
+    fact: "把网页抓取进文档库，与上传文档共用同一套索引和读取方式（digest / brief / section）；正文相同的页面按内容哈希复用已有文档（始终开启）；按 URL 复用在「搜索并抓取」上默认 24 小时，单独抓取默认关闭（MANTISFETCH_CAPTURE_TTL_HOURS 开启）；抓取结果标明抓到多少正文与表格字符（body_chars / table_chars）"
     visibility: public
     status: shipped
     since: "2026-03-23"
