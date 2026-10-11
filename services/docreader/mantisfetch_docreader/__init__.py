@@ -5381,6 +5381,294 @@ async def _reserve_doc_id(
     return d_id, d_id_lock
 
 
+async def _precheck_upload(
+    scratch_path: Path | None,
+    *,
+    filename: str,
+    suffix: str,
+    budget_seconds: float | None,
+    parse_mode: str | None,
+    metadata: str | None,
+    document_profile: str | None,
+    field_ocr_config: str | None,
+    force_ocr: bool,
+    ocr_pages: str | None,
+    concurrency: int,
+    extract_images: bool,
+    ocr_images: bool,
+    max_images: int,
+    max_ocr_images: int,
+) -> dict[str, Any] | None:
+    """Every refusal that is a property of the upload, raised before a doc_id exists.
+
+    A 422 for an OOXML file that is not a zip or is over its unzip/row/cell
+    budget, a PDF with no header, a document estimated over ``budget_seconds``,
+    and a .docx asking to OCR more images than allowed. Returns the parse
+    estimate (None without a budget) for the slot wait to reserve.
+    """
+    # The OOXML formats are zips. A file that is not one cannot be read as
+    # one, and nothing downstream will say so: MarkItDown falls back to
+    # reading the bytes as plain text, so 40 bytes of junk named .docx came
+    # back 200 with a one-section document holding the junk. The unzip
+    # budget check already spots this and returns, deferring to "a clearer
+    # parse error" that never arrives.
+    #
+    # is_zipfile reads the end-of-central-directory record only, so a
+    # truncated archive fails here too. Legacy .doc/.ppt/.xls are OLE2, not
+    # zips, and are not checked.
+    if suffix in _OOXML_SUFFIXES and scratch_path is not None:
+        if not await asyncio.to_thread(zipfile.is_zipfile, scratch_path):
+            raise HTTPException(
+                422,
+                f"{filename} is not a valid {suffix.lstrip('.')} file (not a zip archive)",
+            )
+        # And budgets that have to hold before anything expands it: every
+        # OOXML entry within the unzip budget, and a workbook within the row
+        # limit. Ahead of the doc_id, because both are properties of the
+        # upload — over either is a refused request, not a failed parse.
+        await asyncio.to_thread(_check_ooxml_unzip_budget, scratch_path)
+        if suffix == ".xlsx":
+            await asyncio.to_thread(
+                _check_xlsx_row_budget, scratch_path, MAX_PARSE_ROWS, filename,
+                MAX_PARSE_CELLS,
+            )
+
+    # The same refusal for a PDF, so all three land the same way: no id, no
+    # directory, no failure record. Without it a binary blob renamed .pdf
+    # still reserved DOC-0xx and left a .parse-failed.json behind, because
+    # by then a parse had been attempted and #209 keeps a record of one.
+    #
+    # The bound is PyMuPDF's own. It does not require the header at any
+    # offset — measured, it opens a file with a megabyte of junk in front of
+    # %PDF- — and it raises FileDataError whenever %PDF- is absent
+    # altogether. So "the marker appears somewhere" is exactly as permissive
+    # as the parser, and no file this refuses is one it could have read. A
+    # PDF whose header is there but whose body is broken still reaches the
+    # parser, and still leaves the record that says a parse was tried.
+    if suffix == ".pdf" and scratch_path is not None:
+        if not await asyncio.to_thread(_contains_bytes, scratch_path, b"%PDF-"):
+            raise HTTPException(422, f"{filename} is not a valid pdf file (no %PDF- header)")
+
+    # Refuse a document this call cannot afford, before it costs anything.
+    # The estimate is cheap and runs before the doc_id is minted, so a
+    # refusal burns no id and leaves no directory. It has to sit inside this
+    # try: its finally is what removes the staged upload, and raising above
+    # it would strand a file of up to MAX_UPLOAD_BYTES in .upload-tmp on
+    # every refusal.
+    #
+    # No budget means no refusal. A caller that did not ask for one is either
+    # a background ingest with time to spare (the REST leg exists to absorb
+    # exactly the documents this would reject) or predates the field; giving
+    # them a default would refuse the very work the background path is for.
+    # The MCP tool, which has a client timeout it cannot see, sends its own.
+    # Hoisted: the slot wait below reserves the estimated parse time out of
+    # the same budget, so the answer lands inside the window the caller declared.
+    estimate: dict[str, Any] | None = None
+    if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
+        # The mode decides whether pages go to the LLM at all, and the profile
+        # can add region OCR on top; both can arrive through the metadata blob
+        # or the environment rather than the form. Resolve them the way the
+        # handler will — and if they cannot be resolved, skip the estimate
+        # rather than estimating a plan we do not know. A mode of None reads
+        # as "not full" downstream and would produce a confident number for
+        # the wrong plan.
+        effective_mode, effective_profile = _effective_parse_plan(
+            parse_mode, metadata, document_profile, field_ocr_config
+        )
+        # In a thread: it opens the PDF and inspects every page, which on a
+        # long document is real time the event loop would otherwise spend
+        # not serving anyone else.
+        estimate = (
+            await asyncio.to_thread(
+                _estimate_parse_seconds,
+                scratch_path,
+                suffix,
+                force_ocr=force_ocr,
+                ocr_pages_spec=ocr_pages,
+                parse_mode=effective_mode,
+                concurrency=concurrency,
+                profile=effective_profile,
+            )
+            if effective_mode is not None
+            else None
+        )
+        if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
+            raise HTTPException(
+                422,
+                {
+                    "error": "parse_budget_exceeded",
+                    "message": (
+                        f"parsing this document is estimated at "
+                        f"{estimate['estimated_seconds']}s, over the "
+                        f"{budget_seconds}s budget this call declared. It was not "
+                        f"started. Ingest it through a path that can wait for it."
+                    ),
+                    **estimate,
+                    "budget_seconds": budget_seconds,
+                },
+            )
+
+    # Pre-validate the Word OCR image limit for .docx so the 422 fires
+    # before _resolve_doc_id advances .counter (issue #67). The check
+    # reads two XML files from the docx zip (~50ms) and only runs when
+    # OCR was actually requested. .doc files skip this — converting them
+    # to .docx for the count would cost 1-5s of LibreOffice startup, so
+    # their (rare) counter gap is accepted.
+    if suffix == ".docx" and extract_images and ocr_images and scratch_path is not None:
+        # Mirror the 0..1000 clamp the in-lock path applies, so requests
+        # with max_images=2000 don't get a 422 here that the lock would
+        # let through after clamping (max_images -> 1000).
+        early_max_images = max(0, min(int(max_images), 1000))
+        early_max_ocr_images = max(0, min(int(max_ocr_images), 1000))
+        early_embedded = _count_word_embedded_image_references(scratch_path)
+        early_requested = min(early_embedded, early_max_images)
+        if early_requested > early_max_ocr_images:
+            raise HTTPException(
+                422,
+                (
+                    "word embedded image OCR refused: "
+                    f"{early_requested} requested images exceeds "
+                    f"max_ocr_images={early_max_ocr_images} "
+                    f"(embedded_image_count={early_embedded}, max_images={early_max_images}). "
+                    "Retry with ocr_images=false, a higher max_ocr_images value, "
+                    "or a lower max_images value."
+                ),
+            )
+    return estimate
+
+
+async def _parse_by_suffix(
+    tmp_path: Path,
+    suffix: str,
+    *,
+    doc_storage_dir: Path,
+    parsed_metadata: dict[str, Any],
+    profile: DocumentProfile | None,
+    requested_parse_mode: str | None,
+    field_ocr_profile: str | None,
+    requested_field_ocr_config: str | None,
+    manual_blank_pages_spec: str | None,
+    force_ocr: bool,
+    ocr_pages: str | None,
+    extract_tables: bool,
+    max_tables_per_page: int,
+    concurrency: int,
+    extract_images: bool,
+    ocr_images: bool,
+    max_images: int,
+    max_ocr_images: int,
+    selected_image_ocr_backend: str,
+) -> ParsedDocument:
+    """Run the parser for ``suffix`` on the staged upload, off the event loop.
+
+    Records the Word image inventory into ``parsed_metadata`` in place. Raises
+    what the parser raises; the caller records the failure.
+    """
+    loop = asyncio.get_event_loop()
+    if suffix == ".pdf":
+
+        def _prewarm_then_parse() -> ParsedDocument:
+            # In the executor, with the parse: planning reads the
+            # PDF, and the worker lock is held by whichever thread
+            # is OCRing a page — up to the request timeout. Taken on
+            # the event loop, a second scanned PDF stalled every
+            # request on the process, /health included, until the
+            # first one's page finished.
+            if PREWARM_LOCAL_OCR:
+                _prewarm_local_ocr_for_pdf(
+                    tmp_path,
+                    profile=profile,
+                    parse_mode=requested_parse_mode,
+                    force_ocr=force_ocr,
+                    ocr_pages_spec=ocr_pages,
+                    manual_blank_pages_spec=manual_blank_pages_spec,
+                )
+            return parse_pdf(
+                tmp_path,
+                force_ocr=force_ocr,
+                ocr_threshold=OCR_THRESHOLD,
+                ocr_pages_spec=ocr_pages,
+                extract_tables=extract_tables,
+                max_tables_per_page=max_tables_per_page,
+                concurrency=concurrency,
+                cache_dir=doc_storage_dir,
+                field_ocr_profile=field_ocr_profile,
+                field_ocr_config=requested_field_ocr_config,
+                parse_mode=requested_parse_mode,
+                manual_blank_pages_spec=manual_blank_pages_spec,
+            )
+
+        parsed = await loop.run_in_executor(None, _prewarm_then_parse)
+    elif suffix in (".doc", ".docx"):
+        # LibreOffice conversion shells out and can take seconds —
+        # run it off the event loop.
+        word_path = (
+            await loop.run_in_executor(None, _convert_legacy_office, tmp_path, "docx")
+            if suffix == ".doc"
+            else tmp_path
+        )
+        if extract_images:
+            embedded_image_count = _count_word_embedded_image_references(word_path)
+            requested_ocr_image_count = min(embedded_image_count, max_images)
+            parsed_metadata.setdefault("embedded_image_count", embedded_image_count)
+            parsed_metadata.setdefault(
+                "requested_image_count", requested_ocr_image_count
+            )
+            parsed_metadata.setdefault(
+                "image_inventory_truncated",
+                bool(embedded_image_count > requested_ocr_image_count),
+            )
+            if ocr_images:
+                parsed_metadata.setdefault(
+                    "requested_ocr_image_count", requested_ocr_image_count
+                )
+            if ocr_images and requested_ocr_image_count > max_ocr_images:
+                raise HTTPException(
+                    422,
+                    (
+                        "word embedded image OCR refused: "
+                        f"{requested_ocr_image_count} requested images exceeds "
+                        f"max_ocr_images={max_ocr_images} "
+                        f"(embedded_image_count={embedded_image_count}, max_images={max_images}). "
+                        "Retry with ocr_images=false, a higher max_ocr_images value, "
+                        "or a lower max_images value."
+                    ),
+                )
+        parsed = await loop.run_in_executor(
+            None,
+            lambda: parse_word(
+                word_path,
+                extract_tables=extract_tables,
+                profile=profile,
+                extract_images=extract_images,
+                ocr_images=ocr_images,
+                image_ocr_backend=selected_image_ocr_backend,
+                max_images=max_images,
+            ),
+        )
+    elif suffix in (".xlsx", ".xls"):
+        parsed = await loop.run_in_executor(None, lambda: parse_xlsx(tmp_path))
+    elif suffix == ".csv":
+        parsed = await loop.run_in_executor(None, lambda: parse_csv(tmp_path))
+    elif suffix == ".ppt":
+        parsed = await loop.run_in_executor(
+            None,
+            lambda: parse_generic(
+                _convert_legacy_office(tmp_path, "pptx"),
+                profile=profile,
+                extract_tables=extract_tables,
+            ),
+        )
+    else:  # .pptx, .html, .htm, etc.
+        parsed = await loop.run_in_executor(
+            None,
+            lambda: parse_generic(
+                tmp_path, profile=profile, extract_tables=extract_tables
+            ),
+        )
+    return parsed
+
+
 @app.post("/parse", response_model=ParseResponse)
 @_survives_client_disconnect
 async def api_parse_doc(
@@ -5607,134 +5895,25 @@ async def api_parse_doc(
                 shared=shared,
             )
 
-        # The OOXML formats are zips. A file that is not one cannot be read as
-        # one, and nothing downstream will say so: MarkItDown falls back to
-        # reading the bytes as plain text, so 40 bytes of junk named .docx came
-        # back 200 with a one-section document holding the junk. The unzip
-        # budget check already spots this and returns, deferring to "a clearer
-        # parse error" that never arrives.
-        #
-        # is_zipfile reads the end-of-central-directory record only, so a
-        # truncated archive fails here too. Legacy .doc/.ppt/.xls are OLE2, not
-        # zips, and are not checked.
-        if suffix in _OOXML_SUFFIXES and scratch_path is not None:
-            if not await asyncio.to_thread(zipfile.is_zipfile, scratch_path):
-                raise HTTPException(
-                    422,
-                    f"{filename} is not a valid {suffix.lstrip('.')} file (not a zip archive)",
-                )
-            # And budgets that have to hold before anything expands it: every
-            # OOXML entry within the unzip budget, and a workbook within the row
-            # limit. Ahead of the doc_id, because both are properties of the
-            # upload — over either is a refused request, not a failed parse.
-            await asyncio.to_thread(_check_ooxml_unzip_budget, scratch_path)
-            if suffix == ".xlsx":
-                await asyncio.to_thread(
-                    _check_xlsx_row_budget, scratch_path, MAX_PARSE_ROWS, filename,
-                    MAX_PARSE_CELLS,
-                )
-
-        # The same refusal for a PDF, so all three land the same way: no id, no
-        # directory, no failure record. Without it a binary blob renamed .pdf
-        # still reserved DOC-0xx and left a .parse-failed.json behind, because
-        # by then a parse had been attempted and #209 keeps a record of one.
-        #
-        # The bound is PyMuPDF's own. It does not require the header at any
-        # offset — measured, it opens a file with a megabyte of junk in front of
-        # %PDF- — and it raises FileDataError whenever %PDF- is absent
-        # altogether. So "the marker appears somewhere" is exactly as permissive
-        # as the parser, and no file this refuses is one it could have read. A
-        # PDF whose header is there but whose body is broken still reaches the
-        # parser, and still leaves the record that says a parse was tried.
-        if suffix == ".pdf" and scratch_path is not None:
-            if not await asyncio.to_thread(_contains_bytes, scratch_path, b"%PDF-"):
-                raise HTTPException(422, f"{filename} is not a valid pdf file (no %PDF- header)")
-
-        # Refuse a document this call cannot afford, before it costs anything.
-        # The estimate is cheap and runs before the doc_id is minted, so a
-        # refusal burns no id and leaves no directory. It has to sit inside this
-        # try: its finally is what removes the staged upload, and raising above
-        # it would strand a file of up to MAX_UPLOAD_BYTES in .upload-tmp on
-        # every refusal.
-        #
-        # No budget means no refusal. A caller that did not ask for one is either
-        # a background ingest with time to spare (the REST leg exists to absorb
-        # exactly the documents this would reject) or predates the field; giving
-        # them a default would refuse the very work the background path is for.
-        # The MCP tool, which has a client timeout it cannot see, sends its own.
-        # Hoisted: the slot wait below reserves the estimated parse time out of
-        # the same budget, so the answer lands inside the window the caller declared.
-        estimate: dict[str, Any] | None = None
-        if budget_seconds is not None and budget_seconds > 0 and scratch_path is not None:
-            # The mode decides whether pages go to the LLM at all, and the profile
-            # can add region OCR on top; both can arrive through the metadata blob
-            # or the environment rather than the form. Resolve them the way the
-            # handler will — and if they cannot be resolved, skip the estimate
-            # rather than estimating a plan we do not know. A mode of None reads
-            # as "not full" downstream and would produce a confident number for
-            # the wrong plan.
-            effective_mode, effective_profile = _effective_parse_plan(
-                parse_mode, metadata, document_profile, field_ocr_config
-            )
-            # In a thread: it opens the PDF and inspects every page, which on a
-            # long document is real time the event loop would otherwise spend
-            # not serving anyone else.
-            estimate = (
-                await asyncio.to_thread(
-                    _estimate_parse_seconds,
-                    scratch_path,
-                    suffix,
-                    force_ocr=force_ocr,
-                    ocr_pages_spec=ocr_pages,
-                    parse_mode=effective_mode,
-                    concurrency=concurrency,
-                    profile=effective_profile,
-                )
-                if effective_mode is not None
-                else None
-            )
-            if estimate is not None and estimate["estimated_seconds"] > budget_seconds:
-                raise HTTPException(
-                    422,
-                    {
-                        "error": "parse_budget_exceeded",
-                        "message": (
-                            f"parsing this document is estimated at "
-                            f"{estimate['estimated_seconds']}s, over the "
-                            f"{budget_seconds}s budget this call declared. It was not "
-                            f"started. Ingest it through a path that can wait for it."
-                        ),
-                        **estimate,
-                        "budget_seconds": budget_seconds,
-                    },
-                )
-
-        # Pre-validate the Word OCR image limit for .docx so the 422 fires
-        # before _resolve_doc_id advances .counter (issue #67). The check
-        # reads two XML files from the docx zip (~50ms) and only runs when
-        # OCR was actually requested. .doc files skip this — converting them
-        # to .docx for the count would cost 1-5s of LibreOffice startup, so
-        # their (rare) counter gap is accepted.
-        if suffix == ".docx" and extract_images and ocr_images and scratch_path is not None:
-            # Mirror the 0..1000 clamp the in-lock path applies, so requests
-            # with max_images=2000 don't get a 422 here that the lock would
-            # let through after clamping (max_images -> 1000).
-            early_max_images = max(0, min(int(max_images), 1000))
-            early_max_ocr_images = max(0, min(int(max_ocr_images), 1000))
-            early_embedded = _count_word_embedded_image_references(scratch_path)
-            early_requested = min(early_embedded, early_max_images)
-            if early_requested > early_max_ocr_images:
-                raise HTTPException(
-                    422,
-                    (
-                        "word embedded image OCR refused: "
-                        f"{early_requested} requested images exceeds "
-                        f"max_ocr_images={early_max_ocr_images} "
-                        f"(embedded_image_count={early_embedded}, max_images={early_max_images}). "
-                        "Retry with ocr_images=false, a higher max_ocr_images value, "
-                        "or a lower max_images value."
-                    ),
-                )
+        # Inside this try: its finally removes the staged upload, so a refusal
+        # does not strand up to MAX_UPLOAD_BYTES in .upload-tmp.
+        estimate = await _precheck_upload(
+            scratch_path,
+            filename=filename,
+            suffix=suffix,
+            budget_seconds=budget_seconds,
+            parse_mode=parse_mode,
+            metadata=metadata,
+            document_profile=document_profile,
+            field_ocr_config=field_ocr_config,
+            force_ocr=force_ocr,
+            ocr_pages=ocr_pages,
+            concurrency=concurrency,
+            extract_images=extract_images,
+            ocr_images=ocr_images,
+            max_images=max_images,
+            max_ocr_images=max_ocr_images,
+        )
         d_id, d_id_lock = await _reserve_doc_id(docs_dir, filename, doc_id, id_strategy)
 
         # Lock outside _parse_sem so waiters don't burn a parse slot — otherwise
@@ -5895,107 +6074,27 @@ async def api_parse_doc(
             # Parse
             try:
                 loop = asyncio.get_event_loop()
-                if suffix == ".pdf":
-
-                    def _prewarm_then_parse() -> ParsedDocument:
-                        # In the executor, with the parse: planning reads the
-                        # PDF, and the worker lock is held by whichever thread
-                        # is OCRing a page — up to the request timeout. Taken on
-                        # the event loop, a second scanned PDF stalled every
-                        # request on the process, /health included, until the
-                        # first one's page finished.
-                        if PREWARM_LOCAL_OCR:
-                            _prewarm_local_ocr_for_pdf(
-                                tmp_path,
-                                profile=profile,
-                                parse_mode=requested_parse_mode,
-                                force_ocr=force_ocr,
-                                ocr_pages_spec=ocr_pages,
-                                manual_blank_pages_spec=manual_blank_pages_spec,
-                            )
-                        return parse_pdf(
-                            tmp_path,
-                            force_ocr=force_ocr,
-                            ocr_threshold=OCR_THRESHOLD,
-                            ocr_pages_spec=ocr_pages,
-                            extract_tables=extract_tables,
-                            max_tables_per_page=max_tables_per_page,
-                            concurrency=concurrency,
-                            cache_dir=doc_storage_dir,
-                            field_ocr_profile=field_ocr_profile,
-                            field_ocr_config=requested_field_ocr_config,
-                            parse_mode=requested_parse_mode,
-                            manual_blank_pages_spec=manual_blank_pages_spec,
-                        )
-
-                    parsed = await loop.run_in_executor(None, _prewarm_then_parse)
-                elif suffix in (".doc", ".docx"):
-                    # LibreOffice conversion shells out and can take seconds —
-                    # run it off the event loop.
-                    word_path = (
-                        await loop.run_in_executor(None, _convert_legacy_office, tmp_path, "docx")
-                        if suffix == ".doc"
-                        else tmp_path
-                    )
-                    if extract_images:
-                        embedded_image_count = _count_word_embedded_image_references(word_path)
-                        requested_ocr_image_count = min(embedded_image_count, max_images)
-                        parsed_metadata.setdefault("embedded_image_count", embedded_image_count)
-                        parsed_metadata.setdefault(
-                            "requested_image_count", requested_ocr_image_count
-                        )
-                        parsed_metadata.setdefault(
-                            "image_inventory_truncated",
-                            bool(embedded_image_count > requested_ocr_image_count),
-                        )
-                        if ocr_images:
-                            parsed_metadata.setdefault(
-                                "requested_ocr_image_count", requested_ocr_image_count
-                            )
-                        if ocr_images and requested_ocr_image_count > max_ocr_images:
-                            raise HTTPException(
-                                422,
-                                (
-                                    "word embedded image OCR refused: "
-                                    f"{requested_ocr_image_count} requested images exceeds "
-                                    f"max_ocr_images={max_ocr_images} "
-                                    f"(embedded_image_count={embedded_image_count}, max_images={max_images}). "
-                                    "Retry with ocr_images=false, a higher max_ocr_images value, "
-                                    "or a lower max_images value."
-                                ),
-                            )
-                    parsed = await loop.run_in_executor(
-                        None,
-                        lambda: parse_word(
-                            word_path,
-                            extract_tables=extract_tables,
-                            profile=profile,
-                            extract_images=extract_images,
-                            ocr_images=ocr_images,
-                            image_ocr_backend=selected_image_ocr_backend,
-                            max_images=max_images,
-                        ),
-                    )
-                elif suffix in (".xlsx", ".xls"):
-                    parsed = await loop.run_in_executor(None, lambda: parse_xlsx(tmp_path))
-                elif suffix == ".csv":
-                    parsed = await loop.run_in_executor(None, lambda: parse_csv(tmp_path))
-                elif suffix == ".ppt":
-                    parsed = await loop.run_in_executor(
-                        None,
-                        lambda: parse_generic(
-                            _convert_legacy_office(tmp_path, "pptx"),
-                            profile=profile,
-                            extract_tables=extract_tables,
-                        ),
-                    )
-                else:  # .pptx, .html, .htm, etc.
-                    parsed = await loop.run_in_executor(
-                        None,
-                        lambda: parse_generic(
-                            tmp_path, profile=profile, extract_tables=extract_tables
-                        ),
-                    )
+                parsed = await _parse_by_suffix(
+                    tmp_path,
+                    suffix,
+                    doc_storage_dir=doc_storage_dir,
+                    parsed_metadata=parsed_metadata,
+                    profile=profile,
+                    requested_parse_mode=requested_parse_mode,
+                    field_ocr_profile=field_ocr_profile,
+                    requested_field_ocr_config=requested_field_ocr_config,
+                    manual_blank_pages_spec=manual_blank_pages_spec,
+                    force_ocr=force_ocr,
+                    ocr_pages=ocr_pages,
+                    extract_tables=extract_tables,
+                    max_tables_per_page=max_tables_per_page,
+                    concurrency=concurrency,
+                    extract_images=extract_images,
+                    ocr_images=ocr_images,
+                    max_images=max_images,
+                    max_ocr_images=max_ocr_images,
+                    selected_image_ocr_backend=selected_image_ocr_backend,
+                )
                 # Persist the source while tmp_path still exists; the finally
                 # below removes tmp_dir, and we no longer hold the bytes in
                 # memory after the streaming upload. A replacement moves the
