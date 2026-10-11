@@ -166,11 +166,14 @@ capture 正文，snippet 会原样带出页面文字。
 | `doc_tables` | 列出文档的表格（`table_id`、页码、行列数）——即 `doc_table` 要用的 id。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）。 | `doc_id`、`offset=0`、`limit?` |
 | `doc_chunks` | 面向下游 RAG 的检索友好分块。与 `doc_sections` 一样分页（`total`、`next_offset`、`truncated`）；带 `include_text` 时长文档要分几页。 | `doc_id`、`include_text=false`、`offset=0`、`limit?` |
 | `doc_manifest` | provenance manifest（来源、hash、时间戳）。`truncated` 恒在：若某文档的 manifest 放不进一次工具返回，它为 `true`，逐条列表（`sections`、`tables`、`images`、逐页质量明细）被省略并在 `omitted` 中列出，计数仍保留，放得下时 `table_ids` 列出可传给 `doc_table` 的表格 id。`doc_sections` 与 `doc_tables`（都分页）能列出全部。 | `doc_id` |
-| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、每窗按能放进一次工具返回来定大小（中文文本行数会少一些）、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 对它 `doc_full` / `doc_section` 都是 404。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
+| `doc_source` | `kind: "raw"` 文档（只存不解析的 md / 图片）的原件面。**不带 `offset`/`limit` 时只返元数据、不含正文。** 要读正文必须带 `offset`/`limit`（只给 `offset=0` 即从头读）：0 起行号、每窗按能放进一次工具返回来定大小（中文文本行数会少一些）、`next_offset` 续读。这是 raw 文档唯一的读取面 —— 所有解析层工具对它都返回 `404 raw_document`。图片永不返回字节；对图片要窗口是错误。 | `doc_id`、`offset?`、`limit?` |
 | `doc_summary` | 文档的三级生成摘要 / 状态。 | `doc_id` |
 
-manifest 里 `kind` 为 `"raw"` 的文档没有 digest / brief / sections / 全文 ——
-`doc_source` 是它唯一的读取面，`doc_search_text` 也看不到它。
+manifest 里 `kind` 为 `"raw"` 的文档没有 digest / brief / sections / 表格 / 全文 ——
+`doc_source` 是它唯一的读取面，`doc_search_text` 也看不到它。向解析层工具要这些，
+错误里是 `404` 加 `raw_document`（不是摘要还在生成时的 `digest_not_found`）：直接改用
+`doc_source`，不必再调 `doc_manifest`。`doc_sections` 和 `doc_tables` 返回
+`kind: "raw"` 与空列表。
 
 解析参数、OCR 策略、分类文档库布局、搜索过滤项见
 [文档解析 Skill](./mantisfetch-docreader-SKILL-cn.md)。`doc_table` 用 `fmt="json"` 返回结构化单元格，

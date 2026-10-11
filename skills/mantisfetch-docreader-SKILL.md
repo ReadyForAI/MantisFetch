@@ -531,8 +531,12 @@ model reads the original.
   `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`. Over that is a `413`.
 - **Requires** `MANTISFETCH_STORE_SOURCE_FILES=true`; without it the request is a
   `422` rather than a document with neither products nor an original.
-- **A raw document has no parse products.** `digest` / `brief` / `full` answer
-  `404`; `sections` answers `200` with `kind: "raw"` and an empty list (it is a
+- **A raw document has no parse products.** `digest` / `brief` / `full` /
+  `section/{sid}` / `table/{id}` (md and json) answer `404` with an object under
+  `detail`: `{"error": "raw_document", "doc_id", "kind": "raw", "message"}` — not
+  the message string a missing digest of a parsed document gives, so "never
+  parsed" cannot be mistaken for "summary still generating". Read it from
+  `source` instead (below). `sections` answers `200` with `kind: "raw"` and an empty list (it is a
   listing, and "none" is the true answer); `POST .../summary` answers `409` —
   there is nothing to summarize, and the retry path would rewrite the document
   as a parsed one. `search_text` does not see it. Its manifest, parse response,
@@ -724,6 +728,7 @@ Use for: scenarios where the Agent performs its own analysis without needing LLM
 | `409 doc_id already exists`                         | Explicit `doc_id` collides with an existing doc | Pass `replace=true` to overwrite, or omit `doc_id` for a fresh one         |
 | `422 <ext> is a parsed format; drop store_only`     | A parseable extension asked for the raw channel | Drop `store_only`; the extension decides the channel                      |
 | `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | The raw channel has nowhere to put the original | Turn source files on for this deployment                          |
+| `404` with `detail.error = "raw_document"`          | Asked a raw (`store_only`) document for a parse product — digest, brief, full, a section or a table | It has none and never will: read the original with `GET .../source/info?offset=0` (MCP `doc_source`) |
 | `409 summary already running` / `attempt limit reached` | Concurrent / repeated `POST .../summary` | Poll `GET .../summary` instead; pass `force=true` only if you must override |
 | `429 too many concurrent parse requests`           | The parse gate stayed full for the whole queue ceiling (default 600s) — the server is saturated, not merely busy | Wait the seconds in `Retry-After`, then retry. Ordinary bursts queue and succeed |
 | `429 parse queue is holding N bytes`               | Queued uploads are holding more disk than the queue may | Wait and retry; a queued parse keeps its upload staged, so this clears as the queue drains |

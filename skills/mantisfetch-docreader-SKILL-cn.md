@@ -529,8 +529,11 @@ Markdown 和图片在这里没有解析器，所以单开一条通道：`POST /d
   `MANTISFETCH_RAW_MAX_MD_MB` / `MANTISFETCH_RAW_MAX_IMAGE_MB`。超了是 `413`。
 - **要求** `MANTISFETCH_STORE_SOURCE_FILES=true`；否则返回 `422`，而不是存出一个
   既无产物又无原件的空文档。
-- **原件文档没有任何解析产物。** `digest` / `brief` / `full` 返回 `404`；
-  `sections` 返回 `200`，带 `kind: "raw"` 与空列表（它是列举端点，「没有」就是
+- **原件文档没有任何解析产物。** `digest` / `brief` / `full` /
+  `section/{sid}` / `table/{id}`（md 与 json）返回 `404`，`detail` 里是对象
+  `{"error": "raw_document", "doc_id", "kind": "raw", "message"}` —— 而不是解析文档
+  缺 digest 时的那条消息字符串，所以「从未解析」不会被误读成「摘要还在生成」。
+  改从 `source` 读（见下）。`sections` 返回 `200`，带 `kind: "raw"` 与空列表（它是列举端点，「没有」就是
   正确答案）；`POST .../summary` 返回 `409` —— 没有可摘要的东西，而那条重试路径
   会把文档改写成解析文档。`search_text` 看不到它。manifest、解析响应、搜索命中、
   sections 列举、摘要状态都带 `kind`。
@@ -712,6 +715,7 @@ GET /doc/library/{doc_id}/section/{sid} → 读取内容
 | `409 doc_id already exists`                         | 显式 `doc_id` 与已有文档冲突   | 传 `replace=true` 覆盖，或不传 `doc_id` 取新 id |
 | `422 <ext> is a parsed format; drop store_only`     | 可解析的扩展名要走原件通道     | 去掉 `store_only`；通道由扩展名决定 |
 | `422 store_only needs MANTISFETCH_STORE_SOURCE_FILES=true` | 原件通道没地方放原件 | 该部署打开原件保存 |
+| `404`，`detail.error = "raw_document"`              | 向原件（`store_only`）文档要解析产物 —— digest、brief、full、某个 section 或表格 | 它没有、也永远不会有：用 `GET .../source/info?offset=0`（MCP 用 `doc_source`）读原件 |
 | `409 summary already running` / `attempt limit reached` | 并发/重复调用 `POST .../summary` | 改为轮询 `GET .../summary`；只有必须覆盖时才传 `force=true` |
 | `429 too many concurrent parse requests`           | 解析门在整个队列上限（默认 600s）内都没空出槽——服务器是真的饱和了，不是一时忙 | 按 `Retry-After` 给的秒数等待后重试。一般规模的突发会排队通过 |
 | `429 parse queue is holding N bytes`               | 排队中的上传占用的磁盘超过了队列允许的量 | 等待后重试；排队中的解析会一直把上传留在盘上，队列排空后自然恢复 |
