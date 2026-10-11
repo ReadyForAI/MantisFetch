@@ -412,14 +412,7 @@ async def _setup_routing(context: BrowserContext, block_resources: bool):
 DISTILL_SIMPLE_JS = r"""
 ({ extractTables, maxTableRows, navLinkDensity, tableMaxEmptyCells }) => {
   /*DATA_TABLE_GATE*/
-  function visible(el) {
-    const style = window.getComputedStyle(el);
-    if (!style) return false;
-    if (style.visibility === "hidden" || style.display === "none") return false;
-    const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) return false;
-    return true;
-  }
+  /*TABLE_HELPERS*/
 
   const candidates = [
     document.querySelector("article"),
@@ -471,84 +464,9 @@ DISTILL_SIMPLE_JS = r"""
   if (extractTables) {
     const tableEls = root.querySelectorAll("table");
     for (const tbl of tableEls) {
-      if (!visible(tbl)) continue;
-      if (isNonDataTable(tbl)) continue;
-      const capEl = tbl.querySelector("caption");
-      const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
-      let heading = caption;
-      if (!heading) {
-        let prev = tbl.previousElementSibling;
-        for (let i = 0; i < 3 && prev; i++) {
-          const tag = prev.tagName.toLowerCase();
-          if (["h1","h2","h3","h4","h5","h6"].includes(tag)) {
-            heading = (prev.innerText || "").replace(/\s+/g, " ").trim().slice(0, 120);
-            break;
-          }
-          prev = prev.previousElementSibling;
-        }
-      }
-      const allRows = [];
-      for (const tr of tbl.querySelectorAll("tr")) {
-        const cells = [];
-        for (const cell of tr.querySelectorAll("th, td")) {
-          let txt = (cell.innerText || "").replace(/\s+/g, " ").trim();
-          txt = txt.replace(/\|/g, "¦").replace(/\n/g, " ");
-          cells.push(txt);
-        }
-        if (cells.length > 0) allRows.push({ cells, isHeader: tr.querySelectorAll("th").length > 0 });
-      }
-      if (allRows.length < 1) continue;
-      const totalRows = allRows.length;
-      const totalCols = Math.max(...allRows.map(r => r.cells.length));
-      for (const row of allRows) { while (row.cells.length < totalCols) row.cells.push(""); }
-      const truncated = totalRows > maxTableRows;
-      const displayRows = truncated ? allRows.slice(0, maxTableRows) : allRows;
-      let headerRow = null;
-      let dataRows = displayRows;
-      if (displayRows.length > 0 && displayRows[0].isHeader) {
-        headerRow = displayRows[0].cells;
-        dataRows = displayRows.slice(1);
-      } else if (displayRows.length > 1) {
-        const firstRow = displayRows[0].cells;
-        if (firstRow.every(c => c.length < 30 && c.length > 0)) {
-          headerRow = firstRow;
-          dataRows = displayRows.slice(1);
-        }
-      }
-      let md = "";
-      if (headerRow) {
-        md += "| " + headerRow.join(" | ") + " |\n";
-        md += "| " + headerRow.map(() => "---").join(" | ") + " |\n";
-      } else {
-        const ah = [];
-        for (let i = 0; i < totalCols; i++) ah.push("Col_" + (i + 1));
-        md += "| " + ah.join(" | ") + " |\n";
-        md += "| " + ah.map(() => "---").join(" | ") + " |\n";
-      }
-      for (const row of dataRows) { md += "| " + row.cells.join(" | ") + " |\n"; }
-      if (truncated) { md += "\n[... " + totalRows + " rows total, showing first " + maxTableRows + " ...]"; }
-      const stats = {};
-      if (headerRow && allRows.length > 3) {
-        for (let ci = 0; ci < totalCols; ci++) {
-          const nums = [];
-          for (const row of allRows.slice(1)) {
-            // Only whole-cell numbers count toward stats — reject dates (2024-01-15)
-            // and ids (No.42) that parseFloat would otherwise coerce to a number.
-            const cleaned = row.cells[ci].replace(/[,$%¥€£\s]/g, "");
-            if (!/^-?(\d+\.?\d*|\.\d+)$/.test(cleaned)) continue;
-            nums.push(parseFloat(cleaned));
-          }
-          if (nums.length > allRows.length * 0.5) {
-            const colName = headerRow[ci] || ("Col_" + (ci + 1));
-            const sum = nums.reduce((a, b) => a + b, 0);
-            stats[colName] = { min: Math.min(...nums), max: Math.max(...nums), avg: Math.round(sum / nums.length * 100) / 100, count: nums.length };
-          }
-        }
-      }
-      tables.push({
-        tag: "table", text: md.trim(),
-        table_meta: { rows: totalRows, cols: totalCols, has_header: !!headerRow, truncated, caption: caption || null, heading: heading || null, stats: Object.keys(stats).length > 0 ? stats : null }
-      });
+      const t = tableToBlock(tbl);
+      if (!t) continue;
+      tables.push(t);
       if (tables.length >= 20) break;
     }
   }
@@ -648,9 +566,9 @@ _DATA_TABLE_GATE_JS = r"""
 """
 
 
-EXTRACT_TABLES_JS = r"""
-({ maxTableRows, maxTables, navLinkDensity, tableMaxEmptyCells }) => {
-  /*DATA_TABLE_GATE*/
+# visible() and the per-table Markdown conversion, shared by both extractors so
+# the two distill paths render a given table the same way.
+_TABLE_HELPERS_JS = r"""
   function visible(el) {
     const style = window.getComputedStyle(el);
     if (!style) return false;
@@ -659,11 +577,12 @@ EXTRACT_TABLES_JS = r"""
     if (r.width < 2 || r.height < 2) return false;
     return true;
   }
-  const tables = [];
-  const tableEls = document.querySelectorAll("table");
-  for (const tbl of tableEls) {
-    if (!visible(tbl)) continue;
-    if (isNonDataTable(tbl)) continue;
+
+  // One <table> as a Markdown block with numeric column stats, or null when it
+  // is hidden, navigation/layout, or has no rows.
+  function tableToBlock(tbl) {
+    if (!visible(tbl)) return null;
+    if (isNonDataTable(tbl)) return null;
     const capEl = tbl.querySelector("caption");
     const caption = capEl ? (capEl.innerText || "").replace(/\s+/g, " ").trim() : "";
     let heading = caption;
@@ -688,7 +607,7 @@ EXTRACT_TABLES_JS = r"""
       }
       if (cells.length > 0) allRows.push({ cells, isHeader: tr.querySelectorAll("th").length > 0 });
     }
-    if (allRows.length < 1) continue;
+    if (allRows.length < 1) return null;
     const totalRows = allRows.length;
     const totalCols = Math.max(...allRows.map(r => r.cells.length));
     for (const row of allRows) { while (row.cells.length < totalCols) row.cells.push(""); }
@@ -736,19 +655,35 @@ EXTRACT_TABLES_JS = r"""
         }
       }
     }
-    tables.push({
+    return {
       tag: "table", text: md.trim(),
       table_meta: { rows: totalRows, cols: totalCols, has_header: !!headerRow, truncated, caption: caption || null, heading: heading || null, stats: Object.keys(stats).length > 0 ? stats : null }
-    });
+    };
+  }
+"""
+
+
+EXTRACT_TABLES_JS = r"""
+({ maxTableRows, maxTables, navLinkDensity, tableMaxEmptyCells }) => {
+  /*DATA_TABLE_GATE*/
+  /*TABLE_HELPERS*/
+  const tables = [];
+  const tableEls = document.querySelectorAll("table");
+  for (const tbl of tableEls) {
+    const t = tableToBlock(tbl);
+    if (!t) continue;
+    tables.push(t);
     if (tables.length >= maxTables) break;
   }
   return tables;
 }
 """
 
-# Resolve the shared gate into both blobs.
+# Resolve the shared fragments into both blobs.
 EXTRACT_TABLES_JS = EXTRACT_TABLES_JS.replace("/*DATA_TABLE_GATE*/", _DATA_TABLE_GATE_JS)
+EXTRACT_TABLES_JS = EXTRACT_TABLES_JS.replace("/*TABLE_HELPERS*/", _TABLE_HELPERS_JS)
 DISTILL_SIMPLE_JS = DISTILL_SIMPLE_JS.replace("/*DATA_TABLE_GATE*/", _DATA_TABLE_GATE_JS)
+DISTILL_SIMPLE_JS = DISTILL_SIMPLE_JS.replace("/*TABLE_HELPERS*/", _TABLE_HELPERS_JS)
 
 
 ACTIONS_DOM_JS = r"""
