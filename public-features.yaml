@@ -12,11 +12,13 @@ boundaries:
 
 features:
   - id: web-semantic-distill
-    fact: "用 Playwright 驱动 Chromium 打开网页，把页面提炼成结构化章节和可交互动作（链接、按钮、表单），不返回原始 HTML；同一会话再次提炼时只返回有变化的章节（changed_sids）。会话支持导航、滚动、点击、输入"
+    fact: "用 Playwright 驱动 Chromium 打开网页，把页面提炼成结构化章节和可交互动作（链接、按钮、表单），不返回原始 HTML；同一会话再次提炼时附带与上次的差异（新增、删除、变化的章节 id），调用方可据此只读有变化的章节（web_read_sections）。会话支持导航、滚动、点击、输入"
     visibility: public
     status: shipped
     since: "2026-03-23"
     evidence: ["services/browser/mantisfetch_browser/", "skills/mantisfetch-browser-SKILL.md"]
+    do_not_claim:
+      - "再次提炼不会自动只返回变化部分：返回的仍是完整章节列表，差异只作为元数据给出"
 
   - id: web-capture-to-library
     fact: "把网页抓取进文档库，与上传文档共用同一套索引和读取方式（digest / brief / section）；同一 URL 在有效期内重复抓取直接复用，内容相同按哈希去重；抓取结果标明抓到多少正文与表格字符（body_chars / table_chars）"
@@ -45,11 +47,14 @@ features:
       - "XLSX 有大小上限：默认超过 10 万行或 100 万个单元格直接拒收（可调），不是任意大小都能解析"
 
   - id: table-extraction
-    fact: "网页表格和文档表格都转成 Markdown，并预先算好数值列统计（最小、最大、平均）；文档表格另有结构化 JSON（逐格）"
+    fact: "网页表格和文档表格都单独提取成 Markdown，带页码、行列数等元数据。网页表格另附数值列统计（最小、最大、平均）；扫描件经离线 OCR 版面重建出的表格另有逐格的结构化 JSON"
     visibility: public
     status: shipped
     since: "2026-03-23"
     evidence: ["services/browser/mantisfetch_browser/", "services/docreader/mantisfetch_docreader/", "skills/mantisfetch-docreader-SKILL.md"]
+    do_not_claim:
+      - "上传文档的表格没有数值列统计"
+      - "不是所有文档表格都有逐格 JSON：只有离线 OCR 版面重建的表格有"
 
   - id: ocr
     fact: "扫描件 PDF 页和内嵌图片可做 OCR：完整版镜像自带离线 PaddleOCR，也可以走配置的 LLM 视觉模型；离线 OCR 结果附带文字块坐标（layout sidecar）。slim 镜像不含离线 OCR，必须配置 LLM 才能 OCR"
@@ -59,7 +64,7 @@ features:
     evidence: ["services/docreader/mantisfetch_docreader/ocr/", "README.md", "https://github.com/ReadyForAI/MantisFetch/pull/171"]
 
   - id: llm-providers
-    fact: "LLM 支持 Gemini 和任意 OpenAI 兼容接口（预置 openai、zhipu、kimi、aliyun、volcengine 配置，也可接本地 Ollama）；OCR 与摘要可以分别用不同厂商，配置两个槽位时一个失败自动切到另一个。模型名必须显式配置，代码里没有默认模型"
+    fact: "LLM 支持 Gemini 和任意 OpenAI 兼容接口（预置 openai、zhipu、kimi、aliyun、volcengine 配置，也可接本地 Ollama）；OCR 与摘要可以分别用不同厂商；配置两个槽位并为该用途指定备用模型（MANTISFETCH_SUM_MODEL_FALLBACK / MANTISFETCH_OCR_MODEL_FALLBACK）后，主厂商失败时自动切到备用。模型名必须显式配置，代码里没有默认模型"
     visibility: public
     status: shipped
     since: "2026-03-23"
