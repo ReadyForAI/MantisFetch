@@ -599,6 +599,69 @@ def test_the_size_limit_judges_the_file_actually_opened(tmp_path, monkeypatch) -
         mm._resolve_local_doc("doc.pdf")
 
 
+def test_reading_a_file_holds_one_copy_of_it(tmp_path, monkeypatch) -> None:
+    """Chunks plus their join held two copies at once — 400 MB at the 200 MB cap."""
+    import tracemalloc
+
+    root = tmp_path / "resource"
+    root.mkdir()
+    size = 8 << 20
+    (root / "doc.pdf").write_bytes(b"x" * size)
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    tracemalloc.start()
+    try:
+        _, data = mm._resolve_local_doc("doc.pdf")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(data) == size
+    assert peak < size * 1.5
+
+
+def _report_size_at_open(monkeypatch, path: Path, size: int) -> None:
+    """Make fstat of ``path`` report ``size``: the file grows after the size check."""
+    import os
+
+    real_fstat = os.fstat
+    inode = path.stat().st_ino
+
+    def fstat(fd):
+        st = real_fstat(fd)
+        if st.st_ino != inode:
+            return st
+        fields = list(st)
+        fields[6] = size  # st_size
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(mm.os, "fstat", fstat)
+
+
+def test_a_file_that_grows_after_the_size_check_is_read_whole(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "resource"
+    root.mkdir()
+    doc = root / "doc.pdf"
+    doc.write_bytes(b"y" * 50)
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    monkeypatch.setattr(mm._doc_mod, "MAX_UPLOAD_BYTES", 100)
+    _report_size_at_open(monkeypatch, doc, 10)
+    _, data = mm._resolve_local_doc("doc.pdf")
+    assert data == b"y" * 50
+
+
+def test_a_file_that_grows_past_the_cap_after_the_size_check_is_refused(
+    tmp_path, monkeypatch
+) -> None:
+    root = tmp_path / "resource"
+    root.mkdir()
+    doc = root / "doc.pdf"
+    doc.write_bytes(b"y" * 1000)
+    monkeypatch.setenv("MANTISFETCH_ALLOWED_DOC_ROOTS", str(root))
+    monkeypatch.setattr(mm._doc_mod, "MAX_UPLOAD_BYTES", 100)
+    _report_size_at_open(monkeypatch, doc, 10)
+    with pytest.raises(mm.ToolError, match="too large"):
+        mm._resolve_local_doc("doc.pdf")
+
+
 def test_a_stable_symlink_inside_the_root_still_reads(tmp_path, monkeypatch) -> None:
     root = tmp_path / "resource"
     (root / "store").mkdir(parents=True)
