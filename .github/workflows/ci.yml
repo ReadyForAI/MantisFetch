@@ -6,7 +6,7 @@ on:
 
 jobs:
   lint-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       # requires-python is ">=3.11", so both ends of that promise are tested:
@@ -38,7 +38,10 @@ jobs:
   # suite skips when Chromium is absent, so without this job the guard never
   # runs in CI. Uses data: URLs only — no external network needed.
   browser-smoke:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to Ubuntu 26 from 2026-10-19,
+    # and `playwright install --with-deps` does not recognise 26 yet (buildhost,
+    # on 26, needs PLAYWRIGHT_HOST_PLATFORM_OVERRIDE). The other jobs follow suit.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -68,7 +71,7 @@ jobs:
   ci:
     needs: [lint-and-test, browser-smoke]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: 汇总上游 job 结果
