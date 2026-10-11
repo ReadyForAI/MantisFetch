@@ -145,6 +145,7 @@ bodies, so its snippets can carry page text verbatim.
 | `web_distill` | Brief tier: sections + actions (each with an `aid`) + diff (`changed_sids`). | `session_id`, `include_actions=true`, `include_diff=true`, `max_sections=30`, `total_output_budget_chars=18000` |
 | `web_read_sections` | Section tier: full text of specific sids. | `session_id`, `section_ids[]` |
 | `web_act` | Execute an action: `click` / `type` / `select` / `scroll_into_view` / `invoke` (WebMCP). | `session_id`, `aid`, `action`, `text?`, `value?`, `wait_until` |
+| `web_webmcp_discover` | List the WebMCP tools the current page exposes, with their full `input_schema`. Use it when `web_distill` truncated a tool's schema (`{"schema_truncated": true}`) or before `web_act(action="invoke")` to get the full parameter contract. Descriptions are wrapped as untrusted page content; tool names stay raw for invoke. | `session_id`, `force_refresh=false` |
 | `web_scroll` | Scroll (down/up) to trigger lazy-load; follow with `web_distill` and read only `added_sids`. | `session_id`, `direction="down"`, `pixels=600` |
 | `web_navigate` | Browser history back/forward. | `session_id`, `direction="back"` |
 | `web_session_close` | Close the session and free resources. | `session_id` |
