@@ -1,0 +1,211 @@
+# MantisFetch 对外特性登记（SharedSpecs notice public-features-ledger-20261011）。
+# 格式：SharedSpecs schemas/public_features_v1.json；登记规则见 CLAUDE.md「对外特性登记」。
+# 本仓是 MIT 开源仓，本文件随仓公开，只写已公开的事实。
+schema_version: public-features-v1
+product: mantisfetch
+
+boundaries:
+  - "不做 RAG：不内置向量库或 embedding，检索只有元数据检索和关键词全文检索；分块（chunks）只按章节边界切好交给下游"
+  - "不做业务实体抽取：只输出文档的解析结构（章节、表格、页码、原件），合同、标书等字段的抽取由下游 Skill 负责"
+  - "不是通用文件存储：只收可解析的格式，外加 Markdown 与图片原件（store_only）；其它文件不入库"
+  - "单进程服务：一个文档库只能由一个进程使用，不支持多副本或多 worker 共享同一个库；扩容方式是每个实例各用一个库"
+
+features:
+  - id: web-semantic-distill
+    fact: "用 Playwright 驱动 Chromium 打开网页，把页面提炼成结构化章节和可交互动作（链接、按钮、表单），不返回原始 HTML；同一会话再次提炼时附带与上次的差异（新增、删除、变化的章节 id），调用方可据此只读有变化的章节（web_read_sections）。会话支持导航、滚动、点击、输入"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/browser/mantisfetch_browser/", "skills/mantisfetch-browser-SKILL.md"]
+    do_not_claim:
+      - "再次提炼不会自动只返回变化部分：返回的仍是完整章节列表，差异只作为元数据给出"
+
+  - id: web-capture-to-library
+    fact: "把网页抓取进文档库，与上传文档共用同一套索引和读取方式（digest / brief / section）；正文相同的页面按内容哈希复用已有文档（始终开启）；按 URL 复用在「搜索并抓取」上默认 24 小时，单独抓取默认关闭（MANTISFETCH_CAPTURE_TTL_HOURS 开启）；抓取结果标明抓到多少正文与表格字符（body_chars / table_chars）"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    updated: "2026-09-30"
+    evidence: ["services/browser/mantisfetch_browser/", "https://github.com/ReadyForAI/MantisFetch/pull/179", "https://github.com/ReadyForAI/MantisFetch/pull/297"]
+
+  - id: three-tier-loading
+    fact: "文档与网页都按三级读取：digest（约 200 tokens）→ brief（约 1,500 tokens）→ 按需读单个章节，全文另有接口。上传文档的 digest 与 brief 由 LLM 生成，未配置 LLM 或关闭摘要时没有；网页抓取的 digest（带章节大纲）与 brief 在本地生成，不需要 LLM，也可以另行要求 LLM 版"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/docreader/mantisfetch_docreader/summaries.py", "skills/mantisfetch-docreader-SKILL.md"]
+    do_not_claim:
+      - "上传文档的摘要不是本地生成的：需要配置 LLM 服务商"
+
+  - id: document-parsing
+    fact: "解析 PDF、DOC/DOCX、PPT/PPTX、XLS/XLSX、CSV、HTML、TXT、JSON/JSONL、XML，按章节入库并保留页码映射；提取内嵌图片清单。解析引擎以 MarkItDown 与 PyMuPDF 为主"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/docreader/mantisfetch_docreader/", "skills/mantisfetch-docreader-SKILL.md"]
+    do_not_claim:
+      - "XLSX 有大小上限：默认超过 10 万行或 100 万个单元格直接拒收（可调），不是任意大小都能解析"
+
+  - id: table-extraction
+    fact: "网页表格和文档表格都单独提取成 Markdown，带页码、行列数等元数据。网页表格另附数值列统计（最小、最大、平均）；扫描件经离线 OCR 版面重建出的表格另有逐格的结构化 JSON"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/browser/mantisfetch_browser/", "services/docreader/mantisfetch_docreader/", "skills/mantisfetch-docreader-SKILL.md"]
+    do_not_claim:
+      - "上传文档的表格没有数值列统计"
+      - "不是所有文档表格都有逐格 JSON：只有离线 OCR 版面重建的表格有"
+
+  - id: ocr
+    fact: "扫描件 PDF 页和内嵌图片可做 OCR：完整版镜像自带离线 PaddleOCR，也可以走配置的 LLM 视觉模型；离线 OCR 结果附带文字块坐标（layout sidecar）。slim 镜像不含离线 OCR，必须配置 LLM 才能 OCR"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/docreader/mantisfetch_docreader/ocr/", "README.md", "https://github.com/ReadyForAI/MantisFetch/pull/171"]
+
+  - id: llm-providers
+    fact: "LLM 支持 Gemini 和任意 OpenAI 兼容接口（预置 openai、zhipu、kimi、aliyun、volcengine 配置，也可接本地 Ollama）；OCR 与摘要可以分别用不同厂商；配置两个槽位并为该用途指定备用模型（MANTISFETCH_SUM_MODEL_FALLBACK / MANTISFETCH_OCR_MODEL_FALLBACK）后，主厂商失败时自动切到备用。模型名必须显式配置，代码里没有默认模型"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    updated: "2026-09-07"
+    evidence: ["providers/", "README.md", "https://github.com/ReadyForAI/MantisFetch/pull/173"]
+
+  - id: mcp-server
+    fact: "以 MCP 服务提供网页与文档能力（streamable HTTP，路径 /mcp，官方 MCP Python SDK v2）。默认 26 个工具，配置搜索服务商后为 28 个；不带令牌只接受本机访问，远程访问需要 bearer 令牌，可选 TLS。单次工具结果默认不超过 60,000 字节，长文档、长表格按页或按窗口返回（next_offset 续读）"
+    visibility: public
+    status: shipped
+    since: "2026-06-17"
+    updated: "2026-10-04"
+    evidence: ["services/mcp/mantisfetch_mcp/", "skills/mantisfetch-mcp-SKILL.md", "https://github.com/ReadyForAI/MantisFetch/pull/122", "https://github.com/ReadyForAI/MantisFetch/pull/316"]
+    do_not_claim:
+      - "工具数不是固定值：取决于是否配置了搜索服务商（26 或 28）"
+      - "MCP 上没有删除文档的工具（2026-09-09 起），删除只走 REST"
+
+  - id: rest-api
+    fact: "同一端口（默认 9898）提供 REST：/web（浏览器）、/doc（文档库）、/deliverables（只读字节下载）；/web 与 /doc 各自带 OpenAPI 文档。不带令牌只接受本机且 Host 为本机名的请求，其余来源需要 bearer 令牌；/health 免鉴权"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    updated: "2026-10-04"
+    evidence: ["mantisfetch_server.py", "https://github.com/ReadyForAI/MantisFetch/pull/131", "https://github.com/ReadyForAI/MantisFetch/pull/302"]
+
+  - id: webmcp-client
+    fact: "能发现并调用网页通过 WebMCP（navigator.modelContext，Chrome 146 起）暴露的结构化工具，MCP 上对应 web_webmcp_discover 与 web_act"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/browser/mantisfetch_browser/", "skills/mantisfetch-browser-SKILL.md"]
+    do_not_claim:
+      - "只对主动暴露 WebMCP 工具的网页有效，不是通用的网页自动化接口"
+
+  - id: web-search
+    fact: "网页搜索，支持 SearXNG、Brave、Tavily、博查，可设回退顺序；可以「搜索并抓取前 N 条」入库，并按调用方给的时间预算返回已抓到的部分。默认关闭，设置 MANTISFETCH_SEARCH_PROVIDER 后启用；docker compose 附带可选的 SearXNG"
+    visibility: public
+    status: shipped
+    since: "2026-07-02"
+    updated: "2026-10-04"
+    evidence: ["providers/search/", "https://github.com/ReadyForAI/MantisFetch/pull/145", "https://github.com/ReadyForAI/MantisFetch/pull/311"]
+    do_not_claim:
+      - "不自带搜索引擎：需要自建 SearXNG 或配置第三方搜索 API 的密钥"
+
+  - id: library-search
+    fact: "文档库检索：按标题、标签、类型等元数据检索，以及对正文做关键词全文检索（search_text）；单文档内可按章节检索"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["services/docreader/mantisfetch_docreader/", "skills/mantisfetch-docreader-SKILL.md"]
+    do_not_claim:
+      - "不是语义检索或向量检索"
+
+  - id: raw-channel-store-only
+    fact: "Markdown 与图片（png/jpg/jpeg/gif/webp）可以不解析、原样入库（store_only）：按原媒体类型取回字节，文本可按行分页读取；没有摘要、章节，全文检索看不到。默认上限 Markdown 2 MiB、图片 8 MiB；需开启原件留存（默认开）"
+    visibility: public
+    status: shipped
+    since: "2026-09-06"
+    evidence: ["https://github.com/ReadyForAI/MantisFetch/pull/252", "skills/mantisfetch-docreader-SKILL.md"]
+
+  - id: parse-budget-refusal
+    fact: "上传解析时可声明时间预算（budget_seconds）：预估耗时超过预算的扫描件 PDF 在开始前直接拒绝（422 parse_budget_exceeded，不留半成品），排队等待也计入预算。MCP 解析固定声明 45 秒（可调）。预估只覆盖需要 OCR 的 PDF，其它格式不会被预先拒绝"
+    visibility: ask
+    status: shipped
+    since: "2026-08-03"
+    updated: "2026-10-04"
+    evidence: ["https://github.com/ReadyForAI/MantisFetch/pull/213", "https://github.com/ReadyForAI/MantisFetch/pull/307"]
+    do_not_claim:
+      - "不是对所有文件都能秒级判断：非 PDF、打不开的 PDF、不需要 OCR 的 PDF 不做预估"
+
+  - id: library-ownership-retention
+    fact: "每次写入记录上传人与经手 Agent（来自请求头，只记录不校验）；删除留审计日志；可选按天数自动清理文档库（MANTISFETCH_LIBRARY_RETENTION_DAYS，默认关）"
+    visibility: ask
+    status: shipped
+    since: "2026-09-09"
+    evidence: ["https://github.com/ReadyForAI/MantisFetch/pull/275"]
+    do_not_claim:
+      - "上传人信息不是鉴权：调用方报什么就记什么"
+
+  - id: owner-scoped-discovery
+    fact: "可选开关 MANTISFETCH_OWNER_SCOPED_DISCOVERY（默认关）：打开后文档库检索只返回调用者自己上传的、标为共享的文档和网页抓取，所有访问都要令牌；/health 报告开关状态。为单一议事中心部署设计"
+    visibility: internal
+    status: shipped
+    since: "2026-10-04"
+    updated: "2026-10-10"
+    evidence: ["https://github.com/ReadyForAI/MantisFetch/pull/317", "https://github.com/ReadyForAI/MantisFetch/pull/319"]
+    depends_on: [prismcouncil, aulo]
+    do_not_claim:
+      - "不是多租户隔离：按 doc_id 直接读取不过滤，只过滤检索结果"
+
+  - id: deliverables-byte-face
+    fact: "只读 /deliverables 接口：从配置的交付物目录按路径取文件字节，供 AULO 预览与下载 Agent 交付物（未配置目录时一律 404）。交付物不进文档库，没有写入或删除接口"
+    visibility: internal
+    status: shipped
+    since: "2026-07-12"
+    evidence: ["mantisfetch_deliverables.py", "https://github.com/ReadyForAI/MantisFetch/pull/170"]
+    depends_on: [aulo]
+
+  - id: mcp-doc-delete
+    fact: "MCP 工具 doc_delete 已于 2026-09-09（v1.9.0）移除：LLM 不能再删除文档。REST DELETE /doc/library/{doc_id} 保留，供生命周期清理代码使用"
+    visibility: public
+    status: removed
+    since: "2026-06-17"
+    updated: "2026-09-09"
+    evidence: ["https://github.com/ReadyForAI/MantisFetch/pull/275"]
+
+  - id: docker-image
+    fact: "提供 Docker 镜像与 docker compose 单服务部署；构建参数选完整版（含离线 OCR）或 slim 版（约小 1.5 GB，无离线 OCR）；交付镜像 tag 形如 readyforai/mantisfetch:v<版本>，可导出为离线包"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    updated: "2026-07-16"
+    evidence: ["Dockerfile", "docker-compose.yml", "README.md", "DEPLOYMENT.md"]
+
+  - id: pypi-package
+    fact: "服务端以 mantisfetch 包发布在 PyPI（pip install mantisfetch，Python 3.11+），自 1.9.7 起。安装后仍需执行 playwright install chromium；离线 OCR（PaddleOCR）不随包安装"
+    visibility: public
+    status: shipped
+    since: "2026-10-11"
+    evidence: ["pyproject.toml", ".github/workflows/publish.yml", "https://pypi.org/project/mantisfetch/"]
+
+  - id: python-sdk-client
+    fact: "仓内附 Python 客户端 SDK（sdk/python，包名 mantisfetch-client 0.1.0），封装常用的 REST 调用；未发布到 PyPI"
+    visibility: ask
+    status: beta
+    since: "2026-03-23"
+    evidence: ["sdk/python/"]
+    do_not_claim:
+      - "不覆盖全部 API"
+
+  - id: agent-skill-files
+    fact: "仓内附 Agent 用的 SKILL 说明文件（浏览器、文档解析、MCP 三份），中英文各一份；有测试保证文件里写的接口和工具都真实存在"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    updated: "2026-10-11"
+    evidence: ["skills/", "tests/test_skill_contract.py"]
+
+  - id: i18n
+    fact: "错误信息等提示文字支持中文和英文，默认英文，设 LANG=zh 切换；日志只有英文"
+    visibility: public
+    status: shipped
+    since: "2026-03-23"
+    evidence: ["i18n.py"]
