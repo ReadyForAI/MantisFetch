@@ -127,6 +127,7 @@ capture 正文，snippet 会原样带出页面文字。
 | `web_distill` | Brief 级：sections + actions（各带 `aid`）+ diff（`changed_sids`）。 | `session_id`、`include_actions=true`、`include_diff=true`、`max_sections=30`、`total_output_budget_chars=18000` |
 | `web_read_sections` | Section 级：读取指定 sid 的全文。 | `session_id`、`section_ids[]` |
 | `web_act` | 执行动作：`click` / `type` / `select` / `scroll_into_view` / `invoke`（WebMCP）。 | `session_id`、`aid`、`action`、`text?`、`value?`、`wait_until` |
+| `web_webmcp_discover` | 列出当前页面暴露的 WebMCP 工具及其完整 `input_schema`。`web_distill` 截断了某个工具的 schema（`{"schema_truncated": true}`）时，或在 `web_act(action="invoke")` 之前需要完整参数契约时使用。描述按不可信页面内容包裹，工具名保持原样以便 invoke。 | `session_id`、`force_refresh=false` |
 | `web_scroll` | 滚动（down/up）触发懒加载；随后 `web_distill` 并只读 `added_sids`。 | `session_id`、`direction="down"`、`pixels=600` |
 | `web_navigate` | 浏览器历史前进/后退。 | `session_id`、`direction="back"` |
 | `web_session_close` | 关闭会话并释放资源。 | `session_id` |
