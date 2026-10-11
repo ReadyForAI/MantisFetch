@@ -187,11 +187,15 @@ Notes:
 | `doc_tables` | List a document's tables (`table_id`, pages, row/column counts) — the ids for `doc_table`. Paged like `doc_sections` (`total`, `next_offset`, `truncated`). | `doc_id`, `offset=0`, `limit?` |
 | `doc_chunks` | Retrieval-friendly chunks for downstream RAG. Paged like `doc_sections` (`total`, `next_offset`, `truncated`); with `include_text` a long document takes several pages. | `doc_id`, `include_text=false`, `offset=0`, `limit?` |
 | `doc_manifest` | Provenance manifest (source, hash, timestamps). `truncated` is always present: on a document whose manifest would not fit in one tool result it is `true`, the per-entry lists (`sections`, `tables`, `images`, per-page quality detail) are left out and named in `omitted`, the counts stay, and `table_ids` lists the ids to pass to `doc_table` when they fit. `doc_sections` and `doc_tables` (both paged) list everything. | `doc_id` |
-| `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, each window sized to fit in one tool result (fewer lines for Chinese text), `next_offset` to continue. The only reader for a raw document — `doc_full` / `doc_section` 404 on it. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
+| `doc_source` | The stored original of a `kind: "raw"` document (markdown / image stored without parsing). **Without `offset`/`limit` it returns metadata only — no content.** Pass `offset`/`limit` to read the text (`offset=0` alone reads from the start): 0-based lines, each window sized to fit in one tool result (fewer lines for Chinese text), `next_offset` to continue. The only reader for a raw document — every parse-layer tool answers it with `404 raw_document`. Never the bytes of an image; a window of an image is an error. | `doc_id`, `offset?`, `limit?` |
 | `doc_summary` | The document's three-tier generated summary / status. | `doc_id` |
 
-A document whose manifest says `kind: "raw"` has no digest, brief, sections or full
-text — `doc_source` is its only reader, and `doc_search_text` does not see it.
+A document whose manifest says `kind: "raw"` has no digest, brief, sections, tables or
+full text — `doc_source` is its only reader, and `doc_search_text` does not see it.
+Asking a parse-layer tool for one gives `404` with `raw_document` in the error (not the
+`digest_not_found` a summary still being generated gives): switch to `doc_source`, no
+`doc_manifest` call needed. `doc_sections` and `doc_tables` answer with `kind: "raw"`
+and an empty list.
 
 For parse parameters, OCR strategy, the categorized library layout, and search filters,
 see the [docreader skill](./mantisfetch-docreader-SKILL.md). `doc_table` with `fmt="json"`

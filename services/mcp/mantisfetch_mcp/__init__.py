@@ -980,7 +980,9 @@ async def doc_parse(
 async def doc_digest(doc_id: str) -> Any:
     """Digest tier (~200 tokens): the cheapest overview of a parsed document.
     A 404 digest_not_found can mean the summary is still being generated (deferred),
-    not that the doc is absent — confirm with doc_manifest before re-parsing."""
+    not that the doc is absent — confirm with doc_manifest before re-parsing.
+    A 404 raw_document means the document was stored as an original (kind="raw")
+    and has no digest at all: read it with doc_source instead."""
     return await _doc_get(f"/library/{doc_id}/digest")
 
 
@@ -988,7 +990,8 @@ async def doc_digest(doc_id: str) -> Any:
 async def doc_brief(doc_id: str) -> Any:
     """Brief tier (~1.5k tokens): section headings + snippets.
     A 404 may mean the summary is still generating (deferred), not "not ingested" —
-    check doc_manifest before re-parsing."""
+    check doc_manifest before re-parsing. A 404 raw_document means the document
+    was stored as an original (kind="raw") with no brief: read it with doc_source."""
     return await _doc_get(f"/library/{doc_id}/brief")
 
 
@@ -1239,7 +1242,14 @@ async def doc_tables(doc_id: str, offset: int = 0, limit: int | None = None) -> 
         for t in (tables if isinstance(tables, list) else [])
         if isinstance(t, dict)
     ]
-    return _page_entries({"doc_id": doc_id, "tables": listed}, "tables", offset, limit)
+    # kind rides along so an empty list from a raw document reads as "never
+    # parsed", not "parsed and found no tables" — the sections listing does the same.
+    return _page_entries(
+        {"doc_id": doc_id, "kind": manifest.get("kind") or "parsed", "tables": listed},
+        "tables",
+        offset,
+        limit,
+    )
 
 
 _TABLE_LISTING_FIELDS = (
@@ -1501,7 +1511,8 @@ async def doc_source(
     and NO content. To read the text, pass offset and/or limit — offset=0 alone
     reads from the start. That is the only way to read a document stored as an
     original (kind="raw": markdown or an image stored without parsing); for such
-    a document doc_full / doc_section / doc_brief answer 404, not this tool.
+    a document every parse-layer tool (doc_digest, doc_brief, doc_full,
+    doc_section, doc_table, ...) answers 404 raw_document, not this one.
 
     offset is a 0-based line, limit a line count. Each window is capped at
     64 KiB of UTF-8 and cut at a line boundary; next_offset is where to

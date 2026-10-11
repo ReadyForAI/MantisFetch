@@ -6962,8 +6962,11 @@ async def retry_summary(doc_id: str, concurrency: int = 3, force: bool = False):
 async def get_digest(doc_id: str):
     """Get document digest (lowest token cost)."""
     _validate_doc_id(doc_id)
-    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "digest.md"
+    docs_dir = _get_docs_dir()
+    p = _resolve_doc_dir(docs_dir, doc_id) / "digest.md"
     if not p.exists():
+        if _doc_kind(docs_dir, doc_id) == "raw":
+            raise _raw_document_refusal(doc_id, "digest")
         raise HTTPException(404, t("digest_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
 
@@ -6972,8 +6975,11 @@ async def get_digest(doc_id: str):
 async def get_brief(doc_id: str):
     """Get document brief (medium token cost)."""
     _validate_doc_id(doc_id)
-    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "brief.md"
+    docs_dir = _get_docs_dir()
+    p = _resolve_doc_dir(docs_dir, doc_id) / "brief.md"
     if not p.exists():
+        if _doc_kind(docs_dir, doc_id) == "raw":
+            raise _raw_document_refusal(doc_id, "brief")
         raise HTTPException(404, t("brief_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
 
@@ -6982,8 +6988,11 @@ async def get_brief(doc_id: str):
 async def get_full(doc_id: str):
     """Get full document text (high token cost, use sparingly)."""
     _validate_doc_id(doc_id)
-    p = _resolve_doc_dir(_get_docs_dir(), doc_id) / "full.md"
+    docs_dir = _get_docs_dir()
+    p = _resolve_doc_dir(docs_dir, doc_id) / "full.md"
     if not p.exists():
+        if _doc_kind(docs_dir, doc_id) == "raw":
+            raise _raw_document_refusal(doc_id, "full text")
         raise HTTPException(404, t("full_not_found", doc_id=doc_id))
     return {"doc_id": doc_id, "content": p.read_text(encoding="utf-8")}
 
@@ -7106,6 +7115,8 @@ async def get_section(doc_id: str, sid: str):
     # filenames "NN-{sid}-{title}.md" matched the index prefix or title too,
     # returning the wrong section). The file path is resolved + bounds-checked.
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("kind") == "raw":
+        raise _raw_document_refusal(doc_id, "sections")
     for sec in manifest.get("sections", []):
         if isinstance(sec, dict) and sec.get("sid") == sid:
             path = _resolve_manifest_section_path(doc_dir, sec.get("file"))
@@ -7158,8 +7169,11 @@ async def get_table(doc_id: str, table_id: str):
     """Read a single table."""
     _validate_doc_id(doc_id)
     _validate_table_id(table_id)
-    tables_dir = _resolve_doc_dir(_get_docs_dir(), doc_id) / "tables"
+    docs_dir = _get_docs_dir()
+    tables_dir = _resolve_doc_dir(docs_dir, doc_id) / "tables"
     if not tables_dir.exists():
+        if _doc_kind(docs_dir, doc_id) == "raw":
+            raise _raw_document_refusal(doc_id, "tables")
         raise HTTPException(404, t("tables_dir_not_found", doc_id=doc_id))
 
     # table_id: "table-01" or "01"
@@ -7175,7 +7189,8 @@ async def get_table_json(doc_id: str, table_id: str):
     """Read structured JSON for one table when available."""
     _validate_doc_id(doc_id)
     _validate_table_id(table_id)
-    doc_dir = _resolve_doc_dir(_get_docs_dir(), doc_id)
+    docs_dir = _get_docs_dir()
+    doc_dir = _resolve_doc_dir(docs_dir, doc_id)
     if not (doc_dir / "manifest.json").exists():
         raise HTTPException(404, t("doc_not_found", doc_id=doc_id))
     tid = table_id if table_id.startswith("table-") else f"table-{table_id}"
@@ -7191,6 +7206,8 @@ async def get_table_json(doc_id: str, table_id: str):
         except json.JSONDecodeError as exc:
             raise HTTPException(500, f"table JSON unreadable for {table_id}: {exc}") from exc
         return {"doc_id": doc_id, "table_id": tid, "table": payload}
+    if _doc_kind(docs_dir, doc_id) == "raw":
+        raise _raw_document_refusal(doc_id, "tables")
     raise HTTPException(404, f"table JSON not found: {table_id}")
 
 
@@ -7364,6 +7381,30 @@ def _doc_kind(docs_dir: Path, doc_id: str) -> str:
         return "raw" if isinstance(manifest, dict) and manifest.get("kind") == "raw" else "parsed"
     except Exception:
         return "parsed"
+
+
+def _raw_document_refusal(doc_id: str, product: str) -> HTTPException:
+    """The 404 a parse product answers with when the document is a raw one.
+
+    Without it a raw document's missing digest looks exactly like a summary
+    still being generated, and an agent that follows the deferred advice spends
+    a doc_manifest call finding out the kind (MantisFetch #329). Still a 404 —
+    the product does not exist — with the same object shape as the raw
+    channel's 409, so the reason and the next call are in the error itself.
+    """
+    return HTTPException(
+        404,
+        {
+            "error": "raw_document",
+            "doc_id": doc_id,
+            "kind": "raw",
+            "message": (
+                f"{doc_id} is a raw document: it was stored, not parsed, so it has "
+                f"no {product}. Read the original with doc_source (offset=0 reads "
+                f"from the start), or GET /library/{doc_id}/source/info?offset=0."
+            ),
+        },
+    )
 
 
 def _read_manifest_or_404(doc_id: str) -> tuple[Path, dict[str, Any]]:

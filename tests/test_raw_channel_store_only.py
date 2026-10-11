@@ -303,11 +303,74 @@ def test_a_document_with_no_stored_original_says_which_setting(
 
 
 # ── what a raw document does to the rest of the library ──────────────────────────
-def test_the_three_tier_readers_404_rather_than_break(client, docs_dir) -> None:
+_PARSE_PRODUCTS = ("digest", "brief", "full", "section/s1", "table/01", "table/01/json")
+
+
+@pytest.mark.parametrize("product", _PARSE_PRODUCTS)
+def test_a_parse_product_of_a_raw_document_says_why_it_is_missing(
+    client, docs_dir, product
+) -> None:
+    """Still a 404, but not the one a summary still being generated gives: an
+    agent that follows the deferred advice spends a doc_manifest call finding
+    out what the error could have said (#329)."""
     doc_id = _store(client).json()["doc_id"]
 
-    for tier in ("digest", "brief", "full"):
-        assert client.get(f"/doc/library/{doc_id}/{tier}").status_code == 404
+    resp = client.get(f"/doc/library/{doc_id}/{product}")
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["error"] == "raw_document"
+    assert detail["kind"] == "raw" and detail["doc_id"] == doc_id
+    assert "doc_source" in detail["message"]
+
+
+@pytest.mark.parametrize("product", _PARSE_PRODUCTS)
+def test_a_parsed_document_missing_a_product_keeps_its_old_404(
+    client, docs_dir, product
+) -> None:
+    """The deferred / missing-product path is unchanged: a message string, not
+    the raw object — callers reading its text see what they saw before."""
+    resp = client.post(
+        "/doc/parse",
+        files={"file": ("page.html", b"<h1>T</h1><p>Body worth keeping.</p>", "text/html")},
+        data={"summary_mode": "off", "generate_summary": "false"},
+    )
+    doc_id = resp.json()["doc_id"]
+    doc_dir = next(docs_dir.glob(f"*/{doc_id}"))
+    for name in ("digest.md", "brief.md", "full.md"):
+        (doc_dir / name).unlink(missing_ok=True)
+
+    resp = client.get(f"/doc/library/{doc_id}/{product}")
+    assert resp.status_code == 404
+    assert isinstance(resp.json()["detail"], str)
+
+
+def test_an_unknown_document_is_not_called_raw(client, docs_dir) -> None:
+    resp = client.get("/doc/library/DOC-999/digest")
+    assert resp.status_code == 404
+    assert isinstance(resp.json()["detail"], str)
+
+
+def test_the_mcp_error_names_the_reader_to_use(client, docs_dir) -> None:
+    """What reaches the agent is the ToolError text, so the code and the next
+    tool have to survive the trip through it."""
+    import mantisfetch_mcp as mm
+
+    doc_id = _store(client).json()["doc_id"]
+    with pytest.raises(Exception) as err:
+        asyncio.run(mm.doc_digest(doc_id))
+    assert "404" in str(err.value)
+    assert "raw_document" in str(err.value) and "doc_source" in str(err.value)
+
+
+def test_the_mcp_table_listing_says_the_document_is_raw(client, docs_dir) -> None:
+    """An empty tables list from a raw document must not read as "parsed and
+    found no tables" — the sections listing already says kind; so does this."""
+    import mantisfetch_mcp as mm
+
+    doc_id = _store(client).json()["doc_id"]
+    out = asyncio.run(mm.doc_tables(doc_id))
+    assert out["kind"] == "raw"
+    assert out["tables"] == []
 
 
 def test_listing_sections_answers_with_the_kind_rather_than_a_bare_empty_list(
