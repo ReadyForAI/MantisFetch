@@ -11,7 +11,8 @@ license = { text = "MIT" }
 authors = [{ name = "ReadyForAI", email = "opensource@readyfor.ai" }]
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.115.0",
+    # <0.147: see requirements.txt — an omitted bool Form field arrives as False.
+    "fastapi>=0.115.0,<0.147",
     "uvicorn[standard]>=0.30.0",
     "python-multipart>=0.0.9",
     "playwright>=1.45.0",
