@@ -2,11 +2,7 @@
 # Python >= 3.11 required
 
 # Web framework
-# <0.147: from 0.147.0 a bool Form field the request leaves out arrives as
-# False (read as an unchecked HTML checkbox), so /doc/parse's
-# generate_summary and extract_tables, which default to True, would silently
-# turn off for every caller that does not send them.
-fastapi>=0.115.0,<0.147
+fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 
