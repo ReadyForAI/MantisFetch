@@ -30,11 +30,12 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, WithJsonSchema
 
 from i18n import init_locale, t, tmpl_for_locale
 from mantisfetch_common import __version__
@@ -3719,6 +3720,29 @@ def _parse_metadata_form(metadata: str | None) -> dict[str, Any]:
     return value
 
 
+#: A bool form field that defaults to True. From FastAPI 0.147 an omitted bool
+#: form field is read as an unchecked HTML checkbox and arrives as False,
+#: whatever its default — bool | None included. Declared as a string it stays
+#: absent, and _form_flag reads it as FastAPI read a bool before. The schema
+#: still says boolean with default true, so clients see no change.
+_FormFlagTrue = Annotated[
+    str | None, Form(json_schema_extra={"default": True}), WithJsonSchema({"type": "boolean"})
+]
+
+_BOOL = TypeAdapter(bool)
+
+
+def _form_flag(name: str, raw: str | None, default: bool) -> bool:
+    if raw is None:
+        return default
+    try:
+        return _BOOL.validate_python(raw)
+    except ValidationError as exc:
+        raise RequestValidationError(
+            [{**err, "loc": ("body", name)} for err in exc.errors(include_url=False)]
+        ) from None
+
+
 def _metadata_value_matches(actual: Any, expected: str) -> bool:
     expected_lower = expected.lower()
     if isinstance(actual, list):
@@ -5676,7 +5700,7 @@ async def api_parse_doc(
     file: UploadFile = File(...),
     doc_id: str | None = Form(None),
     content_type: str = Form("General"),
-    generate_summary: bool = Form(True),
+    generate_summary: _FormFlagTrue = None,
     summary_mode: str | None = Form(None),
     document_profile: str | None = Form(None),
     field_ocr_config: str | None = Form(None),
@@ -5685,7 +5709,7 @@ async def api_parse_doc(
     skip_ocr_pages: str | None = Form(None),
     force_ocr: bool = Form(False),
     ocr_pages: str | None = Form(None),
-    extract_tables: bool = Form(True),
+    extract_tables: _FormFlagTrue = None,
     extract_images: bool = Form(False),
     ocr_images: bool = Form(False),
     image_ocr_backend: str = Form("auto"),
@@ -5713,6 +5737,8 @@ async def api_parse_doc(
 ):
     """Parse uploaded document (PDF/DOCX), return structured result."""
     t_entry = time.monotonic()
+    want_summary = _form_flag("generate_summary", generate_summary, True)
+    want_tables = _form_flag("extract_tables", extract_tables, True)
     # Who is writing, off the transport — never off the form (IRP 20260908 P1).
     actor = actor_from_headers(request.headers)
     if (
@@ -6023,7 +6049,7 @@ async def api_parse_doc(
             summary_mode = _resolve_summary_mode(
                 profile=profile,
                 parse_mode=requested_parse_mode,
-                generate_summary=generate_summary,
+                generate_summary=want_summary,
                 requested_mode=requested_summary_mode,
             )
             if budget_seconds is not None and summary_mode == "sync":
@@ -6086,7 +6112,7 @@ async def api_parse_doc(
                     manual_blank_pages_spec=manual_blank_pages_spec,
                     force_ocr=force_ocr,
                     ocr_pages=ocr_pages,
-                    extract_tables=extract_tables,
+                    extract_tables=want_tables,
                     max_tables_per_page=max_tables_per_page,
                     concurrency=concurrency,
                     extract_images=extract_images,
