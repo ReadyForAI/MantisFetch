@@ -1342,7 +1342,8 @@ async def doc_table(
     offset: int = 0,
     limit: int | None = None,
 ) -> Any:
-    """Read one extracted table (with numeric column stats). fmt = md | json.
+    """Read one extracted table. fmt = md | json. A web-captured table also
+    carries numeric column stats; an uploaded document's tables have none.
 
     A table that fits in one tool result comes back whole; a larger one comes
     back in row windows — `total` rows, `next_offset` (null at the end),

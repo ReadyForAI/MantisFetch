@@ -470,7 +470,7 @@ class MantisFetchClient:
         return self._get(f"/doc/library/{doc_id}/sections")
 
     def get_table(self, doc_id: str, table_id: str) -> dict[str, Any]:
-        """Retrieve one extracted table as Markdown (with column statistics).
+        """Retrieve one extracted table as Markdown (web captures also carry column statistics).
 
         Args:
             doc_id:   Document ID.
@@ -868,7 +868,7 @@ class AsyncMantisFetchClient:
         return await self._get(f"/doc/library/{doc_id}/sections")
 
     async def get_table(self, doc_id: str, table_id: str) -> dict[str, Any]:
-        """Retrieve one extracted table as Markdown (with column statistics)."""
+        """Retrieve one extracted table as Markdown (web captures also carry column statistics)."""
         return await self._get(f"/doc/library/{doc_id}/table/{table_id}")
 
     async def get_table_json(self, doc_id: str, table_id: str) -> dict[str, Any]:
