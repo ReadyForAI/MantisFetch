@@ -18,14 +18,14 @@
 
 ### Why MantisFetch?
 
-Most scrapers hand your Agent a wall of raw HTML — expensive to process and mostly noise. MantisFetch semantically distills web pages into structured sections and actions, cutting token usage by 90%+ compared to raw HTML. A three-tier loading model (digest → brief → section) lets Agents pull only what they need instead of loading entire documents into context. Diff-first incremental reads mean revisiting a page costs near-zero tokens, and table-aware extraction precomputes statistics so Agents can answer data questions without reading a single row.
+Most scrapers hand your Agent a wall of raw HTML — expensive to process and mostly noise. MantisFetch semantically distills web pages into structured sections and actions, cutting token usage by 90%+ compared to raw HTML. A three-tier loading model (digest → brief → section) lets Agents pull only what they need instead of loading entire documents into context. Diff-first incremental reads tell an Agent which sections changed when it revisits a page, so it re-reads only those, and web tables come with precomputed column statistics so many data questions need no rows read at all.
 
 ### Features
 
 - **Semantic distillation** — web pages → structured sections + interactive actions; 4,000–8,000 chars per distill vs. full HTML
 - **Three-tier loading** — digest (~200 tokens) → brief (~1,500 tokens) → section (on-demand); Agents load only what they need
-- **Diff-first** — `distill` returns only changed sections (`changed_sids`); repeat visits cost near-zero tokens
-- **Table-aware** — auto-extracts tables with precomputed stats (min/max/avg); answer data questions without reading rows
+- **Diff-first** — on a repeat `distill`, `meta.diff` lists which sections changed (`changed_sids`, `added_sids`); the Agent re-reads only those with `read_sections`
+- **Table-aware** — auto-extracts tables; web tables carry precomputed numeric column stats (min/max/avg), so many data questions need no rows read
 - **Document parsing** — PDF, DOCX, PPTX, XLSX, CSV, HTML via [MarkItDown](https://github.com/microsoft/markitdown), with Gemini OCR fallback
 - **Multi-LLM support** — Gemini (default), OpenAI, Ollama, Groq, or any OpenAI-compatible API
 - **MCP server** — exposes `/web` and `/doc` as native MCP tools (streamable-HTTP at `/mcp`) for agent runtimes; loopback-only by default, with bearer-token + optional TLS for remote clients
@@ -271,7 +271,7 @@ Access documents stored by `/web/capture` and `/doc/parse`.
 | `GET` | `/doc/library/{doc_id}/sections` | List all sections with metadata |
 | `GET` | `/doc/library/{doc_id}/section/{sid}` | Full text of a single section |
 | `POST` | `/doc/library/{doc_id}/sections/batch` | Read multiple sections by sid in one request |
-| `GET` | `/doc/library/{doc_id}/table/{table_id}` | Markdown table with column statistics |
+| `GET` | `/doc/library/{doc_id}/table/{table_id}` | Markdown table (web-captured tables also carry numeric column statistics) |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}/json` | Structured table JSON (cells with row/column spans) |
 | `POST` | `/doc/library/{doc_id}/chunks` | Section-boundary chunks for downstream retrieval/RAG |
 | `GET` | `/doc/library/{doc_id}/images` | List embedded Word images with anchors and OCR results |
@@ -401,14 +401,14 @@ MIT — see [LICENSE](LICENSE).
 
 ### 为什么选择 MantisFetch？
 
-大多数爬虫工具返回原始 HTML——对 LLM 而言噪音极多、token 消耗过高。MantisFetch 专为 AI Agent 设计：网页经过语义蒸馏，转化为结构化段落（sections）和可交互元素（actions），相比原始 HTML 节省 90%+ 的 token。三层加载模型（digest → brief → section）让 Agent 按需取用，无需把整篇文档塞进上下文。增量读取（diff-first）机制确保重复访问同一页面时的额外开销接近于零；表格自动预计算统计值，Agent 无需逐行读取即可回答数据问题。
+大多数爬虫工具返回原始 HTML——对 LLM 而言噪音极多、token 消耗过高。MantisFetch 专为 AI Agent 设计：网页经过语义蒸馏，转化为结构化段落（sections）和可交互元素（actions），相比原始 HTML 节省 90%+ 的 token。三层加载模型（digest → brief → section）让 Agent 按需取用，无需把整篇文档塞进上下文。增量读取（diff-first）机制在重复访问同一页面时告诉 Agent 哪些段落变了，只重读这些即可；网页表格自动预计算列统计值，很多数据问题无需逐行读取即可回答。
 
 ### 功能特性
 
 - **语义蒸馏** — 网页 → 结构化段落 + 可交互元素；每次 distill 仅 4,000–8,000 字符，对比原始 HTML 节省 90%+ token
 - **三层加载** — digest（约 200 token）→ brief（约 1,500 token）→ section（按需）；Agent 只取所需
-- **增量读取** — `distill` 仅返回变化段落（`changed_sids`），重复访问近零 token 开销
-- **表格感知** — 自动提取并预计算统计值（min/max/avg），无需读取原始行即可回答数据问题
+- **增量读取** — 再次 `distill` 时，`meta.diff` 列出变化的段落（`changed_sids`、`added_sids`），Agent 只用 `read_sections` 重读这些
+- **表格感知** — 自动提取表格；网页表格附带预计算的数值列统计（min/max/avg），很多数据问题无需读取原始行
 - **文档解析** — 支持 PDF、DOCX、PPTX、XLSX、CSV、HTML，基于 [MarkItDown](https://github.com/microsoft/markitdown)（微软），可自动 Gemini OCR 兜底
 - **多 LLM 支持** — Gemini（默认）、OpenAI、Ollama、Groq，以及任意 OpenAI 兼容接口
 - **MCP 服务** — 把 `/web` 和 `/doc` 暴露为原生 MCP 工具（streamable-HTTP，挂载在 `/mcp`），供 Agent 运行时使用；默认仅 loopback，远程客户端需 bearer token + 可选 TLS
@@ -633,7 +633,7 @@ MANTISFETCH_OCR_MODEL_FALLBACK=deepseek/deepseek-chat
 | `GET` | `/doc/library/{doc_id}/sections` | 列出所有章节及元数据 |
 | `GET` | `/doc/library/{doc_id}/section/{sid}` | 单个章节的完整文本 |
 | `POST` | `/doc/library/{doc_id}/sections/batch` | 一次请求按 sid 读取多个章节 |
-| `GET` | `/doc/library/{doc_id}/table/{table_id}` | 带列统计的 Markdown 表格 |
+| `GET` | `/doc/library/{doc_id}/table/{table_id}` | Markdown 表格（网页抓取的表格另附数值列统计） |
 | `GET` | `/doc/library/{doc_id}/table/{table_id}/json` | 结构化表格 JSON（单元格含行/列跨度） |
 | `POST` | `/doc/library/{doc_id}/chunks` | 面向下游检索/RAG 的 section 边界分块 |
 | `GET` | `/doc/library/{doc_id}/images` | 列出 Word 内嵌图片、锚点和 OCR 结果 |
