@@ -1,6 +1,6 @@
 # Pinned by digest (a multi-arch index) so the same tag builds on the same base;
 # scripts/refresh_base_image.sh moves it, weekly via deps-refresh.yml.
-FROM python:3.11-slim-trixie@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
+FROM python:3.11-slim-trixie@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377
 
 WORKDIR /app
 
