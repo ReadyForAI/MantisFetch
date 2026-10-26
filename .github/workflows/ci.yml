@@ -3,9 +3,6 @@ name: CI
 on:
   pull_request:
     branches: [main]
-  # The dependency refresh (deps-refresh.yml) opens its PR with GITHUB_TOKEN,
-  # which does not fire pull_request; it starts this run by dispatch instead.
-  workflow_dispatch:
 
 jobs:
   lint-and-test:
