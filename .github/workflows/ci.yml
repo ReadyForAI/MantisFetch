@@ -3,6 +3,9 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # The dependency refresh (deps-refresh.yml) opens its PR with GITHUB_TOKEN,
+  # which does not fire pull_request; it starts this run by dispatch instead.
+  workflow_dispatch:
 
 jobs:
   lint-and-test:
@@ -23,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install ruff pytest
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt -c constraints.txt
 
       - name: Lint
         run: ruff check .
@@ -52,7 +55,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pytest pytest-asyncio
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt -c constraints.txt
           python -m playwright install --with-deps chromium
 
       - name: Real-Chromium evaluate smoke

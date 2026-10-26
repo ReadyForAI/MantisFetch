@@ -17,10 +17,18 @@ fi
 case "$machine" in
   x86_64|amd64)
     echo "Installing Linux x86_64 OCR dependencies"
-    "$python_bin" -m pip install --no-cache-dir -r requirements-ocr-linux-x86_64.txt
+    # The image pins this stack with the rest (constraints.txt); a checkout
+    # without the file installs from the ranges alone.
+    if [ -f constraints.txt ]; then
+      "$python_bin" -m pip install --no-cache-dir -r requirements-ocr-linux-x86_64.txt -c constraints.txt
+    else
+      "$python_bin" -m pip install --no-cache-dir -r requirements-ocr-linux-x86_64.txt
+    fi
     ;;
   arm64|aarch64)
     echo "Installing ARM OCR dependencies"
+    # Not constrained: constraints.txt is the x86_64 image's set, and this
+    # PaddleOCR 2.x stack needs numpy<2 and paddlepaddle 2.6.2, which it contradicts.
     "$python_bin" -m pip install --no-cache-dir -r requirements-ocr-arm64.txt
     ;;
   *)
