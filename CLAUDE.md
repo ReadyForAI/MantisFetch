@@ -128,6 +128,9 @@ mantisfetch/
 ## Commands
 
 ```bash
+# Install (exact versions, as the image and CI install them)
+pip install -r requirements.txt -c constraints.txt
+
 # Run the service
 python mantisfetch_server.py                    # default port 9898
 
@@ -157,6 +160,14 @@ pyright mantisfetch_*.py
 1. Read relevant SKILL files in `skills/` to understand API contracts
 2. Check `docs/mantisfetch_opensource_design.md` for feature boundaries (open-source vs commercial)
 3. Run `ruff check .` and `pytest tests/ -v` before committing
+
+## 依赖版本锁定（constraints.txt）
+
+镜像和 CI 都用 `pip install -r requirements.txt -c constraints.txt` 安装依赖。`constraints.txt` 锁定了镜像里每个包的确切版本，覆盖 CPython 3.11、Linux x86_64，以及 `requirements.txt` 加 x86_64 OCR 依赖的完整闭包。同一个 tag 无论在哪台机器上构建、有没有层缓存，装出来的依赖都一样。`pyproject.toml` 保持宽松，给 PyPI 用户留兼容空间。
+
+- **改依赖必须同 PR 重新生成锁文件**：增删或修改 requirements 文件里的任何一行，都要在同一个 PR 里跑 `scripts/refresh_constraints.sh`。不加参数时保留已有版本，只调整新要求逼出来的变化；需要的 uv 版本写在脚本里。`tests/test_constraints_in_sync.py` 会把漏跑抓成红灯。
+- **升级走每周 PR**：`.github/workflows/deps-refresh.yml` 每周一跑 `--upgrade`，开或更新 `deps/refresh` 分支的 PR，并通过 dispatch 触发 CI。合并前要看大版本、小版本变动的 Release Notes。
+- arm64 的 OCR 依赖（`requirements-ocr-arm64.txt`）只供开发用，不受这份锁文件约束：它要 numpy<2 和 paddle 2.6.2，和 x86_64 的锁定版本冲突。
 
 ## 对外特性登记（public-features.yaml）
 

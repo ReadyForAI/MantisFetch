@@ -52,8 +52,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Ret
         fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt requirements-ocr-linux-x86_64.txt requirements-ocr-arm64.txt ./
+# Install Python dependencies. constraints.txt pins the exact version of every
+# package (scripts/refresh_constraints.sh), so the same tag installs the same
+# dependencies on any machine, with or without a layer cache. It is passed with
+# -c on each install rather than set as PIP_CONSTRAINT, which would leak into the
+# runtime image.
+COPY requirements.txt requirements-ocr-linux-x86_64.txt requirements-ocr-arm64.txt constraints.txt ./
 COPY scripts/install_ocr_deps.sh ./scripts/install_ocr_deps.sh
 # Local-OCR variant switch:
 #   WITH_LOCAL_OCR=true  (default) — bundle the offline PaddleOCR stack
@@ -70,7 +74,7 @@ LABEL com.readyforai.mantisfetch.local-ocr="${WITH_LOCAL_OCR}"
 # same layer and purge it afterward so the compiler toolchain never ships in the
 # runtime image (keeps it slim + smaller attack surface).
 RUN apt-get update && apt-get install -y --no-install-recommends -o Acquire::Retries=5 -o Acquire::http::Timeout=60 build-essential \
-    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements.txt -c constraints.txt \
     && if [ "$WITH_LOCAL_OCR" = "true" ]; then sh ./scripts/install_ocr_deps.sh; else echo "WITH_LOCAL_OCR=$WITH_LOCAL_OCR — skipping local OCR deps"; fi \
     && apt-get purge -y build-essential \
     && apt-get autoremove -y \

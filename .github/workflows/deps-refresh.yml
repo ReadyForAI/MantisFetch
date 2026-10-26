@@ -1,0 +1,63 @@
+name: deps-refresh
+
+# Once a week, move constraints.txt to the newest versions the requirements
+# allow and put the change up as a PR. Upgrades then arrive through CI, rather
+# than with whichever image rebuild happens to pull them in (FastAPI 0.147 did:
+# #334/#335).
+on:
+  schedule:
+    - cron: "0 1 * * 1" # Monday 01:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    env:
+      BRANCH: deps/refresh
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # The version scripts/refresh_constraints.sh insists on.
+      - run: pip install uv==0.11.1
+
+      - run: scripts/refresh_constraints.sh --upgrade
+
+      - name: Open or update the PR
+        run: |
+          if git diff --quiet -- constraints.txt; then
+            echo "constraints.txt is current"
+            exit 0
+          fi
+          changes="$(git diff -U0 -- constraints.txt | grep -E '^[-+][A-Za-z0-9]' | sed 's/^/    /')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -q -am "chore(deps): refresh constraints.txt"
+          git push -q --force origin "$BRANCH"
+          body="$(printf '%s\n' \
+            "Weekly refresh of \`constraints.txt\` (\`scripts/refresh_constraints.sh --upgrade\`)." \
+            "" \
+            "Pins that moved (- old, + new):" \
+            "" \
+            "$changes" \
+            "" \
+            "CI runs on this PR by dispatch: a PR opened with GITHUB_TOKEN does not fire pull_request. If no \`ci\` check shows up, close and reopen the PR." \
+            "" \
+            "Before merging, read the release notes of anything that moved a minor or major version. A merge changes what the next image build installs.")"
+          number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --body "$body"
+          else
+            gh pr create --head "$BRANCH" --title "chore(deps): refresh constraints.txt" --body "$body"
+          fi
+          gh workflow run ci.yml --ref "$BRANCH"
