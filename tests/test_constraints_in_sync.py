@@ -17,7 +17,7 @@ from packaging.utils import canonicalize_name
 ROOT = Path(__file__).resolve().parents[1]
 # The arm64 OCR file is left out on purpose: it is a dev-only stack that the
 # x86_64 pins contradict (numpy<2, paddlepaddle 2.6.2), and it installs unconstrained.
-REQUIREMENT_FILES = ("requirements.txt", "requirements-ocr-linux-x86_64.txt")
+REQUIREMENT_FILES = ("requirements.txt", "requirements-ocr-linux-x86_64.txt", "requirements-dev.txt")
 
 
 def _requirements(name: str) -> list[Requirement]:

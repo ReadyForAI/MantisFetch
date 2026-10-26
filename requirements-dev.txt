@@ -1,0 +1,5 @@
+# Tools CI runs: the linter and the test runner. Not installed in the image.
+# Pinned with the rest in constraints.txt, so a ruff release that adds rules
+# arrives in the weekly refresh PR instead of turning an unrelated PR red.
+ruff
+pytest

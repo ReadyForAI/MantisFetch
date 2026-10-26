@@ -1,7 +1,8 @@
 name: deps-refresh
 
 # Once a week, move constraints.txt to the newest versions the requirements
-# allow and put the change up as a PR. Upgrades then arrive through CI, rather
+# allow, and the Dockerfile's base image to its tag's current digest, and put
+# the change up as a PR. Upgrades then arrive through CI, rather
 # than with whichever image rebuild happens to pull them in (FastAPI 0.147 did:
 # #334/#335).
 on:
@@ -31,24 +32,33 @@ jobs:
 
       - run: scripts/refresh_constraints.sh --upgrade
 
+      # shell: bash turns on pipefail, so a failing script is not hidden by tee.
+      - shell: bash
+        run: scripts/refresh_base_image.sh | tee "$RUNNER_TEMP/base.txt"
+
       - name: Open or update the PR
         run: |
-          if git diff --quiet -- constraints.txt; then
-            echo "constraints.txt is current"
+          if git diff --quiet -- constraints.txt Dockerfile; then
+            echo "constraints.txt and the base image are current"
             exit 0
           fi
           changes="$(git diff -U0 -- constraints.txt | grep -E '^[-+][A-Za-z0-9]' | sed 's/^/    /')"
+          base="$(tail -n 2 "$RUNNER_TEMP/base.txt" | sed 's/^/    /')"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git commit -q -am "chore(deps): refresh constraints.txt"
+          git commit -q -am "chore(deps): refresh constraints.txt and the base image"
           git push -q --force origin "$BRANCH"
           body="$(printf '%s\n' \
-            "Weekly refresh of \`constraints.txt\` (\`scripts/refresh_constraints.sh --upgrade\`)." \
+            "Weekly refresh of \`constraints.txt\` (\`scripts/refresh_constraints.sh --upgrade\`) and the Dockerfile's base image digest (\`scripts/refresh_base_image.sh\`)." \
             "" \
             "Pins that moved (- old, + new):" \
             "" \
-            "$changes" \
+            "${changes:-    (none)}" \
+            "" \
+            "Base image:" \
+            "" \
+            "$base" \
             "" \
             "**To run CI, close and reopen this PR.** It was opened with GITHUB_TOKEN, which does not fire pull_request, and a dispatched run's checks are not counted toward the required \`ci\` check (tried on #338)." \
             "" \
@@ -57,5 +67,5 @@ jobs:
           if [ -n "$number" ]; then
             gh pr edit "$number" --body "$body"
           else
-            gh pr create --head "$BRANCH" --title "chore(deps): refresh constraints.txt" --body "$body"
+            gh pr create --head "$BRANCH" --title "chore(deps): refresh constraints.txt and the base image" --body "$body"
           fi
