@@ -9,4 +9,8 @@
 # (services/docreader/mantisfetch_docreader/paddle_ocr_worker.py)
 # in the same change, or oneDNN stays off on the newer version and the ~6x is lost.
 paddlepaddle>=3.2.0,<3.3.0
-paddleocr>=3.3.0,<4.0.0
+# Floor at 3.7.0, the version production has run and verified since 2026-07-26.
+# Without it a `refresh_constraints.sh --upgrade` traded it down to 3.4.1 (with
+# paddlex 3.4.3) to fit a newer numpy (2.4.6): the resolver ranks the direct
+# numpy requirement ahead of this one, and CI installs no OCR to notice (#338).
+paddleocr>=3.7.0,<4.0.0
