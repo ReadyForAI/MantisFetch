@@ -12,7 +12,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  actions: write
 
 jobs:
   refresh:
@@ -51,7 +50,7 @@ jobs:
             "" \
             "$changes" \
             "" \
-            "CI runs on this PR by dispatch: a PR opened with GITHUB_TOKEN does not fire pull_request. If no \`ci\` check shows up, close and reopen the PR." \
+            "**To run CI, close and reopen this PR.** It was opened with GITHUB_TOKEN, which does not fire pull_request, and a dispatched run's checks are not counted toward the required \`ci\` check (tried on #338)." \
             "" \
             "Before merging, read the release notes of anything that moved a minor or major version. A merge changes what the next image build installs.")"
           number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
@@ -60,4 +59,3 @@ jobs:
           else
             gh pr create --head "$BRANCH" --title "chore(deps): refresh constraints.txt" --body "$body"
           fi
-          gh workflow run ci.yml --ref "$BRANCH"
