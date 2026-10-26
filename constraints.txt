@@ -269,7 +269,9 @@ pypdfium2==5.13.0
     #   paddlex
     #   pdfplumber
 pytest==9.1.1
-    # via pytest-asyncio
+    # via
+    #   -r requirements-dev.txt
+    #   pytest-asyncio
 pytest-asyncio==1.4.0
     # via -r requirements.txt
 python-bidi==0.6.11
@@ -312,6 +314,8 @@ rpds-py==2026.6.3
     #   referencing
 ruamel-yaml==0.19.1
     # via paddlex
+ruff==0.17.2
+    # via -r requirements-dev.txt
 safetensors==0.8.0
     # via paddlepaddle
 setuptools==79.0.1

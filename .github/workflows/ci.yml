@@ -21,9 +21,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: |
-          pip install ruff pytest
-          pip install -r requirements.txt -c constraints.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
 
       - name: Lint
         run: ruff check .
@@ -51,8 +49,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pytest pytest-asyncio
-          pip install -r requirements.txt -c constraints.txt
+          pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
           python -m playwright install --with-deps chromium
 
       - name: Real-Chromium evaluate smoke

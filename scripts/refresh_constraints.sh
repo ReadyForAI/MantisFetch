@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 # Regenerate constraints.txt: the exact version of every package the image
 # installs (CPython 3.11, Linux x86_64), for requirements.txt and the x86_64 OCR
-# stack together, so a shared package cannot be pinned two ways.
+# stack together, so a shared package cannot be pinned two ways; plus the CI
+# tools in requirements-dev.txt, which the image does not install.
 #
 #   scripts/refresh_constraints.sh            keep existing pins; move only what a
 #                                             changed requirement forces
@@ -21,7 +22,7 @@ if [ "$have" != "$UV_VERSION" ]; then
   exit 1
 fi
 
-uv pip compile requirements.txt requirements-ocr-linux-x86_64.txt \
+uv pip compile requirements.txt requirements-ocr-linux-x86_64.txt requirements-dev.txt \
   --python-version 3.11 \
   --python-platform x86_64-manylinux_2_28 \
   --no-header \
