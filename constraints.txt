@@ -10,7 +10,7 @@ annotated-doc==0.0.5
     # via fastapi
 annotated-types==0.8.0
     # via pydantic
-anyio==4.15.1
+anyio==4.16.0
     # via
     #   google-genai
     #   httpx
@@ -47,7 +47,7 @@ charset-normalizer==3.5.2
     #   markitdown
     #   pdfminer-six
     #   requests
-click==8.5.0
+click==8.5.1
     # via
     #   aistudio-sdk
     #   huggingface-hub
@@ -71,9 +71,9 @@ distro==1.9.0
     # via google-genai
 et-xmlfile==2.0.0
     # via openpyxl
-fastapi==0.162.0
+fastapi==0.162.2
     # via -r requirements.txt
-filelock==4.2.4
+filelock==4.2.9
     # via
     #   huggingface-hub
     #   modelscope
@@ -89,9 +89,9 @@ fsspec==2026.9.0
     # via huggingface-hub
 future==1.0.0
     # via bce-python-sdk
-google-auth==2.62.0
+google-auth==2.62.1
     # via google-genai
-google-genai==2.33.0
+google-genai==3.0.0
     # via -r requirements.txt
 greenlet==3.5.6
     # via playwright
@@ -100,7 +100,7 @@ h11==0.16.0
     #   httpcore
     #   httpcore2
     #   uvicorn
-hf-xet==1.7.0
+hf-xet==1.8.0
     # via huggingface-hub
 httpcore==1.0.9
     # via httpx
@@ -111,14 +111,14 @@ httptools==0.9.0
 httpx==0.28.1
     # via
     #   -r requirements.txt
-    #   google-genai
     #   paddlepaddle
 httpx2==2.16.0
     # via
+    #   google-genai
     #   huggingface-hub
     #   mcp
     #   openai
-huggingface-hub==2.3.0
+huggingface-hub==2.4.0
     # via paddlex
 idna==3.20
     # via
@@ -131,7 +131,7 @@ imagesize==2.0.1
     # via paddlex
 iniconfig==2.3.1
     # via pytest
-jiter==0.18.0
+jiter==0.19.0
     # via openai
 jsonschema==4.26.0
     # via mcp
@@ -156,7 +156,7 @@ mcp-types==2.3.0
     # via mcp
 modelscope==1.40.2
     # via paddlex
-modelscope-hub==0.5.0
+modelscope-hub==0.6.1
     # via modelscope
 multidict==7.2.1
     # via
@@ -177,17 +177,17 @@ numpy==2.3.5
     #   pandas
     #   pymupdf
     #   shapely
-onnxruntime==1.31.0
+onnxruntime==1.31.1
     # via
     #   magika
     #   pymupdf
-openai==3.37.0
+openai==3.46.0
     # via -r requirements.txt
 opencv-contrib-python==4.10.0.84
     # via paddlex
 openpyxl==3.1.5
     # via markitdown
-opentelemetry-api==1.45.1
+opentelemetry-api==1.45.2
     # via
     #   fastapi
     #   mcp
@@ -206,7 +206,7 @@ paddlepaddle==3.2.2
     # via -r requirements-ocr-linux-x86_64.txt
 paddlex==3.7.2
     # via paddleocr
-pandas==3.1.0
+pandas==3.1.1
     # via
     #   markitdown
     #   paddlex
@@ -245,7 +245,7 @@ psutil==7.2.2
     #   pymupdf
 py-cpuinfo==9.0.0
     # via paddlex
-pyasn1==0.6.4
+pyasn1==0.6.5
     # via pyasn1-modules
 pyasn1-modules==0.4.2
     # via google-auth
@@ -253,9 +253,9 @@ pyclipper==1.4.0
     # via paddlex
 pycparser==3.12
     # via cffi
-pycryptodome==4.2.0
+pycryptodome==4.4.0
     # via bce-python-sdk
-pydantic==2.14.1
+pydantic==2.14.3
     # via
     #   fastapi
     #   google-genai
@@ -263,7 +263,7 @@ pydantic==2.14.1
     #   mcp-types
     #   openai
     #   paddlex
-pydantic-core==2.50.1
+pydantic-core==2.50.4
     # via pydantic
 pyee==13.0.1
     # via playwright
@@ -271,29 +271,36 @@ pygments==2.21.0
     # via pytest
 pyjwt==2.15.1
     # via mcp
-pymupdf==2.0
-    # via -r requirements.txt
-pymupdf-layout==2.0
-    # via pymupdf
-pymupdf4llm==2.0
-    # via pymupdf
-pypdfium2==5.14.0
+pymupdf==2.1
+    # via
+    #   -r requirements.txt
+    #   pymupdf-layout
+    #   pymupdf4llm
+pymupdf-layout==2.1
+    # via
+    #   pymupdf
+    #   pymupdf4llm
+pymupdf4llm==2.1
+    # via
+    #   pymupdf
+    #   pymupdf-layout
+pypdfium2==5.15.1
     # via
     #   paddlex
     #   pdfplumber
-pytest==9.1.1
+pytest==9.2.0
     # via
     #   -r requirements-dev.txt
     #   pytest-asyncio
-pytest-asyncio==1.4.1
+pytest-asyncio==1.4.1.post1
     # via -r requirements.txt
 python-bidi==0.6.12
     # via paddlex
-python-dateutil==3.0.0
+python-dateutil==4.0.0
     # via pandas
 python-dotenv==1.2.4
     # via uvicorn
-python-multipart==0.0.32
+python-multipart==0.0.33
     # via
     #   -r requirements.txt
     #   mcp
@@ -326,7 +333,7 @@ rpds-py==2026.9.1
     #   referencing
 ruamel-yaml==0.19.1
     # via paddlex
-ruff==0.17.2
+ruff==0.17.4
     # via -r requirements-dev.txt
 safetensors==0.8.0
     # via paddlepaddle
@@ -338,14 +345,13 @@ six==1.17.0
     # via
     #   bce-python-sdk
     #   markdownify
-    #   python-dateutil
 sniffio==1.3.1
     # via
     #   google-genai
     #   openai
 soupsieve==2.10
     # via beautifulsoup4
-sse-starlette==3.6.0
+sse-starlette==3.7.0
     # via mcp
 starlette==1.10.0
     # via
@@ -391,14 +397,14 @@ typing-extensions==4.16.0
     #   referencing
     #   starlette
     #   typing-inspection
-typing-inspection==0.4.4
+typing-inspection==0.4.5
     # via
     #   fastapi
     #   mcp
     #   pydantic
-tzdata==2026.5
+tzdata==2026.6
     # via python-dateutil
-ujson==6.0.0
+ujson==6.1.0
     # via paddlex
 urllib3==2.8.0
     # via
@@ -415,13 +421,13 @@ watchfiles==1.3.0
     # via uvicorn
 wcwidth==0.9.4
     # via prettytable
-websockets==17.3
+websockets==17.4
     # via
     #   google-genai
     #   uvicorn
 xlrd==2.0.2
     # via markitdown
-xlsxwriter==3.3.0
+xlsxwriter==3.3.1
     # via python-pptx
 yarl==1.25.1
     # via aiohttp
